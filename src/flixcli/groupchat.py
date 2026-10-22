@@ -8,6 +8,7 @@ flixcli groups are managed locally and joined by explicit `group join`.
 """
 from __future__ import annotations
 
+import time
 import uuid
 
 from . import DEVICE_PORT
@@ -45,6 +46,11 @@ async def send_group_text(store, ident, gid_or_name: str, text: str) -> dict:
         except PeerError as e:
             results.append({"to": m, "ok": False, "error": e.kind,
                             "detail": e.detail})
+    if delivered:
+        # sender-side record: each machine's group history then shows the
+        # full thread, not just received halves [RT 2026-10-22, #3 follow-up]
+        b = text_bubble(me, "group", text, group_id=g["id"])
+        store.add_text_bubble(b["id"], me, "group", text, b["time"], g["id"])
     return {"ok": delivered > 0, "group": g["id"], "name": g["name"],
             "delivered": delivered, "total": len(members), "results": results}
 

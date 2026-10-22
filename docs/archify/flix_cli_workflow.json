@@ -114,7 +114,7 @@
    "col": 2,
    "type": "messagebus",
    "label": "群聊服务",
-   "sublabel": "GroupMessage / groupId",
+   "sublabel": "GroupMessage / groupId · 发送留痕",
    "width": 150
   },
   {
