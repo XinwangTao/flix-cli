@@ -125,3 +125,13 @@ python tests/e2e.py         # 双节点 11 项：ping/pair/text/file/group/web/
   TransAction 真名待解。
 - 二维码 payload 为 flixcli 自有 `flix2://` 格式（官方编解码待解）。
 - 合规约束：不复制品牌资源、不绕过付费、不上传敏感数据。
+
+## Windows exe 打包
+
+```powershell
+powershell -File scripts\build_exe.ps1     # 产物：dist\flix.exe、dist\flixd.exe（onefile）
+```
+
+`flixd.exe --device-port 18991 --api-port 18998 --web-port 18992` 即完整守护进程
+（发现/配对/群/文件/剪贴板同步 + 网页界面）；`flix.exe` 含全部 CLI 子命令、
+`mcp`（AI 插件）与 `agent`（AI 自动应答）。状态仍在 `%APPDATA%\flixcli`。
