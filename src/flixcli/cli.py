@@ -53,10 +53,13 @@ async def cmd_discover(args) -> int:
         def on_dev(dev: dict) -> None:
             found.setdefault(dev["fingerprint"], dev)
 
-        disc = Discovery(on_dev)
+        disc = Discovery(on_dev, args.multicast_if)
         if not await disc.start():
-            emit({"error": "udp-bind-failed", "port": DEVICE_PORT}, args.json)
+            emit({"error": "udp-bind-failed", "port": DEVICE_PORT,
+                  "interface": disc.iface}, args.json)
             return 5
+        print(f"[discover] multicast via {disc.iface or 'default interface'}",
+              file=sys.stderr, flush=True)
         try:
             if args.announce:
                 disc.announce(ident, times=2)
@@ -377,7 +380,8 @@ async def cmd_serve(args) -> int:
         return await run_daemon(store, ident, args.device_port, args.api_port,
                                 announce=not args.no_announce,
                                 clip_sync=not args.no_clip_sync,
-                                web_port=args.web_port)
+                                web_port=args.web_port,
+                                multicast_if=args.multicast_if)
     except OSError as e:
         emit({"error": "env", "detail": f"{e}", "hint": "port in use? choose "
                                                         "--device-port/--api-port"}, False)
@@ -411,6 +415,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--timeout", type=float, default=5.0)
     p.add_argument("--announce", action="store_true",
                    help="also multicast our own announce (2 packets)")
+    p.add_argument("--multicast-if", default=None, metavar="IP",
+                   help="interface IP for discovery multicast (default: auto)")
 
     p = add("send-text", "send a text bubble to a device (ip[:port] or fingerprint)",
             cmd_send_text)
@@ -500,6 +506,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="disable auto clipboard sync to paired devices")
     p.add_argument("--web-port", type=int, default=0,
                    help="enable the web send page on this port (e.g. 18992)")
+    p.add_argument("--multicast-if", default=None, metavar="IP",
+                   help="interface IP for discovery multicast (default: auto)")
     p.set_defaults(fn=cmd_serve)
 
     args = ap.parse_args(argv)

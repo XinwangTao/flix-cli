@@ -18,6 +18,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--device-port", type=int, default=DEVICE_PORT)
     ap.add_argument("--api-port", type=int, default=DESKTOP_API_PORT)
     ap.add_argument("--alias", default=None, help="override device alias")
+    ap.add_argument("--multicast-if", default=None, metavar="IP",
+                    help="interface IP for discovery multicast (default: auto)")
     ap.add_argument("--no-announce", action="store_true",
                     help="listen only; do not burst announces at startup")
     args = ap.parse_args(argv)
@@ -29,7 +31,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         return asyncio.run(run_daemon(store, ident, args.device_port, args.api_port,
-                                      announce=not args.no_announce))
+                                      announce=not args.no_announce,
+                                      multicast_if=args.multicast_if))
     except OSError as e:
         print(f"flixd: environment error: {e}", file=sys.stderr)
         return 5

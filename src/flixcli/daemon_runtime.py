@@ -85,7 +85,7 @@ async def clip_sync_loop(store, ident: dict, state: dict,
 
 async def run_daemon(store, ident, device_port: int, api_port: int,
                      announce: bool = True, clip_sync: bool = True,
-                     web_port: int = 0) -> int:
+                     web_port: int = 0, multicast_if: str | None = None) -> int:
     devices: dict[str, dict] = {}
 
     def on_device(dev: dict) -> None:
@@ -189,8 +189,11 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
         pin = store.own_web_pin()
         print(f"[flixd] web send page on http://0.0.0.0:{web_port}  PIN: {pin}",
               file=sys.stderr)
-    disc = Discovery(on_device)
+    disc = Discovery(on_device, multicast_if)
     bound = await disc.start()
+    if bound:
+        print(f"[flixd] discovery multicast via {disc.iface or 'default interface'}",
+              file=sys.stderr, flush=True)
     if announce and bound:
         disc.announce(ident, port=device_port)
         await asyncio.sleep(0.5)
