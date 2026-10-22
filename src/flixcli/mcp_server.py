@@ -381,9 +381,9 @@ def serve() -> int:
 def main() -> int:
     # stdio transport is UTF-8 per MCP spec; the Windows console default (cp936
     # here) would mojibake Chinese args and emit invalid bytes for U+2014.
-    for stream in (sys.stdin, sys.stdout):
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(encoding="utf-8")
+            stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, OSError):
             pass
     try:

@@ -387,6 +387,14 @@ async def cmd_serve(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windows consoles default to a legacy codepage (cp936 here); Chinese
+    # payloads would raise UnicodeEncodeError. Keep bytes UTF-8 for pipes and
+    # replace unrepresentable chars on a real console instead of crashing.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError):
+            pass
     ap = argparse.ArgumentParser(prog="flix", description="Flix-compatible CLI")
     ap.add_argument("--version", action="version", version=f"flix {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
