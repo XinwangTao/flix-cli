@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>flix agent：AI 自动应答器（L1 变更图）</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #2b3040; --text: #e7eaf0;
+    --muted: #98a0b3; --cyan: #37c2d8; --emerald: #3fbf7f; --rose: #e0646d;
+    --amber: #d9a13b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 36px 56px; background: var(--bg); color: var(--text);
+    font: 14px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  h1 { font-size: 20px; margin: 0 0 6px; letter-spacing: .2px; }
+  .meta { color: var(--muted); font-size: 12px; margin-bottom: 24px; }
+  .board { position: relative; background: var(--panel); border: 1px solid var(--line);
+           border-radius: 12px; padding: 18px 22px 22px; }
+  .lanes { display: flex; flex-direction: column; gap: 12px; }
+  .lane { display: flex; align-items: center; gap: 14px; }
+  .lane-label { width: 118px; flex: none; color: var(--muted); font-size: 12px;
+                text-align: right; letter-spacing: .3px; }
+  .lane-track { flex: 1; display: grid; grid-template-columns: repeat(5, 1fr);
+                gap: 12px; align-items: center; min-height: 78px; }
+  .node { position: relative; z-index: 2; background: #1e222c; border: 1px solid var(--line);
+          border-left: 3px solid var(--cyan); border-radius: 8px; padding: 9px 11px;
+          min-height: 56px; }
+  .node .label { font-weight: 600; font-size: 13px; }
+  .node .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .node.security { border-left-color: var(--rose); }
+  .node.external { border-left-color: var(--amber); }
+  .node.backend { border-left-color: var(--emerald); }
+  .node.messagebus { border-left-color: var(--cyan); }
+  .edge-layer { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+           gap: 14px; margin-top: 26px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+          padding: 14px 16px; }
+  .card h2 { font-size: 13px; margin: 0 0 8px; display: flex; align-items: center; gap: 8px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .dot.cyan { background: var(--cyan); } .dot.rose { background: var(--rose); }
+  .dot.emerald { background: var(--emerald); } .dot.amber { background: var(--amber); }
+  .card li { color: var(--muted); font-size: 12px; margin: 3px 0; }
+  .legend { margin-top: 18px; color: var(--muted); font-size: 11px; }
+  .legend span { margin-right: 16px; }
+</style>
+</head>
+<body>
+<h1 id="title"></h1>
+<div class="meta" id="meta"></div>
+<div class="board">
+  <div class="lanes" id="lanes"></div>
+  <svg class="edge-layer" id="edges"></svg>
+</div>
+<div class="cards" id="cards"></div>
+<div class="legend">
+  <span>粗线 = 主路径</span><span>虚线 = 旁路/告警</span><span>红线 = 丢弃/失败</span>
+</div>
+
+<script type="application/json" id="spec">
+{
+ "schema_version": 2,
+ "diagram_type": "workflow",
+ "meta": {
+  "title": "flix agent：AI 自动应答器（L1 变更图）",
+  "locale": "zh-CN",
+  "quality_profile": "minimal",
+  "status": "confirmed-by-repo-owner 2026-10-22 (PR #5 merge)"
+ },
+ "lanes": [
+  { "id": "agent", "label": "flix agent" },
+  { "id": "ai", "label": "外部 AI 命令" },
+  { "id": "exceptions", "label": "失败与人工出口", "variant": "exception" }
+ ],
+ "mainPath": ["poll", "guard", "cmd", "send", "cursor"],
+ "nodes": [
+  { "id": "poll", "lane": "agent", "col": 0, "type": "frontend",
+    "label": "收件轮询", "sublabel": "bubbles since cursor", "width": 156 },
+  { "id": "guard", "lane": "agent", "col": 1, "type": "security",
+    "label": "护栏判定", "sublabel": "配对 / 前缀 / 限速 / 深度", "width": 168 },
+  { "id": "cmd", "lane": "ai", "col": 2, "type": "external",
+    "label": "--cmd 自定义命令", "sublabel": "stdin JSON → stdout 文本", "width": 176 },
+  { "id": "send", "lane": "agent", "col": 3, "type": "backend",
+    "label": "回发", "sublabel": "group send / send-text", "width": 158 },
+  { "id": "cursor", "lane": "agent", "col": 4, "type": "backend",
+    "label": "游标推进 + 日志", "sublabel": "agent.log / 去重", "width": 156 },
+  { "id": "drop", "lane": "exceptions", "col": 1, "type": "security",
+    "label": "丢弃", "sublabel": "未配对 / 自激 / 超频", "width": 150 },
+  { "id": "fail", "lane": "exceptions", "col": 2, "type": "security",
+    "label": "调用失败 / 超时", "sublabel": "记日志，不重发", "width": 156 },
+  { "id": "human", "lane": "exceptions", "col": 4, "type": "external",
+    "label": "人工介入", "sublabel": "读 agent.log 后手工回", "width": 158 }
+ ],
+ "edges": [
+  { "from": "poll", "to": "guard", "label": "新气泡", "variant": "emphasis", "role": "main" },
+  { "from": "guard", "to": "cmd", "label": "通过", "role": "main" },
+  { "from": "guard", "to": "drop", "label": "未配对 / 带本机前缀 / 超频", "variant": "security", "role": "error" },
+  { "from": "cmd", "to": "send", "label": "stdout 文本", "role": "main" },
+  { "from": "cmd", "to": "fail", "label": "非零退出 / 超时", "variant": "security", "role": "error" },
+  { "from": "fail", "to": "cursor", "label": "跳过并推进", "variant": "dashed" },
+  { "from": "fail", "to": "human", "label": "告警", "variant": "dashed" },
+  { "from": "send", "to": "cursor", "label": "已投递", "role": "main" }
+ ],
+ "cards": [
+  { "dot": "cyan", "title": "输入契约（stdin JSON）",
+    "items": [
+      "from / alias / groupId / text / bubbleId / time",
+      "环境变量：FLIX_SELF_FP、FLIX_SELF_ALIAS",
+      "空 stdout = 不回；非零退出 = 失败不重发"
+    ] },
+  { "dot": "rose", "title": "护栏默认值（防自激）",
+    "items": [
+      "只回已配对（pair_devices）设备",
+      "跳过本机前缀消息（默认 [A-AI]，可 --prefix 改）",
+      "同一对端 ≥30s 才允许一次回复",
+      "链式深度 ≥2 跳即停"
+    ] },
+  { "dot": "emerald", "title": "边界",
+    "items": [
+      "不做发现/配对，只消费 flixd 已收气泡",
+      "不改线格式，不发新类型气泡",
+      "无网络可达时退回记录，不阻塞 flixd"
+    ] }
+ ]
+}
+</script>
+
+<script>
+(function () {
+  var spec = JSON.parse(document.getElementById('spec').textContent);
+  document.getElementById('title').textContent = spec.meta.title;
+  document.getElementById('meta').textContent =
+    spec.diagram_type + ' · ' + spec.meta.locale + ' · ' +
+    spec.nodes.length + ' 节点 / ' + spec.edges.length + ' 边 · ' +
+    (spec.meta.status || '');
+
+  var laneOrder = spec.lanes.map(function (l) { return l.id; });
+  var lanesEl = document.getElementById('lanes');
+  var nodeEls = {};
+
+  spec.lanes.forEach(function (lane) {
+    var row = document.createElement('div');
+    row.className = 'lane';
+    var lab = document.createElement('div');
+    lab.className = 'lane-label';
+    lab.textContent = lane.label;
+    var track = document.createElement('div');
+    track.className = 'lane-track';
+    row.appendChild(lab);
+    row.appendChild(track);
+    lanesEl.appendChild(row);
+    lane.track = track;
+  });
+
+  spec.nodes.forEach(function (n) {
+    var el = document.createElement('div');
+    el.className = 'node ' + n.type;
+    el.style.gridColumn = (n.col + 1);
+    el.innerHTML = '<div class="label"></div><div class="sub"></div>';
+    el.querySelector('.label').textContent = n.label;
+    el.querySelector('.sub').textContent = n.sublabel || '';
+    var lane = spec.lanes.filter(function (l) { return l.id === n.lane; })[0];
+    lane.track.appendChild(el);
+    nodeEls[n.id] = el;
+  });
+
+  var svg = document.getElementById('edges');
+  function draw() {
+    var board = document.querySelector('.board').getBoundingClientRect();
+    svg.setAttribute('width', board.width);
+    svg.setAttribute('height', board.height);
+    svg.setAttribute('viewBox', '0 0 ' + board.width + ' ' + board.height);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    spec.edges.forEach(function (e) {
+      var a = nodeEls[e.from], b = nodeEls[e.to];
+      if (!a || !b) return;
+      var ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+      var x1 = ra.left - board.left, y1 = ra.top - board.top;
+      var x2 = rb.left - board.left, y2 = rb.top - board.top;
+      var down = Math.abs(y2 - y1) > 20;
+      var sx = x1 + ra.width / 2, sy = y1 + (y2 > y1 ? ra.height : 0);
+      var ex = x2 + rb.width / 2, ey = y2 + (y2 > y1 ? 0 : rb.height);
+      var mx = (sx + ex) / 2, my = (sy + ey) / 2;
+      var d = down
+        ? 'M' + sx + ',' + sy + ' C' + sx + ',' + my + ' ' + ex + ',' + my + ' ' + ex + ',' + ey
+        : 'M' + (x1 + ra.width) + ',' + (y1 + ra.height / 2) + ' C' + mx + ',' + (y1 + ra.height / 2) +
+          ' ' + mx + ',' + (y2 + rb.height / 2) + ' ' + x2 + ',' + (y2 + rb.height / 2);
+      var color = e.variant === 'security' ? 'var(--rose)'
+                : e.variant === 'dashed' ? 'var(--muted)' : 'var(--cyan)';
+      var p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      p.setAttribute('d', d);
+      p.setAttribute('fill', 'none');
+      p.setAttribute('stroke', color);
+      p.setAttribute('stroke-width', e.variant === 'emphasis' ? 2.4 : 1.4);
+      p.setAttribute('stroke-dasharray', e.variant === 'dashed' ? '5 4' : 'none');
+      p.setAttribute('marker-end', 'url(#arrow)');
+      svg.appendChild(p);
+
+      var t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      t.setAttribute('x', down ? ex + 6 : mx);
+      t.setAttribute('y', down ? ey - 6 : my - 6);
+      t.setAttribute('fill', '#98a0b3');
+      t.setAttribute('font-size', '10');
+      t.textContent = e.label;
+      svg.appendChild(t);
+    });
+
+    var defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+    defs.innerHTML = '<marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" ' +
+      'markerWidth="6" markerHeight="6" orient="auto-start-reverse">' +
+      '<path d="M0,0 L10,5 L0,10 z" fill="#98a0b3"></path></marker>';
+    svg.appendChild(defs);
+  }
+
+  var cards = document.getElementById('cards');
+  spec.cards.forEach(function (c) {
+    var el = document.createElement('div');
+    el.className = 'card';
+    var h = document.createElement('h2');
+    h.innerHTML = '<span class="dot ' + c.dot + '"></span>';
+    h.appendChild(document.createTextNode(c.title));
+    el.appendChild(h);
+    var ul = document.createElement('ul');
+    ul.style.margin = '0'; ul.style.paddingLeft = '18px';
+    c.items.forEach(function (i) {
+      var li = document.createElement('li'); li.textContent = i; ul.appendChild(li);
+    });
+    el.appendChild(ul);
+    cards.appendChild(el);
+  });
+
+  window.addEventListener('load', draw);
+  window.addEventListener('resize', draw);
+})();
+</script>
+</body>
+</html>
