@@ -379,6 +379,11 @@ def cmd_agent(args) -> int:
     return agent_main(args)
 
 
+def cmd_ui(args) -> int:
+    from . import ui
+    return ui.main(args)
+
+
 def cmd_mcp(args) -> int:
     from .mcp_server import main as mcp_main
     return mcp_main()
@@ -510,6 +515,10 @@ def main(argv: list[str] | None = None) -> int:
     p = gadd("history", "show recent group bubbles", cmd_group_history)
     p.add_argument("group")
     p.add_argument("--limit", type=int, default=50)
+
+    p = sub.add_parser("ui", help="native desktop window for group chats")
+    p.add_argument("--group", default=None, help="group name to open")
+    p.set_defaults(fn=cmd_ui)
 
     p = sub.add_parser("mcp", help="run the MCP stdio server (for AI clients)")
     p.set_defaults(fn=cmd_mcp)
