@@ -22,6 +22,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="interface IP for discovery multicast (default: auto)")
     ap.add_argument("--no-announce", action="store_true",
                     help="listen only; do not burst announces at startup")
+    ap.add_argument("--no-clip-sync", action="store_true",
+                    help="disable automatic clipboard sync to paired devices")
+    ap.add_argument("--web-port", type=int, default=0, metavar="PORT",
+                    help="also serve the browser send page on this port")
     args = ap.parse_args(argv)
 
     store = Store()
@@ -32,6 +36,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return asyncio.run(run_daemon(store, ident, args.device_port, args.api_port,
                                       announce=not args.no_announce,
+                                      clip_sync=not args.no_clip_sync,
+                                      web_port=args.web_port,
                                       multicast_if=args.multicast_if))
     except OSError as e:
         print(f"flixd: environment error: {e}", file=sys.stderr)

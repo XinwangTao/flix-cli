@@ -48,7 +48,7 @@ flixd                       # 常驻：设备通道 8891 + Desktop API 8898（�
                             "args": ["mcp"] } } }
 ```
 
-工具（16）：flix_self / flix_discover / flix_devices / flix_probe / flix_send_text /
+工具（15）：flix_self / flix_discover / flix_devices / flix_probe / flix_send_text /
 flix_send_clipboard / flix_send_files / flix_bubbles / flix_group_list /
 flix_group_create / flix_group_add / flix_group_send / flix_group_history /
 flix_pair / flix_status。
