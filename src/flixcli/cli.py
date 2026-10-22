@@ -374,6 +374,11 @@ def cmd_group_history(args) -> int:
         store.close()
 
 
+def cmd_agent(args) -> int:
+    from .agent import main as agent_main
+    return agent_main(args)
+
+
 def cmd_mcp(args) -> int:
     from .mcp_server import main as mcp_main
     return mcp_main()
@@ -508,6 +513,24 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("mcp", help="run the MCP stdio server (for AI clients)")
     p.set_defaults(fn=cmd_mcp)
+
+    p = sub.add_parser("agent", help="auto-answer incoming bubbles with a command")
+    p.add_argument("--cmd", required=True,
+                   help="run per message: JSON on stdin, reply text on stdout")
+    p.add_argument("--interval", type=float, default=2.0,
+                   help="poll interval in seconds")
+    p.add_argument("--prefix", default="[A-AI]",
+                   help="our reply prefix; messages starting with it are ignored")
+    p.add_argument("--min-gap", type=float, default=30.0,
+                   help="seconds between replies to the same peer")
+    p.add_argument("--max-hop", type=int, default=2,
+                   help="stop replying once the hop counter reaches this")
+    p.add_argument("--timeout", type=float, default=60.0,
+                   help="per-command timeout in seconds")
+    p.add_argument("--once", action="store_true", help="one pass, then exit")
+    p.add_argument("--dry-run", action="store_true",
+                   help="log the reply instead of sending it")
+    p.set_defaults(fn=cmd_agent)
 
     p = sub.add_parser("serve", help="run the resident daemon (same as flixd)")
     p.add_argument("--device-port", type=int, default=DEVICE_PORT)

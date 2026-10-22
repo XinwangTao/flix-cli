@@ -35,7 +35,8 @@ flixd                       # 常驻：设备通道 8891 + Desktop API 8898（�
 | 剪贴板自动同步（官方 sendClipboard 语义） | flixd 内置（`--no-clip-sync` 关） | — | ✅ 官方实测到达 |
 | 群组（本地群表 + bubble+groupId 逐发） | `flix group create/add/join/leave/list/send/history` | flix_group_* | ✅ 官方可收 |
 | 配对二维码 | `flix qrcode [--decode]`（flix2:// payload） | — | flixcli 间 |
-| Web 发送页（validate-code→/&lt;pin&gt;→ws+/upload） | `flixd --web-port 18992` | — | 协议对齐官方 8892 |
+| 自动应答（轮询收件 → `--cmd` → 回发，带防自激护栏） | `flix agent --cmd "…"` | — | — |
+| Web 发送页（validate-code→/&lt;pin&gt;→ws+/upload） | `flix serve --web-port 18992` | — | 协议对齐官方 8892 |
 | WebRTC 信令面（offer/answer/ice/hangup） | REST `/webrtc/signal`、`/api/webrtc/*` | — | flixcli 间 [compat] |
 | Desktop API（self/devices/settings/events SSE/send-text） | `http://127.0.0.1:8898` | flix_status | 形状对齐 |
 
@@ -48,7 +49,7 @@ flixd                       # 常驻：设备通道 8891 + Desktop API 8898（�
                             "args": ["mcp"] } } }
 ```
 
-工具（16）：flix_self / flix_discover / flix_devices / flix_probe / flix_send_text /
+工具（15）：flix_self / flix_discover / flix_devices / flix_probe / flix_send_text /
 flix_send_clipboard / flix_send_files / flix_bubbles / flix_group_list /
 flix_group_create / flix_group_add / flix_group_send / flix_group_history /
 flix_pair / flix_status。
@@ -62,6 +63,27 @@ flix_group_create "ops" → flix_group_add ops <fp2> …        # 多设备群
 flix_group_send ops "广播指令"                               # AI 群发
 flix_bubbles                                                # 读收件
 ```
+
+## 自动应答（flix agent）
+
+`flix mcp` 是被动的：AI 会话被唤醒才会收发。要无人值守地互相应答，用 `flix agent`——
+轮询收件、把新消息交给任意命令、把命令的 stdout 回给对方：
+
+```bash
+flix agent --cmd "F:\my-ai\reply.bat" --prefix "[A-AI]"
+```
+
+- **输入**：JSON 走 stdin（`id / from / groupId / text / time / hop`），另给
+  `FLIX_SELF_FP`、`FLIX_SELF_ALIAS` 两个环境变量；
+- **输出**：stdout 原样作为回复（自动加 `--prefix` 和 `[[hop=N]]` 标记）；空输出 = 不回，
+  非零退出 = 记失败不重发；
+- **路由**：带 `groupId` 的回群，否则回给发送方（需要该设备已 `pair` 过）；
+- **护栏**（防两个 agent 无限对喷）：只回已配对设备、跳过带本机前缀的消息、
+  同一对端默认 ≥30 s 一次（`--min-gap`）、链式默认 ≥2 跳即停（`--max-hop`）；
+- 状态在 `%APPDATA%\flixcli\agent_state.json`，日志在 `agent.log`；`--once` 单轮、
+  `--dry-run` 只记录不发送，便于调试。
+
+流程真源：`docs/archify/flix_agent_workflow.html`（旁路 `.json`）。
 
 ## 回归测试
 
