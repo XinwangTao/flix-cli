@@ -20,7 +20,7 @@ import socket
 import sys
 from typing import Callable
 
-from . import ANNOUNCE_BURST, DEVICE_PORT, MULTICAST_GROUP
+from . import ANNOUNCE_BURST, DEVICE_PORT, MULTICAST_GROUP, default_iface_ip
 
 
 def build_announce(ident: dict, port: int = DEVICE_PORT, app_version: int = 1) -> bytes:
@@ -61,10 +61,16 @@ def parse_datagram(data: bytes, src_ip: str) -> dict | None:
 
 
 class Discovery:
-    """Listens for announces and can burst our own."""
+    """Listens for announces and can burst our own.
 
-    def __init__(self, on_device: Callable[[dict], None]):
+    iface_ip pins the multicast interface (join + send). None auto-detects via
+    default_iface_ip(), which avoids VPN/virtual /32 adapters stealing the route.
+    """
+
+    def __init__(self, on_device: Callable[[dict], None],
+                 iface_ip: str | None = None):
         self.on_device = on_device
+        self.iface = iface_ip or default_iface_ip() or None
         self.transport: asyncio.DatagramTransport | None = None
         self.bound = False
 
@@ -72,7 +78,8 @@ class Discovery:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(("", DEVICE_PORT))
-        mreq = socket.inet_aton(MULTICAST_GROUP) + socket.inet_aton("0.0.0.0")
+        mreq = (socket.inet_aton(MULTICAST_GROUP)
+                + socket.inet_aton(self.iface or "0.0.0.0"))
         s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
         s.setblocking(False)
         return s
@@ -82,7 +89,8 @@ class Discovery:
         try:
             sock = self._open()
         except OSError as e:
-            print(f"[discovery] cannot bind UDP {DEVICE_PORT}: {e}",
+            print(f"[discovery] cannot bind UDP {DEVICE_PORT}"
+                  f" (interface {self.iface or 'default'}): {e}",
                   file=sys.stderr, flush=True)
             return False
         self.transport, _ = await loop.create_datagram_endpoint(
@@ -96,6 +104,9 @@ class Discovery:
         tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             tx.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 8)
+            if self.iface:
+                tx.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
+                              socket.inet_aton(self.iface))
             for _ in range(times):
                 tx.sendto(payload, (MULTICAST_GROUP, DEVICE_PORT))
         finally:

@@ -16,6 +16,11 @@ flixd                       # 常驻：设备通道 8891 + Desktop API 8898（�
 
 与官方客户端同机共存：`flixd --device-port 18991 --api-port 18998`。
 
+发现组播默认走系统路由选中的网卡，并跳过回环/APIPA 与 **/32 虚拟网卡**（VPN 网关如 `vgate0`
+常是 /32，会抢走组播路由导致 announce 发到无对端的虚拟链路）。需要指定时用
+`--multicast-if 192.168.1.23`（`flix discover` / `flixd` / `flix serve` 均支持），或设
+环境变量 `FLIX_MULTICAST_IF`；启动日志会打印实际使用的网卡。
+
 ## 功能矩阵
 
 | 功能 | CLI | MCP 工具 | 官方互通 |
