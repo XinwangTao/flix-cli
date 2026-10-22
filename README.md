@@ -21,6 +21,10 @@ flixd                       # 常驻：设备通道 8891 + Desktop API 8898（�
 `--multicast-if 192.168.1.23`（`flix discover` / `flixd` / `flix serve` 均支持），或设
 环境变量 `FLIX_MULTICAST_IF`；启动日志会打印实际使用的网卡。
 
+announce 同时以**局域网广播兜底**（子网定向 + 255.255.255.255，端口不变）：部分企业安全代理
+（Tencent iOA、Sangfor 等内核 callout）会在协议栈内吞掉全部出站多播（pktmon 实证），广播是
+这类网络上唯一能出卡的 announce；flixcli 间发现不受影响，官方客户端是否接受广播未证实。
+
 ## 功能矩阵
 
 | 功能 | CLI | MCP 工具 | 官方互通 |

@@ -36,13 +36,16 @@ def _win_ipv4_table() -> list[tuple[str, str]]:
         if fn(None, ctypes.byref(size), False) not in (0, 122):  # INSUFFICIENT_BUFFER
             return []
         buf = ctypes.create_string_buffer(size.value)
-        table = ctypes.cast(buf, ctypes.POINTER(_Table))
-        if fn(table, ctypes.byref(size), False) != 0:
+        if fn(buf, ctypes.byref(size), False) != 0:
             return []
-        rows = table.contents
-        return [(socket.inet_ntoa(struct.pack("<I", rows.table[i].dwAddr)),
-                 socket.inet_ntoa(struct.pack("<I", rows.table[i].dwMask)))
-                for i in range(rows.dwNumEntries)]
+        # The row count is a runtime value; cast the payload as a flat _Row
+        # pointer instead of a fixed-size array (multi-address hosts would
+        # otherwise raise IndexError past the declared _Row * 1 field).
+        count = ctypes.cast(buf, ctypes.POINTER(wintypes.DWORD)).contents.value
+        rows = ctypes.cast(ctypes.byref(buf, 4), ctypes.POINTER(_Row))
+        return [(socket.inet_ntoa(struct.pack("<I", rows[i].dwAddr)),
+                 socket.inet_ntoa(struct.pack("<I", rows[i].dwMask)))
+                for i in range(count)]
     except Exception:  # noqa: BLE001 - best effort, fall back to the route trick
         return []
 

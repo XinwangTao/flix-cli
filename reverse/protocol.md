@@ -24,6 +24,12 @@
   无 mDNS 服务（zeroconf browse 仅见打印机）[RT]。
   对运行中的对端，发现靠持久化设备探测（TCP 8891 GET / → 404 "Route not found"）。
 - 未观察到官方对我们 announce 的任何应答 [RT]。
+- flixcli 实现附加（非官方行为）：announce 在组播之外同发局域网广播
+  （子网定向 + 255.255.255.255，dst 端口仍 8891）。动机：部分企业安全代理
+  （Tencent iOA / Sangfor 等 callout 驱动）会在协议栈内静默吞掉**全部出站
+  IPv4 多播**（pktmon 实证 Tx=0，单播/广播不受影响）[RT 2026-10-22]；
+  flixcli 的发现 socket bind 0.0.0.0:8891，广播可正常兜底（flixcli↔flixcli）。
+  官方客户端是否接受广播 dst 未证实（官方 db 未见广播探针落库）。
 
 ## 2. 设备通道（TCP 8891，明文 HTTP/1.1，Dart/3.10 UA，shelf_router）——已确认
 

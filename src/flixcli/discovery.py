@@ -15,12 +15,15 @@ mDNS service; already-running peers are found by probing TCP 8891.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import socket
+import struct
 import sys
 from typing import Callable
 
-from . import ANNOUNCE_BURST, DEVICE_PORT, MULTICAST_GROUP, default_iface_ip
+from . import (ANNOUNCE_BURST, DEVICE_PORT, MULTICAST_GROUP, _win_ipv4_table,
+               default_iface_ip)
 
 
 def build_announce(ident: dict, port: int = DEVICE_PORT, app_version: int = 1) -> bytes:
@@ -65,6 +68,12 @@ class Discovery:
 
     iface_ip pins the multicast interface (join + send). None auto-detects via
     default_iface_ip(), which avoids VPN/virtual /32 adapters stealing the route.
+
+    Announces also go out as LAN broadcast (subnet-directed + 255.255.255.255):
+    on hosts whose security agents silently swallow outbound multicast [RT
+    2026-10-22, pktmon Tx=0] this is the only emission that reaches the NIC.
+    Receivers bind 0.0.0.0:DEVICE_PORT for discovery, so they pick broadcasts
+    up without any change; duplicates are deduped per fingerprint.
     """
 
     def __init__(self, on_device: Callable[[dict], None],
@@ -98,6 +107,24 @@ class Discovery:
         self.bound = True
         return True
 
+    def _broadcast_addrs(self) -> list[str]:
+        """Subnet-directed broadcast first (pinned to the multicast NIC), then
+        the limited broadcast as a catch-all."""
+        addrs: list[str] = []
+        if self.iface:
+            try:
+                n = struct.unpack(">I", socket.inet_aton(self.iface))[0]
+                for ip, mask in _win_ipv4_table():
+                    if ip == self.iface and mask != "255.255.255.255":
+                        m = struct.unpack(">I", socket.inet_aton(mask))[0]
+                        addrs.append(socket.inet_ntoa(
+                            struct.pack(">I", n | (~m & 0xFFFFFFFF))))
+                        break
+            except OSError:
+                pass
+        addrs.append("255.255.255.255")
+        return addrs
+
     def announce(self, ident: dict, times: int = ANNOUNCE_BURST,
                  port: int = DEVICE_PORT) -> None:
         payload = build_announce(ident, port=port)
@@ -107,8 +134,16 @@ class Discovery:
             if self.iface:
                 tx.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
                               socket.inet_aton(self.iface))
+            tx.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            # Wire dst port is DEVICE_PORT [RT capture_discovery.txt]: every
+            # listener (official + flixcli) binds 8891 for discovery regardless
+            # of its TCP channel port; `port` only labels the payload modal.
+            targets = [(MULTICAST_GROUP, DEVICE_PORT)]
+            targets += [(bc, DEVICE_PORT) for bc in self._broadcast_addrs()]
             for _ in range(times):
-                tx.sendto(payload, (MULTICAST_GROUP, DEVICE_PORT))
+                for dst in targets:
+                    with contextlib.suppress(OSError):
+                        tx.sendto(payload, dst)
         finally:
             tx.close()
 

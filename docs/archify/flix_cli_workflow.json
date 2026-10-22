@@ -60,7 +60,7 @@
    "col": 1,
    "type": "messagebus",
    "label": "UDP 组播发现",
-   "sublabel": "224.0.0.168 :8891",
+   "sublabel": "224.0.0.168+广播 :8891",
    "width": 156
   },
   {
