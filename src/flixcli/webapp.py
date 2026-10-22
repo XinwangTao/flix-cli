@@ -83,7 +83,7 @@ document.getElementById('file').addEventListener('change', async e=>{
   for (const f of e.target.files) {
     const fd = new FormData(); fd.append('file', f); fd.append('pin', PIN);
     if (to) fd.append('to', to);
-    const r = await fetch('/upload', {method:'POST', body: fd});
+    const r = await fetch('/upload?pin=' + PIN, {method:'POST', body: fd});
     const j = await r.json().catch(()=>({}));
     add(f.name + (r.ok ? ' ✓' : ' ✗') + (to && j.ok ? ' → 已转发设备' : ''), !!to,
         to ? '发往所选设备' : '本机');
