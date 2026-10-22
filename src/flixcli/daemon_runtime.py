@@ -181,7 +181,8 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
                              "payload": {"bubbleId": b["id"], "type": "text"}})
 
         wapp, _push = make_web_app(store, ident, _on_web_text, _save_dir,
-                                   channel_port=device_port)
+                                   channel_port=device_port,
+                                   send_text_fn=send_text)
         wr = _web.AppRunner(wapp)
         await wr.setup()
         await _web.TCPSite(wr, "0.0.0.0", web_port).start()

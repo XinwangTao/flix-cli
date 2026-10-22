@@ -19,7 +19,9 @@ from typing import Callable
 from aiohttp import WSMsgType, web
 
 PAGE = """<!doctype html>
-<html lang="zh"><head><meta charset="utf-8"><title>Flix 网页版</title>
+<html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flix 网页版</title>
 <style>
 body{font-family:system-ui;background:#111;color:#eee;margin:0;display:flex;
 flex-direction:column;height:100vh}
@@ -27,15 +29,18 @@ flex-direction:column;height:100vh}
 .bubble{max-width:70%;padding:8px 12px;border-radius:10px;word-break:break-all}
 .left{background:#2a2a2a;align-self:flex-start}
 .right{background:#0a84ff;align-self:flex-end}
-.footer{display:flex;gap:8px;padding:12px;border-top:1px solid #333}
-.footer input[type=text]{flex:1;padding:10px;border-radius:5px;border:1px solid #ccc;
-background:#1c1c1c;color:#eee;font-size:16px}
+.meta{font-size:11px;opacity:.6;margin-bottom:2px}
+.footer{display:flex;gap:8px;padding:12px;border-top:1px solid #333;flex-wrap:wrap}
+.footer input[type=text]{flex:1;min-width:140px;padding:10px;border-radius:5px;
+border:1px solid #ccc;background:#1c1c1c;color:#eee;font-size:16px}
+select,input[type=file]{padding:8px;border-radius:5px;background:#1c1c1c;color:#eee}
 button{padding:10px 20px;border:none;border-radius:5px;background:#007bff;
 color:#fff;font-size:15px;cursor:pointer}
 </style></head><body>
 <div class="chat" id="chat"></div>
 <div class="footer">
-<input type="text" id="msg" placeholder="发送到本机…" autofocus>
+<select id="dev"><option value="">本机</option></select>
+<input type="text" id="msg" placeholder="消息…（选设备=发给该设备）" autofocus>
 <input type="file" id="file" multiple style="display:none">
 <button onclick="document.getElementById('file').click()">文件</button>
 <button id="send">发送</button>
@@ -45,20 +50,43 @@ style="color:#7ab8ff">群聊视图 →</a></p>
 <script>
 document.getElementById('glink').href =
   '/group?pin=' + location.pathname.slice(1);
+const PIN = location.pathname.slice(1);
+fetch('/devices?pin=' + PIN).then(r => r.json()).then(j => {
+  const sel = document.getElementById('dev');
+  for (const d of j.devices) {
+    const o = document.createElement('option');
+    o.value = d.fingerprint; o.textContent = d.alias || d.fingerprint.slice(0, 8);
+    sel.appendChild(o);
+  }
+});
 const ws = new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');
 const chat = document.getElementById('chat');
-function add(t, right){const d=document.createElement('div');d.className='bubble '+(right?'right':'left');
-d.textContent=t;chat.appendChild(d);chat.scrollTop=chat.scrollHeight;}
+function add(t, right, meta){
+  const d=document.createElement('div');d.className='bubble '+(right?'right':'left');
+  if(meta){const m=document.createElement('div');m.className='meta';m.textContent=meta;
+    d.appendChild(m);}
+  d.appendChild(document.createTextNode(t));chat.appendChild(d);chat.scrollTop=chat.scrollHeight;}
 ws.onmessage = e => { if (e.data === 'refresh') location.reload(); else add(e.data, false); };
-function sendText(){const i=document.getElementById('msg');const v=i.value.trim();
-if(!v)return;ws.send(v);add(v,true);i.value='';}
+async function sendText(){
+  const i=document.getElementById('msg');const v=i.value.trim();if(!v)return;
+  const to=document.getElementById('dev').value;
+  if(!to){ws.send(v);add(v,true,'本机');i.value='';return;}
+  const r=await fetch('/send',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({pin:PIN,to,text:v})});
+  const j=await r.json().catch(()=>({}));
+  add(v,true,(j.ok?'已送达 ':'失败 ')+JSON.stringify(j).slice(0,60));i.value='';
+}
 document.getElementById('send').onclick = sendText;
 document.getElementById('msg').addEventListener('keydown', e=>{if(e.key==='Enter')sendText();});
 document.getElementById('file').addEventListener('change', async e=>{
+  const to=document.getElementById('dev').value;
   for (const f of e.target.files) {
-    const fd = new FormData(); fd.append('file', f);
+    const fd = new FormData(); fd.append('file', f); fd.append('pin', PIN);
+    if (to) fd.append('to', to);
     const r = await fetch('/upload', {method:'POST', body: fd});
-    add(f.name + (r.ok ? ' ✓' : ' ✗'), true);
+    const j = await r.json().catch(()=>({}));
+    add(f.name + (r.ok ? ' ✓' : ' ✗') + (to && j.ok ? ' → 已转发设备' : ''), !!to,
+        to ? '发往所选设备' : '本机');
   }
   e.target.value='';
 });
@@ -116,7 +144,9 @@ fetch('/group/json?pin=' + PIN).then(r => r.json()).then(j => {
 </script></body></html>"""
 
 GROUP_PAGE = """<!doctype html>
-<html lang="zh"><head><meta charset="utf-8"><title>Flix 群聊</title>
+<html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flix 群聊</title>
 <style>
 body{font-family:system-ui;background:#111;color:#eee;margin:0;display:flex;
 flex-direction:column;height:100vh}
@@ -125,8 +155,17 @@ flex-direction:column;height:100vh}
 .left{background:#2a2a2a;align-self:flex-start}
 .right{background:#0a84ff;align-self:flex-end}
 .meta{font-size:11px;opacity:.6;margin-bottom:2px}
+.footer{display:flex;gap:8px;padding:12px;border-top:1px solid #333}
+.footer input[type=text]{flex:1;padding:10px;border-radius:5px;border:1px solid #ccc;
+background:#1c1c1c;color:#eee;font-size:16px}
+button{padding:10px 20px;border:none;border-radius:5px;background:#007bff;
+color:#fff;font-size:15px;cursor:pointer}
 </style></head><body>
 <div class="chat" id="chat"></div>
+<div class="footer">
+<input type="text" id="gmsg" placeholder="发言到群…" autofocus>
+<button id="gsend">发送</button>
+</div>
 <script>
 const PIN = new URLSearchParams(location.search).get('pin');
 const GID = location.pathname.split('/')[2];
@@ -151,16 +190,29 @@ async function poll(){
     }
   } catch (e) {}
 }
+async function gsend(){
+  const i = document.getElementById('gmsg'); const v = i.value.trim();
+  if (!v) return;
+  await fetch('/send', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({pin: PIN, to: 'group:' + GID, text: v})});
+  i.value = ''; setTimeout(poll, 800);
+}
+document.getElementById('gsend').onclick = gsend;
+document.getElementById('gmsg').addEventListener('keydown',
+  e => { if (e.key === 'Enter') gsend(); });
 setInterval(poll, 3000); poll();
 </script></body></html>"""
 
 
 def make_web_app(store, ident: dict, on_web_text: Callable[[str], None],
-                 save_dir_fn, channel_port: int) -> tuple[web.Application, Callable[[str], None]]:
+                 save_dir_fn, channel_port: int,
+                 send_text_fn=None) -> tuple[web.Application, Callable[[str], None]]:
     """Web app + push_text(ws_text) callback for pushing text into open sockets.
 
     The page is meant for OTHER devices: a visitor enters the PIN, then their
     text lands in our store via on_web_text and their files in save_dir_fn().
+    send_text_fn (daemon's resolver) enables the page to send to remote
+    devices and groups, turning the web view into a full client UI.
     """
     from . import DEVICE_PORT
 
@@ -220,7 +272,11 @@ def make_web_app(store, ident: dict, on_web_text: Callable[[str], None],
             return web.Response(status=401, text="unauthorized")
         reader = await request.multipart()
         saved = []
+        target = ""
         while part := await reader.next():
+            if part.name == "to":
+                target = (await part.text()).strip()
+                continue
             if part.name != "file":
                 continue
             dest_dir = Path(save_dir_fn())
@@ -234,8 +290,49 @@ def make_web_app(store, ident: dict, on_web_text: Callable[[str], None],
                     size += len(chunk)
             import os
             os.replace(tmp, dest)
-            saved.append({"name": part.filename, "size": size, "path": str(dest)})
+            entry = {"name": part.filename, "size": size, "path": str(dest)}
+            if target:
+                from .files import send_file
+                from .routing import resolve_target
+                ip, port, fp = resolve_target(store, target)
+                if ip:
+                    r = await send_file(ip, str(dest),
+                                        from_fp=ident["fingerprint"], to_fp=fp,
+                                        port=port or DEVICE_PORT)
+                    entry["forwarded"] = bool(r.get("ok"))
+                else:
+                    entry["forwarded"] = False
+            saved.append(entry)
         return web.json_response({"ok": True, "saved": saved})
+
+    async def devices_json(request: web.Request) -> web.Response:
+        if request.query.get("pin") != pin():
+            return web.json_response({"error": "unauthorized"}, status=401)
+        return web.json_response({"devices": [
+            {"fingerprint": d["fingerprint"],
+             "alias": d.get("alias") or d["fingerprint"][:8]}
+            for d in store.devices() if d["fingerprint"] != ident["fingerprint"]]})
+
+    async def send_post(request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "bad request"},
+                                     status=400)
+        if payload.get("pin") != pin():
+            return web.json_response({"ok": False, "error": "unauthorized"},
+                                     status=401)
+        to = str(payload.get("to", ""))
+        text = str(payload.get("text", "")).strip()
+        if not text:
+            return web.json_response({"ok": False, "error": "empty"})
+        if to.startswith("group:"):
+            from .groupchat import send_group_text
+            return web.json_response(
+                await send_group_text(store, ident, to[6:], text))
+        if not send_text_fn:
+            return web.json_response({"ok": False, "error": "no-route"})
+        return web.json_response(await send_text_fn(to, text))
 
     # -- group transcript view (read-only; same PIN auth) --------------------
 
@@ -290,11 +387,13 @@ def make_web_app(store, ident: dict, on_web_text: Callable[[str], None],
     app["fails"] = {}
     app.router.add_get("/", index)
     app.router.add_post("/validate-code", validate)
-    # group routes must register before the /{pin} catch-all
+    # these must register before the /{pin} catch-all
     app.router.add_get("/group", group_list_page)
     app.router.add_get("/group/json", group_json)
     app.router.add_get("/group/{gid}", group_page)
     app.router.add_get("/group/{gid}/data", group_data)
+    app.router.add_get("/devices", devices_json)
+    app.router.add_post("/send", send_post)
     app.router.add_get("/ws", ws_handler)
     app.router.add_post("/upload", upload)
     app.router.add_get("/{pin}", app_page)
