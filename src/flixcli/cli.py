@@ -222,6 +222,15 @@ def cmd_devices(args) -> int:
     return 0
 
 
+def cmd_bubbles(args) -> int:
+    store = Store()
+    try:
+        emit(store.bubbles(args.limit), args.json)
+    finally:
+        store.close()
+    return 0
+
+
 async def cmd_pair(args) -> int:
     """Pair with a device: ping_v2 for identity, then askPairDevice intent."""
     from .channel import PeerError, pair_device, ping_v2
@@ -456,6 +465,9 @@ def main(argv: list[str] | None = None) -> int:
 
     add("self", "print our identity", cmd_self)
     add("devices", "list known devices from local store", cmd_devices)
+    p = add("bubbles", "recent text/file bubbles received by this node",
+            cmd_bubbles)
+    p.add_argument("--limit", type=int, default=20)
     p = add("pair", "pair with a device (ping_v2 + askPairDevice intent)",
             cmd_pair)
     p.add_argument("to", help="ip[:port] (default port 8891)")
