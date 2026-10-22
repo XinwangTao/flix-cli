@@ -75,15 +75,26 @@ def strip_hop(text: str) -> str:
     return text[:i].rstrip()
 
 
+def _decode(data: bytes) -> str:
+    """AI scripts on Windows often emit the local ANSI codepage (cp936 here)
+    when stdout is a pipe [RT 2026-10-22: claude wrapper reply came back as
+    U+FFFD soup]; try strict UTF-8 first, then GBK, then replace."""
+    for enc in ("utf-8", "gbk"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
 def run_command(cmd: list[str], payload: dict, env_extra: dict,
                 timeout: float) -> tuple[int, str, str]:
     env = dict(os.environ)
     env.update(env_extra)
     try:
-        proc = subprocess.run(cmd, input=json.dumps(payload, ensure_ascii=False),
-                              capture_output=True, text=True, encoding="utf-8",
-                              errors="replace", timeout=timeout, env=env)
-        return proc.returncode, proc.stdout, proc.stderr
+        proc = subprocess.run(cmd, input=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                              capture_output=True, timeout=timeout, env=env)
+        return proc.returncode, _decode(proc.stdout or b""), _decode(proc.stderr or b"")
     except subprocess.TimeoutExpired:
         return -1, "", f"timeout after {timeout}s"
     except OSError as e:

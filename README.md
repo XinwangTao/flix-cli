@@ -77,8 +77,9 @@ flix_bubbles                                                # 读收件
 flix agent --cmd "F:\my-ai\reply.bat" --prefix "[A-AI]"
 ```
 
-- **输入**：JSON 走 stdin（`id / from / groupId / text / time / hop`），另给
-  `FLIX_SELF_FP`、`FLIX_SELF_ALIAS` 两个环境变量；
+- **输入**：JSON（**UTF-8**）走 stdin（`id / from / groupId / text / time / hop`），另给
+  `FLIX_SELF_FP`、`FLIX_SELF_ALIAS` 两个环境变量；脚本自身请 `reconfigure(encoding="utf-8")`，
+  未适配的脚本输出会按 utf-8→gbk 容错解码；
 - **输出**：stdout 原样作为回复（自动加 `--prefix` 和 `[[hop=N]]` 标记）；空输出 = 不回，
   非零退出 = 记失败不重发；
 - **路由**：带 `groupId` 的回群，否则回给发送方（需要该设备已 `pair` 过）；
