@@ -40,7 +40,7 @@ announce 同时以**局域网广播兜底**（子网定向 + 255.255.255.255，�
 | 群组（本地群表 + bubble+groupId 逐发） | `flix group create/add/join/leave/list/send/history` | flix_group_* | ✅ 官方可收 |
 | 配对二维码 | `flix qrcode [--decode]`（flix2:// payload） | — | flixcli 间 |
 | 自动应答（轮询收件 → `--cmd` → 回发，带防自激护栏） | `flix agent --cmd "…"` | — | — |
-| Web 发送页（validate-code→/&lt;pin&gt;→ws+/upload） | `flixd --web-port 18992`（`flix serve` 同） | — | 协议对齐官方 8892 |
+| Web 界面（PIN 登录 → 发送页 + **群聊实时视图**：历史+3s 轮询） | `flixd --web-port 18992`（`flix serve` 同） | — | 群视图为 flixcli 附加 |
 | WebRTC 信令面（offer/answer/ice/hangup） | REST `/webrtc/signal`、`/api/webrtc/*` | — | flixcli 间 [compat] |
 | Desktop API（self/devices/settings/events SSE/send-text） | `http://127.0.0.1:8898` | flix_status | 形状对齐 |
 
