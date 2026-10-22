@@ -1,0 +1,8 @@
+/group/v1/command
+/group/v1/file
+GroupMessage.fromJson
+/dir_manifest
+/heartbeat
+/upload
+/thumbnail
+sendFileManagerAccept

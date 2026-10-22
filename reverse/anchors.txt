@@ -1,0 +1,5 @@
+receive intent failed
+deviceModal
+sendClipboard
+confirmReceive
+waitToAccepted

@@ -1,0 +1,3 @@
+pairDevice
+receive intent failed
+/device/v1/pair

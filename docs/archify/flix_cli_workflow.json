@@ -1,0 +1,241 @@
+{
+ "schema_version": 2,
+ "diagram_type": "workflow",
+ "meta": {
+  "title": "Flix CLI 克隆：通道、群聊与 AI 接口（v2）",
+  "locale": "zh-CN",
+  "quality_profile": "showcase"
+ },
+ "lanes": [
+  {
+   "id": "client",
+   "label": "CLI / MCP / AI 接口"
+  },
+  {
+   "id": "discovery",
+   "label": "发现 / 配对 / 分发"
+  },
+  {
+   "id": "channels",
+   "label": "设备通道、群聊与对端"
+  },
+  {
+   "id": "exceptions",
+   "label": "失败与人工出口",
+   "variant": "exception"
+  }
+ ],
+ "mainPath": [
+  "cli",
+  "discover",
+  "pair",
+  "dispatch",
+  "data",
+  "peer"
+ ],
+ "nodes": [
+  {
+   "id": "cli",
+   "lane": "client",
+   "col": 0,
+   "type": "frontend",
+   "label": "flix 命令",
+   "sublabel": "send / clip",
+   "tag": "CLI + --json",
+   "width": 150
+  },
+  {
+   "id": "mcp",
+   "lane": "client",
+   "col": 1,
+   "type": "frontend",
+   "label": "flix mcp",
+   "sublabel": "AI 工具",
+   "tag": "stdio MCP",
+   "width": 140
+  },
+  {
+   "id": "discover",
+   "lane": "discovery",
+   "col": 1,
+   "type": "messagebus",
+   "label": "UDP 组播发现",
+   "sublabel": "224.0.0.168 :8891",
+   "width": 156
+  },
+  {
+   "id": "no_peer",
+   "lane": "exceptions",
+   "col": 1,
+   "type": "security",
+   "label": "发现失败",
+   "sublabel": "手输 IP / probe / 重试",
+   "width": 150
+  },
+  {
+   "id": "pair",
+   "lane": "discovery",
+   "col": 2,
+   "type": "security",
+   "label": "配对确认",
+   "sublabel": "fingerprint + code",
+   "width": 148
+  },
+  {
+   "id": "dispatch",
+   "lane": "discovery",
+   "col": 3,
+   "type": "backend",
+   "label": "能力分发",
+   "sublabel": "intent / bubble / group",
+   "width": 140
+  },
+  {
+   "id": "data",
+   "lane": "channels",
+   "col": 3,
+   "type": "backend",
+   "label": "设备通道",
+   "sublabel": ":8891 + /group/v1/*",
+   "width": 164
+  },
+  {
+   "id": "transfer_abort",
+   "lane": "exceptions",
+   "col": 3,
+   "type": "external",
+   "label": "传输中断",
+   "sublabel": "拒收 / 断点续传",
+   "width": 150
+  },
+  {
+   "id": "group",
+   "lane": "channels",
+   "col": 2,
+   "type": "messagebus",
+   "label": "群聊服务",
+   "sublabel": "GroupMessage / groupId",
+   "width": 150
+  },
+  {
+   "id": "peer",
+   "lane": "channels",
+   "col": 4,
+   "type": "external",
+   "label": "对端 Flix/flixcli",
+   "sublabel": "剪贴板 / 文件 / AI 互联",
+   "width": 180
+  },
+  {
+   "id": "perm",
+   "lane": "exceptions",
+   "col": 4,
+   "type": "security",
+   "label": "权限不足",
+   "sublabel": "防火墙 / 输入权限",
+   "width": 150
+  }
+ ],
+ "edges": [
+  {
+   "from": "cli",
+   "to": "discover",
+   "label": "组播探测",
+   "variant": "emphasis",
+   "role": "main"
+  },
+  {
+   "from": "mcp",
+   "to": "discover",
+   "label": "AI 调用工具",
+   "variant": "dashed"
+  },
+  {
+   "from": "discover",
+   "to": "pair",
+   "label": "选中设备",
+   "role": "main"
+  },
+  {
+   "from": "discover",
+   "to": "no_peer",
+   "label": "无响应",
+   "variant": "security",
+   "role": "error"
+  },
+  {
+   "from": "pair",
+   "to": "dispatch",
+   "label": "已信任",
+   "variant": "emphasis",
+   "role": "main"
+  },
+  {
+   "from": "pair",
+   "to": "group",
+   "label": "成员来自已配对",
+   "variant": "emphasis"
+  },
+  {
+   "from": "group",
+   "to": "data",
+   "label": "按成员逐发 bubble",
+   "variant": "emphasis"
+  },
+  {
+   "from": "dispatch",
+   "to": "data",
+   "label": "文本 / 文件 / 通话",
+   "role": "main"
+  },
+  {
+   "from": "data",
+   "to": "peer",
+   "label": "HTTP + WebRTC 会话",
+   "role": "main"
+  },
+  {
+   "from": "data",
+   "to": "transfer_abort",
+   "label": "中断 / 拒收",
+   "variant": "security",
+   "role": "error"
+  },
+  {
+   "from": "peer",
+   "to": "perm",
+   "label": "权限 / 防火墙",
+   "variant": "security",
+   "role": "error"
+  }
+ ],
+ "cards": [
+  {
+   "dot": "cyan",
+   "title": "协议保真（逆向为基准）",
+   "items": [
+    "全部线格式来自 IDA MCP 静态分析 + 抓包 verbatim",
+    "群消息 = bubble + groupId，按成员逐发（db/池证据）",
+    "群文件走 /group/v1/file|thumb，群命令 /group/v1/command"
+   ]
+  },
+  {
+   "dot": "emerald",
+   "title": "AI 互联",
+   "items": [
+    "flix mcp 暴露 discover/send/clipboard 等工具",
+    "每台设备 flixd + MCP，即构成局域网多设备 AI 通讯",
+    "群聊把多台设备的 AI 会话串成同一房间"
+   ]
+  },
+  {
+   "dot": "rose",
+   "title": "失败必有人工出口",
+   "items": [
+    "发现失败可手输 IP / probe / 重试",
+    "权限与防火墙问题给出可执行引导",
+    "配对协议未解出前不伪造"
+   ]
+  }
+ ]
+}

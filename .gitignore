@@ -1,0 +1,44 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+
+# Reverse-engineering artifacts (large / sensitive: captures, pool dumps, node state)
+reverse/*.json
+reverse/*.log
+reverse/*.pcap
+reverse/*.pcapng
+reverse/*.png
+reverse/*.zip
+reverse/ida/
+reverse/node/
+reverse/node2/
+reverse/node3/
+reverse/reg_a/
+reverse/reg_b/
+reverse/discover_result.json
+
+# Runtime state
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Reverse dir: keep only tooling (py), protocol.md, notes.md, probes/anchors
+reverse/*
+!reverse/*.py
+!reverse/protocol.md
+!reverse/notes.md
+!reverse/probes.txt
+!reverse/anchors*.txt
+reverse/tmp/
+
+# stray test artifacts
+/bigfile2.txt
+/sendtest.txt

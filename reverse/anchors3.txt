@@ -1,0 +1,3 @@
+[DesktopApi] send-files request: to=
+/upload
+GroupMessage.fromJson
