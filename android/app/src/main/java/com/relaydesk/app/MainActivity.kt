@@ -84,7 +84,7 @@ class MainActivity : Activity() {
 
     private fun startServer() {
         server = ChannelServer(this, store, fingerprint, alias, Wire.DEVICE_PORT) {
-                _, _ -> mainHandler.post { onIncoming() }
+                _, extra -> mainHandler.post { onIncoming(extra.optString("from")) }
         }
         runCatching { server!!.start(NanoLiteTimeout) }
             .onFailure {
@@ -307,9 +307,17 @@ class MainActivity : Activity() {
             val title = card.findViewById<TextView>(1)
             val subtitle = card.findViewById<TextView>(2)
             val fp = dev.optString("fingerprint")
+            val lastRead = this@MainActivity.getSharedPreferences(
+                "relaydesk", MODE_PRIVATE).getLong("lastread_$fp", 0L)
+            val unread = store.lastIncoming(fp) > lastRead
+            android.util.Log.e("RDUI", "getView ${fp.take(8)} unread=$unread lastIn=${store.lastIncoming(fp)} lastRead=$lastRead")
+            val baseSub = "${dev.optString("os")} · ${dev.optString("ip")}:${dev.optInt("port")}"
             title.text = (dev.optString("alias").ifEmpty { fp.take(8) }) +
                 if (store.isPaired(fp)) "  ●" else ""
-            subtitle.text = "${dev.optString("os")} · ${dev.optString("ip")}:${dev.optInt("port")}"
+            title.setTextColor(if (unread) getColor(R.color.accent) else Color.WHITE)
+            subtitle.text = if (unread) "新消息 · $baseSub" else baseSub
+            subtitle.setTextColor(if (unread) getColor(R.color.accent)
+                                  else this@MainActivity.getColor(R.color.textMuted))
             return card
         }
     }
@@ -362,6 +370,7 @@ class MainActivity : Activity() {
         listScreen.visibility = View.GONE
         chatScreen.visibility = View.VISIBLE
         val fp = dev.optString("fingerprint")
+        markRead(fp)
         chatTitle.text = dev.optString("alias").ifEmpty { fp.take(8) }
         chatSubtitle.text = "${dev.optString("os")} · ${dev.optString("ip")}"
         pairButton.visibility = if (store.isPaired(fp)) View.GONE else View.VISIBLE
@@ -380,8 +389,19 @@ class MainActivity : Activity() {
         messagesAdapter.reload(store.conversation(peer.optString("fingerprint")))
     }
 
-    private fun onIncoming() {
-        if (currentPeer != null) refreshMessages() else refreshDevices()
+    private fun onIncoming(from: String = "") {
+        android.util.Log.e("RDUI", "onIncoming from=${from.take(8)} chatOpen=${currentPeer != null}")
+        if (from.isNotEmpty() && currentPeer != null &&
+            currentPeer!!.optString("fingerprint") == from) {
+            markRead(from)
+            refreshMessages()
+        }
+        refreshDevices()
+    }
+
+    private fun markRead(peer: String) {
+        getSharedPreferences("relaydesk", MODE_PRIVATE).edit()
+            .putLong("lastread_$peer", System.currentTimeMillis()).apply()
     }
 
     private inner class MessageAdapter : BaseAdapter() {

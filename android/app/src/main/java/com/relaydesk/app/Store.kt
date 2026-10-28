@@ -142,4 +142,12 @@ class Store(context: Context) :
             "UPDATE incoming SET path=?, waiting=0 WHERE resource_id=?",
             arrayOf(path, resourceId))
     }
+
+    /** Newest incoming bubble time from a peer (0 if none) — drives unread badges. */
+    fun lastIncoming(peer: String): Long =
+        readableDatabase.rawQuery(
+            "SELECT COALESCE(MAX(time), 0) FROM messages WHERE from_device=?",
+            arrayOf(peer)).use { c ->
+            if (c.moveToFirst()) c.getLong(0) else 0L
+        }
 }

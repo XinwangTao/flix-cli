@@ -93,6 +93,7 @@ class ChannelServer(
                 val content = bubble.optString("content")
                 store.addMessage(id, from, bubble.optString("to"), type,
                     bubble.optLong("time"), groupId, text = content)
+                notifyText(from, content)
                 onEvent("message", JSONObject().put("from", from).put("id", id))
             }
             Wire.TYPE_FILE -> {
@@ -320,6 +321,30 @@ class ChannelServer(
             pm.notify(1, notification)
         }
     }
+
+    private fun notifyText(peer: String, content: String) {
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            val pm = context.getSystemService(NotificationManager::class.java)
+            if (!pm.areNotificationsEnabled()) return
+        }
+        ensureChannel(pm())
+        val alias = store.device(peer)?.optString("alias") ?: peer.take(8)
+        val intent = Intent(context, MainActivity::class.java)
+        val pending = PendingIntent.getActivity(context, 0, intent,
+            PendingIntent.FLAG_IMMUTABLE)
+        val preview = content.take(60)
+        val notification = android.app.Notification.Builder(context, "relaydesk")
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle(alias)
+            .setContentText(preview)
+            .setContentIntent(pending)
+            .setAutoCancel(true)
+            .build()
+        pm().notify(3, notification)
+    }
+
+    private fun pm(): NotificationManager =
+        context.getSystemService(NotificationManager::class.java)
 
     private fun ensureChannel(pm: NotificationManager) {
         pm.createNotificationChannel(NotificationChannel(

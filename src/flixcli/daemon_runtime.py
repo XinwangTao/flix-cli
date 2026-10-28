@@ -237,6 +237,20 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
         print("[flixd] clipboard sync enabled for paired devices",
               file=sys.stderr)
 
+    async def announce_loop() -> None:
+        # Official clients only announce at startup; peers that come online
+        # later (fresh app installs, replugged machines) would never learn us.
+        # A short re-burst every 30s keeps discovery symmetric at zero cost.
+        try:
+            while True:
+                await asyncio.sleep(30)
+                await asyncio.to_thread(disc.announce, ident, 2, device_port)
+        except asyncio.CancelledError:
+            pass
+
+    tasks.append(asyncio.create_task(announce_loop()))
+    print("[flixd] periodic announce every 30s", file=sys.stderr, flush=True)
+
     print(f"[flixd] identity {ident['fingerprint']} alias {ident['alias']} "
           f"ip {local_ip()}", file=sys.stderr)
     print(f"[flixd] device channel on 0.0.0.0:{device_port}; "
