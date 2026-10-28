@@ -78,39 +78,49 @@ class ApiThread(QThread):
             self.failed.emit(str(exc))
 
 
-def avatar_color(key: str) -> str:
+def avatar_color(key: str) -> QColor:
     hues = (212, 174, 160, 152, 262, 200, 24, 320)
-    return f"hsl({hues[sum(key.encode()) % len(hues)]}, 62%, 46%)"
+    color = QColor()
+    # setHsl uses 0-255 component ranges; QSS-style "hsl()" strings are NOT
+    # parsed by QColor and silently fall back to black.
+    color.setHsl(hues[sum(key.encode()) % len(hues)], 185, 122)
+    return color
 
 
 class Avatar(QLabel):
-    """Circle with the first glyph of the display name (hue from the key)."""
+    """Circle with the first glyph of the display name (hue from the key).
+
+    Rendered into a QPixmap once — no custom paintEvent, so the widget is
+    safe to construct before show.
+    """
 
     def __init__(self, text: str, key: str, size: int = 38):
-        super().__init__(text[:1].upper())
-        self._color = avatar_color(key)
+        super().__init__()
+        self._size = size
         self.setFixedSize(size, size)
-        self.setAlignment(Qt.AlignCenter)
+        self.set_alignment(Qt.AlignCenter)
+        self.set_identity(text, key)
+
+    def set_alignment(self, alignment):
+        self.setAlignment(alignment)
+
+    def set_identity(self, text: str, key: str):
+        size = self._size
+        pm = QPixmap(size, size)
+        pm.fill(Qt.transparent)
+        painter = QPainter(pm)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(avatar_color(key)))
+        painter.drawEllipse(1, 1, size - 2, size - 2)
+        painter.setPen(QColor("white"))
         font = QFont(self.font())
         font.setPointSizeF(max(10.0, size / 30.0))
         font.setBold(True)
-        self.setFont(font)
-
-    def set_identity(self, text: str, key: str):
-        self._color = avatar_color(key)
-        self.setText(text[:1].upper())
-        self.update()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(self._color))
-        rect = self.rect().adjusted(1, 1, -1, -1)
-        painter.drawEllipse(rect)
-        painter.setPen(QColor("white"))
-        painter.setFont(self.font())
-        painter.drawText(rect, Qt.AlignCenter, self.text())
+        painter.setFont(font)
+        painter.drawText(pm.rect(), Qt.AlignCenter, text[:1].upper())
+        painter.end()
+        self.setPixmap(pm)
 
 
 class TitleBar(QFrame):
@@ -1157,6 +1167,9 @@ QListWidget#contentList::item { padding: 10px; border-bottom: 1px solid #1d2531;
     border-radius: 6px; }
 QListWidget#contentList::item:hover { background: #181f2a; }
 QLabel#pageTitle { color: white; font-size: 22px; font-weight: 800; }
+QLabel#emptyLogo { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
+    stop:0 #3b82f6, stop:1 #8b5cf6); border-radius: 30px; color: white;
+    font-size: 46px; font-weight: 800; }
 QFrame#settingsCard { background: #121824; border: 1px solid #263042; border-radius: 13px; }
 QLabel#settingsText { color: #b9c7da; font-size: 13px; }
 QLabel#mediaPreview { background: #05070a; color: #718096; border: 1px solid #263143;
