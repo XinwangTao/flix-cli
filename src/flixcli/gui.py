@@ -497,9 +497,17 @@ class MainWindow(QMainWindow):
         flags = 0
         if sys.platform == "win32":
             flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
+        # A frozen RelayDesk.exe is windowed and does not implement
+        # "-m flixcli.cli", so re-spawning itself would fail silently with no
+        # console to show why. Use the packaged flixd.exe beside it; only a
+        # source checkout falls back to the module form.
+        sibling = Path(sys.executable).with_name("flixd.exe")
+        if getattr(sys, "frozen", False) and sibling.exists():
+            cmd = [str(sibling)]
+        else:
+            cmd = [sys.executable, "-m", "flixcli.cli", "serve"]
         subprocess.Popen(
-            [sys.executable, "-m", "flixcli.cli", "serve",
-             "--device-port", "18991", "--api-port", "18998"],
+            cmd + ["--device-port", "18991", "--api-port", "18998"],
             stdout=log_file, stderr=log_file,
             creationflags=flags, close_fds=True)
         self.offline_detail.setText("正在启动本机服务（18991/18998）…几秒后自动重连。")
