@@ -14,6 +14,7 @@ import urllib.parse
 import urllib.request
 from ctypes import wintypes
 from datetime import datetime
+from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QSize, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
@@ -32,8 +33,33 @@ class ApiError(RuntimeError):
 
 
 class LocalApi:
+    """Loopback client. Port 8898 may legitimately be occupied by the OFFICIAL
+    Flix client (its Desktop API answers there too), so callers must verify a
+    port actually speaks flixcli (/api/overview) instead of trusting it."""
+
+    CANDIDATE_PORTS = (8898, 18998, 19098, 19598, 18997, 18996)
+
     def __init__(self, port: int = 8898):
         self.base = f"http://127.0.0.1:{port}"
+
+    @classmethod
+    def discover(cls, first_port: int = 8898) -> "LocalApi | None":
+        """Return an API handle for the first port serving a flixcli overview."""
+        import os
+        candidates = [first_port]
+        env = os.environ.get("FLIX_API_PORT")
+        if env and env.isdigit():
+            candidates.insert(0, int(env))
+        candidates += [p for p in cls.CANDIDATE_PORTS if p not in candidates]
+        for port in candidates:
+            api = cls(port)
+            try:
+                data = api.get("/api/overview")
+                if isinstance(data, dict) and "self" in data and "devices" in data:
+                    return api
+            except ApiError:
+                continue
+        return None
 
     def get(self, path: str):
         return self._request(path)
@@ -206,6 +232,7 @@ class MainWindow(QMainWindow):
         self.current: dict | None = None
         self.media_seq = 0
         self._drag_pos: QPoint | None = None
+        self.offline_mode = False
         self.setWindowTitle("RelayDesk")
         self.resize(1280, 840)
         self.setMinimumSize(980, 640)
@@ -217,6 +244,27 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh)
         self.timer.start(2500)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Self-heal: frameless windows shown on a busy desktop can end up with
+        # a collapsed geometry; re-assert the minimum and restore.
+        self.setMinimumSize(980, 640)
+        if self.width() < 980 or self.height() < 640:
+            self.resize(1280, 840)
+
+    def closeEvent(self, event):
+        self.timer.stop()
+        self.offline_mode = True  # stop the refresh/discovery churn
+        for worker in (self.worker, self.action_worker,
+                       getattr(self, "_discovery_worker", None)):
+            if worker is not None:
+                try:
+                    worker.quit()
+                    worker.wait(1500)
+                except Exception:
+                    pass
+        super().closeEvent(event)
 
     # ---------- frameless plumbing ----------
 
@@ -389,8 +437,88 @@ class MainWindow(QMainWindow):
         self.workspace_stack.addWidget(self._build_adb())
         self.workspace_stack.addWidget(self._build_settings())
         self.workspace_stack.addWidget(self._build_remote())
+        self.workspace_stack.addWidget(self._build_offline())
         box.addWidget(self.workspace_stack, 1)
         return area
+
+    def _build_offline(self):
+        page = QWidget()
+        page.setObjectName("page")
+        box = QVBoxLayout(page)
+        box.addStretch()
+        logo = QLabel()
+        logo.setPixmap(logo_pixmap(88))
+        logo.setAlignment(Qt.AlignCenter)
+        wrap = QHBoxLayout()
+        wrap.addStretch()
+        wrap.addWidget(logo)
+        wrap.addStretch()
+        box.addLayout(wrap)
+        box.addSpacing(16)
+        self.offline_title = QLabel("未发现 flixcli 服务")
+        self.offline_title.setObjectName("emptyTitle")
+        self.offline_title.setAlignment(Qt.AlignCenter)
+        box.addWidget(self.offline_title)
+        self.offline_detail = QLabel(
+            "默认端口 8898 可能被官方 Flix 占用。\n"
+            "可一键启动本机服务（端口 18991/18998，与官方共存），或自行运行 flixd。")
+        self.offline_detail.setObjectName("muted")
+        self.offline_detail.setAlignment(Qt.AlignCenter)
+        box.addWidget(self.offline_detail)
+        box.addSpacing(18)
+        actions = QHBoxLayout()
+        self.start_daemon_button = QPushButton("启动本机服务")
+        self.start_daemon_button.setObjectName("primaryBtn")
+        self.start_daemon_button.setCursor(Qt.PointingHandCursor)
+        self.start_daemon_button.clicked.connect(self.start_local_daemon)
+        retry = QPushButton("重试连接")
+        retry.setObjectName("secondaryButton")
+        retry.setCursor(Qt.PointingHandCursor)
+        retry.clicked.connect(self.retry_connection)
+        wrap2 = QHBoxLayout()
+        wrap2.addStretch()
+        wrap2.addWidget(self.start_daemon_button)
+        wrap2.addSpacing(10)
+        wrap2.addWidget(retry)
+        wrap2.addStretch()
+        actions.addLayout(wrap2)
+        box.addLayout(actions)
+        box.addStretch()
+        return page
+
+    def start_local_daemon(self):
+        """Start flixd on 18991/18998 (official Flix keeps 8891/8898) detached."""
+        import os
+        import subprocess
+        appdata = os.environ.get("APPDATA", str(Path.home()))
+        log_dir = Path(appdata) / "flixcli"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = open(log_dir / "flixd-gui-started.log", "ab")
+        flags = 0
+        if sys.platform == "win32":
+            flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
+        subprocess.Popen(
+            [sys.executable, "-m", "flixcli.cli", "serve",
+             "--device-port", "18991", "--api-port", "18998"],
+            stdout=log_file, stderr=log_file,
+            creationflags=flags, close_fds=True)
+        self.offline_detail.setText("正在启动本机服务（18991/18998）…几秒后自动重连。")
+        self.start_daemon_button.setEnabled(False)
+        QTimer.singleShot(3500, self.retry_connection)
+
+    def retry_connection(self):
+        found = LocalApi.discover(self.api_port)
+        if found is None:
+            self.offline_detail.setText("仍未发现 flixcli 服务。确认 flixd 已启动后重试。")
+            self.start_daemon_button.setEnabled(True)
+            return
+        self.api = found
+        self.api_port = found.base.rsplit(":", 1)[-1]
+        self.api_port = int(self.api_port)
+        self.offline_mode = False
+        self.start_daemon_button.setEnabled(True)
+        self.statusBar().showMessage(f"已连接本机服务 :{self.api_port}")
+        self.refresh()
 
     def _build_header(self):
         header = QFrame()
@@ -624,6 +752,8 @@ class MainWindow(QMainWindow):
     # ---------- data refresh ----------
 
     def refresh(self):
+        if getattr(self, "offline_mode", False):
+            return  # offline page waits for an explicit retry
         if self.worker and self.worker.isRunning():
             return
         self.worker = ApiThread(lambda: self.api.get("/api/overview"))
@@ -1020,7 +1150,26 @@ class MainWindow(QMainWindow):
         self.connection_dot.setProperty("online", False)
         self.connection_dot.style().unpolish(self.connection_dot)
         self.connection_dot.style().polish(self.connection_dot)
-        self.statusBar().showMessage("无法连接 flixd：" + detail)
+        # 8898 may be the OFFICIAL Flix Desktop API (it answers /api/self but
+        # has no /api/overview). Before declaring offline, probe the candidate
+        # ports for a real flixcli service.
+        self.offline_mode = True
+        self.statusBar().showMessage("无法连接 flixd：" + detail + "（正在探测候选端口…）")
+        self._discovery_worker = ApiThread(lambda: LocalApi.discover(self.api_port))
+        self._discovery_worker.result.connect(self._discovery_done)
+        self._discovery_worker.start()
+
+    def _discovery_done(self, found):
+        if found is not None:
+            self.api = found
+            self.api_port = int(found.base.rsplit(":", 1)[-1])
+            self.offline_mode = False
+            self.statusBar().showMessage(f"已连接本机服务 :{self.api_port}")
+            self.refresh()
+            return
+        self.workspace_stack.setCurrentIndex(6)
+        self.statusBar().showMessage(
+            "未发现 flixcli 服务——可从下方一键启动（与官方 Flix 端口共存）")
 
     def eventFilter(self, watched, event):
         if watched is self.composer and event.type() == QEvent.KeyPress:
