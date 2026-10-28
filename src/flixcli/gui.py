@@ -24,6 +24,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from .icons import icon, logo_icon, logo_pixmap
+
 
 class ApiError(RuntimeError):
     pass
@@ -133,27 +135,27 @@ class TitleBar(QFrame):
         self.setObjectName("titleBar")
 
         row = QHBoxLayout(self)
-        row.setContentsMargins(16, 0, 0, 0)
+        row.setContentsMargins(14, 0, 0, 0)
         row.setSpacing(10)
-        logo = QLabel("R")
-        logo.setObjectName("titleLogo")
-        logo.setFixedSize(24, 24)
-        logo.setAlignment(Qt.AlignCenter)
+        logo = QLabel()
+        logo.setPixmap(logo_pixmap(26))
         name = QLabel("RelayDesk")
         name.setObjectName("titleName")
         row.addWidget(logo)
         row.addWidget(name)
         row.addStretch()
 
-        self.btn_min = self._win_button("─", self._minimize)
-        self.btn_max = self._win_button("□", self._toggle_max)
-        self.btn_close = self._win_button("✕", self._close, danger=True)
+        self.btn_min = self._win_button("min", self._minimize)
+        self.btn_max = self._win_button("max", self._toggle_max)
+        self.btn_close = self._win_button("close", self._close, danger=True)
         for b in (self.btn_min, self.btn_max, self.btn_close):
             row.addWidget(b)
 
-    def _win_button(self, glyph: str, fn, danger: bool = False) -> QPushButton:
-        b = QPushButton(glyph)
+    def _win_button(self, icon_name: str, fn, danger: bool = False) -> QPushButton:
+        b = QPushButton()
         b.setObjectName("closeBtn" if danger else "winBtn")
+        b.setIcon(icon(icon_name, "#93a4bd", 15))
+        b.setIconSize(QSize(15, 15))
         b.setFixedSize(46, 44)
         b.setCursor(Qt.PointingHandCursor)
         b.clicked.connect(fn)
@@ -163,7 +165,12 @@ class TitleBar(QFrame):
         self.window.showMinimized()
 
     def _toggle_max(self):
-        self.window.showNormal() if self.window.isMaximized() else self.window.showMaximized()
+        if self.window.isMaximized():
+            self.window.showNormal()
+            self.btn_max.setIcon(icon("max", "#93a4bd", 15))
+        else:
+            self.window.showMaximized()
+            self.btn_max.setIcon(icon("restore", "#93a4bd", 15))
 
     def _close(self):
         self.window.close()
@@ -286,26 +293,29 @@ class MainWindow(QMainWindow):
         box = QVBoxLayout(rail)
         box.setContentsMargins(12, 16, 12, 14)
         box.setSpacing(8)
-        logo = QLabel("R")
-        logo.setObjectName("logo")
-        logo.setAlignment(Qt.AlignCenter)
-        logo.setFixedSize(42, 42)
+        logo = QLabel()
+        logo.setPixmap(logo_pixmap(42))
         box.addWidget(logo, 0, Qt.AlignHCenter)
         box.addSpacing(10)
         self.rail_buttons = []
-        for glyph, tip, mode in (
-            ("◈", "设备会话", "devices"), ("⌕", "搜索", "search"),
-            ("◇", "群组", "groups"), ("⇅", "传输任务", "transfers"),
-            ("🤖", "Android / ADB", "adb"), ("⚙", "设置与状态", "settings"),
+        rail_normal, rail_active = "#8291a8", "#ffffff"
+        for name, tip, mode in (
+            ("devices", "设备会话", "devices"), ("search", "搜索", "search"),
+            ("groups", "群组", "groups"), ("transfers", "传输任务", "transfers"),
+            ("android", "Android / ADB", "adb"), ("settings", "设置与状态", "settings"),
         ):
-            button = QPushButton(glyph)
+            button = QPushButton()
             button.setObjectName("railButton")
             button.setToolTip(tip)
             button.setCheckable(True)
             button.setCursor(Qt.PointingHandCursor)
             button.setFixedSize(46, 46)
+            button.setIcon(icon(name, rail_normal, 21))
+            button.setIconSize(QSize(21, 21))
             button.clicked.connect(lambda _checked=False, m=mode: self.set_mode(m))
             button.setProperty("mode", mode)
+            button.toggled.connect(lambda on, b=button, n=name:
+                                   b.setIcon(icon(n, rail_active if on else rail_normal, 21)))
             self.rail_buttons.append(button)
             box.addWidget(button, 0, Qt.AlignHCenter)
         box.addStretch()
@@ -404,16 +414,18 @@ class MainWindow(QMainWindow):
         self.header_actions = QHBoxLayout()
         self.header_actions.setSpacing(8)
         row.addLayout(self.header_actions)
-        for glyph, tip, fn in (
-            ("▣", "发送文件", self.choose_files),
-            ("⧉", "发送剪贴板文本", self.send_clipboard),
-            ("⌁", "请求远程观看", self.request_remote),
-            ("⋯", "更多操作", self.show_more),
+        for glyph, tip, fn, icon_name in (
+            ("▣", "发送文件", self.choose_files, "file"),
+            ("⧉", "发送剪贴板文本", self.send_clipboard, "clipboard"),
+            ("⌁", "请求远程观看", self.request_remote, "remote"),
+            ("⋯", "更多操作", self.show_more, "more"),
         ):
-            button = QPushButton(glyph)
+            button = QPushButton()
             button.setObjectName("headerBtn")
             button.setToolTip(tip)
             button.setFixedSize(40, 40)
+            button.setIcon(icon(icon_name, "#9fb0c8", 18))
+            button.setIconSize(QSize(18, 18))
             button.setCursor(Qt.PointingHandCursor)
             button.clicked.connect(fn)
             self.header_actions.addWidget(button)
@@ -424,10 +436,9 @@ class MainWindow(QMainWindow):
         page.setObjectName("page")
         box = QVBoxLayout(page)
         box.addStretch()
-        halo = QLabel("R")
-        halo.setObjectName("emptyLogo")
+        halo = QLabel()
+        halo.setPixmap(logo_pixmap(96))
         halo.setAlignment(Qt.AlignCenter)
-        halo.setFixedSize(96, 96)
         wrap = QHBoxLayout()
         wrap.addStretch()
         wrap.addWidget(halo)
@@ -475,16 +486,20 @@ class MainWindow(QMainWindow):
         cbox.addWidget(self.composer)
         actions = QHBoxLayout()
         actions.setSpacing(6)
-        image = QPushButton("▧")
+        image = QPushButton()
         image.setObjectName("chipBtn")
         image.setToolTip("发送图片")
         image.setFixedSize(36, 36)
+        image.setIcon(icon("image", "#9fb0c8", 17))
+        image.setIconSize(QSize(17, 17))
         image.setCursor(Qt.PointingHandCursor)
         image.clicked.connect(lambda: self.choose_files(images_only=True))
-        file_button = QPushButton("▤")
+        file_button = QPushButton()
         file_button.setObjectName("chipBtn")
         file_button.setToolTip("发送文件")
         file_button.setFixedSize(36, 36)
+        file_button.setIcon(icon("file", "#9fb0c8", 17))
+        file_button.setIconSize(QSize(17, 17))
         file_button.setCursor(Qt.PointingHandCursor)
         file_button.clicked.connect(self.choose_files)
         actions.addWidget(image)
@@ -494,8 +509,10 @@ class MainWindow(QMainWindow):
         actions.addSpacing(6)
         actions.addWidget(self.composer_hint)
         actions.addStretch()
-        self.send_button = QPushButton("发送 ➤")
+        self.send_button = QPushButton(" 发送")
         self.send_button.setObjectName("sendButton")
+        self.send_button.setIcon(icon("send", "#ffffff", 15))
+        self.send_button.setIconSize(QSize(15, 15))
         self.send_button.setCursor(Qt.PointingHandCursor)
         self.send_button.clicked.connect(self.send_message)
         actions.addWidget(self.send_button)
@@ -1074,9 +1091,11 @@ def toast_hint(parent, text: str):
 def main(argv: list[str] | None = None, *, api_port: int = 8898) -> int:
     app = QApplication(argv or sys.argv)
     app.setApplicationName("RelayDesk")
+    app.setWindowIcon(logo_icon())
     app.setStyle("Fusion")
     app.setFont(QFont("Microsoft YaHei UI", 9))
     window = MainWindow(api_port)
+    window.setWindowIcon(logo_icon())
     window.show()
     return app.exec()
 
