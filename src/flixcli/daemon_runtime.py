@@ -5,8 +5,12 @@ import asyncio
 import contextlib
 import hashlib
 import sys
+from pathlib import Path
 
 from . import DEVICE_PORT, local_ip, model
+from .adb import AdbClient
+from .media_session import SessionManager
+from .media_transport import MediaRuntime
 from .channel import PeerError, post_bubble, post_intent
 from .desktop_api import serve_desktop_api
 from .discovery import Discovery
@@ -137,6 +141,12 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
         bubble = model.text_bubble(ident["fingerprint"], fp, text)
         try:
             reply = await post_bubble(ip, bubble, port=port)
+            store.add_text_bubble(bubble["id"], bubble["from"], bubble["to"],
+                                  bubble["content"], bubble["time"],
+                                  bubble.get("groupId") or "")
+            if api_publish:
+                api_publish({"type": "bubbleChanged",
+                             "payload": {"bubbleId": bubble["id"], "type": "text"}})
             return {"ok": True, "id": bubble["id"], "reply": reply, "ip": ip}
         except PeerError as e:
             return {"ok": False, "error": e.kind, "detail": e.detail, "ip": ip}
@@ -149,14 +159,33 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
 
     from .webrtc import SignalHub, make_signal_app
     hub = SignalHub()
+    adb_client = AdbClient()
+
+    def peer_ip(fp: str) -> str | None:
+        row = store.con.execute(
+            "SELECT COALESCE(ip, '') FROM persistence_devices WHERE fingerprint=?", (fp,)
+        ).fetchone()
+        return row[0] if row and row[0] else None
+
+    api_publish = None
+    media_manager = SessionManager(ident["fingerprint"], store.is_paired, peer_ip)
+    media_manager.on_event(lambda event: api_publish(event) if api_publish else None)
+    media_dir = Path(store.prefs().get("mediaSnapshotDir") or
+                     (Path(store.path).parent / "media_snapshots"))
+    media_runtime = MediaRuntime(media_manager, media_dir)
 
     channel_runner, publish = await serve_channel(store, ident, device_port,
                                                   clipboard_setter=_set_clipboard,
-                                                  signal_hub=hub)
+                                                  signal_hub=hub,
+                                                  media_manager=media_manager,
+                                                  media_runtime=media_runtime)
     api_runner, api_publish = await serve_desktop_api(store, ident, send_text,
                                                       api_port,
                                                       channel_port=device_port,
-                                                      webrtc_hub=hub)
+                                                      webrtc_hub=hub,
+                                                      adb_client=adb_client,
+                                                      media_manager=media_manager,
+                                                      media_runtime=media_runtime)
 
     web_runner = None
     if web_port:

@@ -9,8 +9,11 @@ import argparse
 import asyncio
 import json
 import sys
+import urllib.error
+import urllib.request
 
 from . import DEVICE_PORT, __version__
+from .adb import AdbClient, AdbError
 from .channel import PeerError, post_bubble, post_intent
 from .config import Store, load_or_create_identity
 from .discovery import Discovery
@@ -374,6 +377,95 @@ def cmd_group_history(args) -> int:
         store.close()
 
 
+def _desktop_api_request(port: int, path: str, payload: dict | None = None) -> dict:
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            return json.loads(exc.read().decode("utf-8"))
+        except (ValueError, OSError):
+            return {"ok": False, "error": f"http-{exc.code}"}
+    except (OSError, urllib.error.URLError) as exc:
+        return {"ok": False, "error": "daemon-unreachable", "detail": str(exc)}
+
+
+def cmd_call(args) -> int:
+    if args.call_cmd == "list":
+        result = _desktop_api_request(args.api_port, "/api/media/sessions")
+    elif args.call_cmd == "request":
+        capabilities = ["view"]
+        if args.audio:
+            capabilities.append("audio")
+        if args.control:
+            capabilities.append("control")
+        result = _desktop_api_request(args.api_port, "/api/media/request",
+                                       {"deviceId": args.device, "capabilities": capabilities})
+    elif args.call_cmd == "approve":
+        capabilities = ["view"]
+        if args.control:
+            capabilities.append("control")
+        result = _desktop_api_request(args.api_port, "/api/media/decision",
+                                       {"callId": args.call_id, "approve": True,
+                                        "capabilities": capabilities})
+    elif args.call_cmd == "deny":
+        result = _desktop_api_request(args.api_port, "/api/media/decision",
+                                       {"callId": args.call_id, "approve": False,
+                                        "reason": args.reason})
+    elif args.call_cmd == "connect":
+        result = _desktop_api_request(args.api_port, "/api/media/offer",
+                                       {"callId": args.call_id})
+    elif args.call_cmd == "revoke":
+        result = _desktop_api_request(args.api_port, "/api/media/revoke",
+                                       {"callId": args.call_id, "reason": args.reason})
+    else:
+        result = {"ok": False, "error": "unknown-call-command"}
+    emit(result, args.json)
+    return 0 if result.get("ok") else (4 if result.get("error") in
+                                        ("not-approved", "not-receiver", "control-not-approved") else 3)
+
+
+async def cmd_adb(args) -> int:
+    client = AdbClient(adb_path=args.adb_path, timeout=args.timeout)
+    try:
+        if args.adb_cmd == "devices":
+            emit({"ok": True, "devices": [d.as_dict() for d in await client.devices()]}, args.json)
+            return 0
+        if args.adb_cmd == "report":
+            emit(await client.report(args.serial), args.json)
+            return 0
+        if args.adb_cmd == "push":
+            result = await client.push(args.source, args.destination, args.serial)
+        elif args.adb_cmd == "pull":
+            result = await client.pull(args.source, args.destination, args.serial)
+        elif args.adb_cmd == "shell":
+            result = await client.shell(args.command, args.serial, approved=args.approve)
+            emit(result, args.json)
+            return 0 if result.get("ok") else (4 if result.get("error") == "approval_required" else 3)
+        else:
+            emit({"error": "unknown-adb-command"}, args.json)
+            return 2
+        emit(result, args.json)
+        return 0 if result.get("ok") else 3
+    except AdbError as e:
+        emit({"ok": False, "error": e.kind, "detail": e.detail,
+              "returncode": e.returncode}, args.json)
+        return 3
+
+
+def cmd_gui(args) -> int:
+    try:
+        from .gui import main as gui_main
+    except ImportError as exc:
+        emit({"error": "gui-dependency", "detail": str(exc),
+              "hint": "install with: pip install -e .[gui]"}, args.json)
+        return 5
+    return gui_main([], api_port=args.api_port)
+
+
 def cmd_agent(args) -> int:
     from .agent import main as agent_main
     return agent_main(args)
@@ -519,6 +611,56 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("ui", help="native desktop window for group chats")
     p.add_argument("--group", default=None, help="group name to open")
     p.set_defaults(fn=cmd_ui)
+    p = sub.add_parser("call", help="request and manage an approved remote media session")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--api-port", type=int, default=8898)
+    csub = p.add_subparsers(dest="call_cmd", required=True)
+    csub.add_parser("list", help="list media sessions")
+    p_req = csub.add_parser("request", help="request a peer session")
+    p_req.add_argument("device")
+    p_req.add_argument("--audio", action="store_true")
+    p_req.add_argument("--control", action="store_true")
+    p_app = csub.add_parser("approve", help="approve a pending session locally")
+    p_app.add_argument("call_id")
+    p_app.add_argument("--control", action="store_true")
+    p_den = csub.add_parser("deny", help="deny a pending session")
+    p_den.add_argument("call_id")
+    p_den.add_argument("--reason", default="denied by user")
+    p_con = csub.add_parser("connect", help="connect an approved session")
+    p_con.add_argument("call_id")
+    p_rev = csub.add_parser("revoke", help="revoke a media session")
+    p_rev.add_argument("call_id")
+    p_rev.add_argument("--reason", default="revoked by user")
+    p.set_defaults(fn=cmd_call)
+
+    p = sub.add_parser("adb", help="inspect and transfer files with an authorized Android device")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.add_argument("--serial", default=None, help="ADB serial; required when ambiguous")
+    p.add_argument("--adb-path", default=None, help="adb executable path")
+    p.add_argument("--timeout", type=float, default=30.0)
+    adb_sub = p.add_subparsers(dest="adb_cmd", required=True)
+    adb_sub.add_parser("devices", help="list connected devices")
+    adb_sub.add_parser("report", help="show device authorization report")
+    p_push = adb_sub.add_parser("push", help="copy a local file to Android")
+    p_push.add_argument("source")
+    p_push.add_argument("destination")
+    p_pull = adb_sub.add_parser("pull", help="copy an Android file to this machine")
+    p_pull.add_argument("source")
+    p_pull.add_argument("destination")
+    p_shell = adb_sub.add_parser("shell", help="request a shell command; approval is required")
+    # REMAINDER keeps leading-dash command args (e.g. am start -n) intact
+    # instead of argparse eating them as flix options. --approve must come
+    # before the command words.
+    p_shell.add_argument("command", nargs=argparse.REMAINDER)
+    p_shell.add_argument("--approve", action="store_true",
+                         help="explicitly approve this local operator action")
+    p.set_defaults(fn=cmd_adb)
+
+    p = sub.add_parser("gui", help="open the Windows desktop control surface")
+    p.add_argument("--json", action="store_true", help="machine-readable errors")
+    p.add_argument("--api-port", type=int, default=8898,
+                   help="flixd Desktop API port (default: 8898)")
+    p.set_defaults(fn=cmd_gui)
 
     p = sub.add_parser("mcp", help="run the MCP stdio server (for AI clients)")
     p.set_defaults(fn=cmd_mcp)

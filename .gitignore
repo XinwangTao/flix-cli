@@ -42,3 +42,4 @@ reverse/tmp/
 # stray test artifacts
 /bigfile2.txt
 /sendtest.txt
+flixd.log

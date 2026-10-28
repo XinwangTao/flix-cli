@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Flix 文件接收安全门禁与大小限制",
+    "locale": "zh-CN",
+    "status": "已确认并实施（L1-D，2026-10-24）"
+  },
+  "scope": {
+    "in": ["已配对设备文件接收", "发送方绑定", "临时文件大小上限", "路径冲突保护", "失败审计"],
+    "out": ["官方协议绕过", "未配对自动接收", "任意路径写入", "无限流式 body"]
+  },
+  "nodes": [
+    {"id":"bubble","kind":"messagebus","label":"收到文件气泡","note":"解析 id/from/meta/resourceId/size"},
+    {"id":"identity","kind":"security","label":"发送方与来源校验","note":"from 必须已配对；请求来源 IP 必须匹配设备记录"},
+    {"id":"quota","kind":"security","label":"大小与路径门禁","note":"声明大小、实际读取、单任务/请求上限；basename 与安全目录边界"},
+    {"id":"pending","kind":"database","label":"建立待接收任务","note":"resourceId 绑定 bubbleId、发送方、目标名、大小、状态"},
+    {"id":"approve","kind":"frontend","label":"接收决定","note":"已配对可自动接收；未配对只展示待审批，不武装 /file"},
+    {"id":"stream","kind":"backend","label":"受限流式写入","note":"只接受绑定任务；累计字节不得超过声明/配置上限"},
+    {"id":"commit","kind":"backend","label":"校验后原子落盘","note":"大小一致、临时文件 fsync/replace、冲突策略明确"},
+    {"id":"reject","kind":"security","label":"拒绝并清理","note":"未配对、来源不符、超限、校验失败删除临时文件并记录原因"},
+    {"id":"audit","kind":"database","label":"状态与审计","note":"记录 resourceId、peer、大小、结果；不记录文件内容"}
+  ],
+  "edges": [
+    {"from":"bubble","to":"identity","label":"提取发送方"},
+    {"from":"identity","to":"quota","label":"已配对且来源匹配"},
+    {"from":"identity","to":"reject","label":"未配对/来源不符","variant":"security"},
+    {"from":"quota","to":"pending","label":"元数据合法且未超限"},
+    {"from":"quota","to":"reject","label":"超限/路径非法","variant":"security"},
+    {"from":"pending","to":"approve","label":"等待自动或人工决定"},
+    {"from":"approve","to":"stream","label":"明确允许接收"},
+    {"from":"approve","to":"reject","label":"拒收","variant":"security"},
+    {"from":"stream","to":"commit","label":"实际大小与声明一致"},
+    {"from":"stream","to":"reject","label":"中断/超限/校验失败","variant":"security"},
+    {"from":"commit","to":"audit","label":"完成"},
+    {"from":"reject","to":"audit","label":"记录拒绝原因"}
+  ],
+  "mapping": [
+    {"file":"src/flixcli/server.py","change":"文件气泡身份绑定、来源校验、大小门禁、受限 /file 写入和拒绝清理","nodes":["bubble","identity","quota","pending","stream","commit","reject","audit"]},
+    {"file":"src/flixcli/config.py","change":"接收大小限制与冲突策略配置","nodes":["quota","commit"]},
+    {"file":"tests/test_transfer_security.py","change":"未配对、来源不符、超限、断流、大小一致和路径边界回归","nodes":["identity","quota","stream","commit","reject"]}
+  ],
+  "open_questions": [
+    "确认未配对文件只进入人工待审批，不自动武装 /file",
+    "确认单文件默认上限 4 GiB，并允许配置更小值",
+    "确认目标文件已存在时默认拒绝，不覆盖已有文件"
+  ],
+  "verification": [
+    "tests/test_transfer_security.py 2/2：未配对、来源不符、大小不一致、冲突覆盖均拒绝",
+    "全部专项测试 18/18；tests/e2e.py 11/11；合法隔离文件传输 22 bytes 原子落盘通过",
+    "流式 /file 日志不再预读 body，避免审计中间件消费上传流；媒体 body 仍只记录长度/截断 hash",
+    "默认上限 4 GiB、临时 .flix-incoming、fsync/replace、失败清理已实现",
+    "安全图节点 9、边 12、HTML/JSON 解析通过"
+  ]
+}

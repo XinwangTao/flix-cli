@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Flix 重写：双轨设备协作架构",
+    "locale": "zh-CN",
+    "status": "已确认；阶段 D 第一批已实施（GUI/ADB/API），远程媒体待下一批（2026-10-22）"
+  },
+  "scope": {
+    "in": ["Windows GUI", "flix CLI", "MCP", "flixd", "官方 Flix 兼容", "自有协议", "局域网设备", "USB ADB Android", "远程能力"],
+    "out": ["公网账号/中继", "会员绕过", "无人值守任意命令", "完整官方高级媒体能力"]
+  },
+  "nodes": [
+    {"id":"gui","kind":"frontend","label":"桌面 GUI","note":"设备 / 会话 / 群组 / 传输 / 审批 / 远程"},
+    {"id":"cli","kind":"frontend","label":"flix CLI + MCP","note":"--json、退出码、AI 工具契约"},
+    {"id":"daemon","kind":"backend","label":"flixd 能力编排","note":"统一任务、事件、权限与生命周期"},
+    {"id":"compat","kind":"external","label":"官方 Flix 兼容轨","note":"已取证的发现 / 配对 / 文本 / 文件 / 剪贴板"},
+    {"id":"native","kind":"backend","label":"自有协议轨","note":"群组 @、能力协商、审批、可靠传输"},
+    {"id":"lan","kind":"messagebus","label":"局域网设备通道","note":"发现、配对、消息、文件、会话信令"},
+    {"id":"store","kind":"database","label":"本地状态与任务库","note":"设备信任、群组、消息、断点、审计"},
+    {"id":"adb","kind":"external","label":"Android / USB ADB","note":"授权设备、push/pull、图片、文本、受控 shell"},
+    {"id":"media","kind":"backend","label":"远程媒体能力","note":"观看 / 控制 / 音视频；直连优先、失败降级"},
+    {"id":"peer","kind":"external","label":"对端设备 / 官方客户端","note":"自研端与官方端互通目标"},
+    {"id":"approval","kind":"security","label":"人工批准与权限","note":"命令、屏幕、输入、麦克风、摄像头"},
+    {"id":"fallback","kind":"security","label":"失败与降级出口","note":"重试 / 断点 / 仅观看 / 仅文本 / 手动处理"}
+  ],
+  "edges": [
+    {"from":"gui","to":"daemon","label":"本机 API / 事件"},
+    {"from":"cli","to":"daemon","label":"CLI / MCP 调用"},
+    {"from":"daemon","to":"compat","label":"兼容路由"},
+    {"from":"daemon","to":"native","label":"自有能力路由"},
+    {"from":"compat","to":"lan","label":"官方线格式"},
+    {"from":"native","to":"lan","label":"自有线格式"},
+    {"from":"lan","to":"peer","label":"设备消息 / 文件 / 信令"},
+    {"from":"daemon","to":"store","label":"任务与事件持久化"},
+    {"from":"daemon","to":"adb","label":"授权后的 ADB 操作"},
+    {"from":"daemon","to":"approval","label":"高风险动作审批"},
+    {"from":"daemon","to":"media","label":"能力协商后启动"},
+    {"from":"media","to":"fallback","label":"权限/直连/编解码失败"}
+  ],
+  "mapping": [
+    {"file":"src/flixcli/gui.py","change":"PySide6 桌面控制台：设备、消息、传输、群组与 @ 发送；读取 daemon 统一状态","nodes":["gui","daemon","store","native"]},
+    {"file":"src/flixcli/cli.py","change":"gui 与 adb CLI 入口、结构化输出和退出码","nodes":["cli","daemon","adb"]},
+    {"file":"src/flixcli/groupchat.py","change":"群组文本按 @ 指纹前缀定向投递，无匹配回退群发","nodes":["native","lan","peer"]},
+    {"file":"src/flixcli/mcp_server.py","change":"ADB 设备/报告/push/pull AI 工具，不暴露 shell","nodes":["cli","adb","approval"]},
+    {"file":"src/flixcli/daemon_runtime.py","change":"创建 AdbClient 并接入本机 API","nodes":["daemon","adb"]},
+    {"file":"src/flixcli/desktop_api.py","change":"只读 ADB 设备与文件传输 loopback 路由","nodes":["daemon","adb","approval"]},
+    {"file":"src/flixcli/adb.py","change":"序列号选择、MSYS 路径还原、push/pull、审批门控 shell","nodes":["adb","approval","fallback"]},
+    {"area":"双轨通信（既有实现保留）","nodes":["compat","native","lan","peer"]},
+    {"area":"远程媒体（下一批，当前未实现）","nodes":["media","fallback"]}
+  ],
+  "open_questions": [
+    "确认本 Brief 与本架构图作为本批开发真源",
+    "确认 Windows GUI 首批可运行，跨平台安装包后置",
+    "确认远程能力采用最小闭环并允许失败降级"
+  ],
+  "verification": [
+    "tests/test_adb.py 4/4：MSYS 路径还原、设备解析、serial 歧义、未批准 shell",
+    "tests/test_groupchat.py 4/4：@ 指纹前缀定向和广播回退",
+    "tests/e2e.py 11/11：既有双节点发现/配对/文本/文件/群组/Web/WebRTC 信令/二维码/剪贴板",
+    "真实 USB ADB：serial=cc75218b，push -> pull -> cmp，flix_cli_adb_roundtrip:PASS",
+    "临时 daemon Desktop API：GET /api/adb/devices 返回两条已授权 M2105K81AC 连接",
+    "PySide6.QtWidgets 导入通过；真实 Windows 桌面会话创建 Flix Control 窗口并用 PrintWindow 截图确认标题、统计卡、导航和浅色布局",
+    "真实 GUI 运行使用 --api-port 19198；隔离 daemon 返回 ADB 设备 2、服务在线，局域网设备 0 符合 --no-announce 验收配置",
+    "无头会话不作为 GUI 视觉验收证据；真实窗口截图位于 F:/cache/temp/flix-gui-printwindow-20261022.png",
+    "远程媒体仍未实现：当前仅实验性信令，未将 HTTP 200 视为媒体闭环"
+  ]
+}

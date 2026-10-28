@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RelayDesk Android v1：发现、配对、文本与文件",
+    "locale": "zh-CN",
+    "status": "已确认并实施（L2-D，2026-10-28；平板↔PC 双向验收全部通过）"
+  },
+  "scope": {
+    "in": ["组播发现", "手动 IP 添加", "配对", "文本互发", "文件收发", "接收门禁", "深色会话界面"],
+    "out": ["群组与 @", "剪贴板同步", "远程观看/控制", "常驻后台服务", "账号与云", "官方媒体互通"]
+  },
+  "lanes": [
+    {"id":"app","label":"平板 App（Kotlin）"},
+    {"id":"channel","label":"设备通道（协议核心）"},
+    {"id":"exceptions","label":"失败与人工兜底","variant":"exception"}
+  ],
+  "mainPath":["start","discover","pair","chat","send","receive","done"],
+  "nodes":[
+    {"id":"start","lane":"app","col":0,"type":"frontend","label":"启动与授权","sublabel":"存储/通知权限 + MulticastLock","width":172},
+    {"id":"discover","lane":"channel","col":1,"type":"messagebus","label":"组播发现","sublabel":"224.0.0.168:8891 announce+listen","width":180},
+    {"id":"pair","lane":"channel","col":2,"type":"security","label":"配对信任","sublabel":"ping_v2 + askPair/confirmPair","width":176},
+    {"id":"chat","lane":"app","col":3,"type":"frontend","label":"设备会话界面","sublabel":"深色气泡 + 输入栏（对齐桌面）","width":180},
+    {"id":"send","lane":"channel","col":4,"type":"backend","label":"文本/文件发送","sublabel":"bubble type0/3 + /file 上传；本地回显","width":186},
+    {"id":"receive","lane":"channel","col":5,"type":"backend","label":"接收与门禁","sublabel":"内置 :8891 服务器；未配对拒收/大小上限/不覆盖","width":200},
+    {"id":"done","lane":"app","col":6,"type":"frontend","label":"回执与历史","sublabel":"落 Download/RelayDesk/；重开可见","width":176},
+    {"id":"manual","lane":"exceptions","col":1,"type":"frontend","label":"手动 IP 添加","sublabel":"组播被吞/VPN 网卡兜底","width":168},
+    {"id":"reject","lane":"exceptions","col":5,"type":"security","label":"拒收提示","sublabel":"未配对/超限/同名冲突","width":168},
+    {"id":"offline","lane":"exceptions","col":4,"type":"security","label":"对端不可达","sublabel":"超时重试提示，不静默丢失","width":172},
+    {"id":"perm","lane":"exceptions","col":0,"type":"security","label":"权限拒绝降级","sublabel":"无通知仅少提示；无存储禁收发","width":176}
+  ],
+  "edges":[
+    {"from":"start","to":"discover","label":"权限就绪","role":"main"},
+    {"from":"start","to":"perm","label":"权限被拒","variant":"security","role":"error"},
+    {"from":"discover","to":"pair","label":"发现设备","role":"main"},
+    {"from":"discover","to":"manual","label":"无响应","variant":"security","role":"error"},
+    {"from":"manual","to":"pair","label":"ping_v2 直连","variant":"dashed"},
+    {"from":"pair","to":"chat","label":"已配对","role":"main"},
+    {"from":"chat","to":"send","label":"输入消息/选文件","role":"main"},
+    {"from":"send","to":"receive","label":"投递到对端通道","role":"main"},
+    {"from":"send","to":"offline","label":"超时/不可达","variant":"security","role":"error"},
+    {"from":"receive","to":"done","label":"门禁通过落盘","role":"main"},
+    {"from":"receive","to":"reject","label":"门禁拒绝","variant":"security","role":"error"},
+    {"from":"reject","to":"chat","label":"显示拒绝原因","variant":"dashed"},
+    {"from":"offline","to":"chat","label":"显示错误","variant":"dashed"},
+    {"from":"perm","to":"chat","label":"降级进入","variant":"dashed"}
+  ],
+  "cards":[
+    {"title":"安全门禁（对齐桌面安全图）","items":["未配对发送方不武装 /file","来源 IP 与设备记录匹配","大小上限（默认 4 GiB 可配）","目标已存在拒绝覆盖；原子落盘"]},
+    {"title":"v1 边界","items":["退后台即暂停发现与接收（无常驻服务）","无群组/剪贴板/远程","wire 格式与 flixcli 逐字节一致"]},
+    {"title":"环境事实","items":["必须 MulticastLock 才能收组播","HyperOS adb install 需开「USB 安装」","NanoHTTPD + HttpURLConnection，最小依赖"]}
+  ],
+  "mapping":[
+    {"file":"android/app/src/main/java/com/relaydesk/app/MainActivity.kt","change":"设备列表、会话界面、配对按钮、发送/附件、权限与 MulticastLock 生命周期","nodes":["start","chat","done","perm"]},
+    {"file":"android/app/src/main/java/com/relaydesk/app/Discovery.kt","change":"组播 join/announce/解析；手动添加走 ping_v2 直连","nodes":["discover","manual"]},
+    {"file":"android/app/src/main/java/com/relaydesk/app/ChannelClient.kt","change":"ping_v2/bubble/intent/file 上传客户端","nodes":["send","pair","offline"]},
+    {"file":"android/app/src/main/java/com/relaydesk/app/ChannelServer.kt","change":":8891 服务器：ping_v2/bubble/intent/file 与接收门禁、MediaStore 原子落盘","nodes":["receive","reject","pair"]},
+    {"file":"android/app/src/main/java/com/relaydesk/app/Store.kt","change":"设备/配对/消息/待接收库","nodes":["done","reject"]},
+    {"file":"android/app/src/main/java/com/relaydesk/app/Wire.kt","change":"wire 模型与官方/flixcli 逐字节一致","nodes":["discover","send","receive"]}
+  ],
+  "open_questions":[
+    "确认 v1 无常驻后台：App 退后台即暂停发现与接收",
+    "确认接收文件落 Download/RelayDesk/ 子目录",
+    "确认 minSdk 29 / targetSdk 34"
+  ],
+  "verification":[
+    "构建：Gradle 8.7 + AGP 8.4.2 + Kotlin 1.9.23（腾讯镜像/阿里云 Maven），BUILD SUCCESSFUL，APK 2.4MB",
+    "安装：HyperOS 需开「USB 安装」开关后 adb install Success；桌面最后一屏出现 RelayDesk 图标（截图 pad-relaydesk-launcher3.png）",
+    "发现：平板 announce 被 PC flixcli 识别（fingerprint 55e98322…，os android）；PC flixd 被平板列表识别（THEWANG · windows · 192.168.237.7:18991）",
+    "配对：PC `flix pair 192.168.236.61:8891` 一条命令双侧落库（replyCode 0）",
+    "文本：PC→平板中文气泡渲染正确（修复 NanoHTTPD parseBody 有损字符集，改为按 Content-Length 读原始字节 + UTF-8）；平板→PC 经 ADB Keyboard 注入发送、PC bubbles 收到",
+    "文件 PC→平板：1MB bin，ok:true，落 /sdcard/Download/RelayDesk/，SHA-256 fbbab289… 两端一致（修复两处：读取循环必须按声明长度截止；不得对 session 输入流使用 .use 以免提前关闭 socket）",
+    "文件 平板→PC：SAF 选择 52B txt，PC Downloads 落盘，SHA-256 e542d639… 两端一致",
+    "其他修复：CLI adb shell 改 REMAINDER 保住 -n 参数；清单加 usesCleartextTraffic 允许局域网明文 HTTP",
+    "行为差异说明：平板接收同名文件由 MediaStore 自动加 (N) 后缀避让（不覆盖），与桌面 409 拒绝语义不同但零覆盖风险等价；未配对/超限门禁与桌面同构，未在真机复测"
+  ]
+}

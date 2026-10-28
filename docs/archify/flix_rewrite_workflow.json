@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Flix 重写：设备、群组、传输与远程能力验收链",
+    "locale": "zh-CN",
+    "status": "已确认；阶段 D 第一批已实施（GUI/ADB/API），远程媒体待下一批（2026-10-22）"
+  },
+  "lanes": [
+    {"id":"user","label":"GUI / CLI / MCP"},
+    {"id":"device","label":"发现、信任与群组"},
+    {"id":"transfer","label":"消息、文件与剪贴板"},
+    {"id":"adbmedia","label":"ADB 与远程能力"},
+    {"id":"exceptions","label":"失败与人工出口","variant":"exception"}
+  ],
+  "mainPath":["start","trust","group","dispatch","transfer","adb","media","finish"],
+  "nodes":[
+    {"id":"start","lane":"user","col":0,"type":"frontend","label":"选择目标与能力","sublabel":"GUI / flix / MCP","width":170},
+    {"id":"trust","lane":"device","col":1,"type":"security","label":"发现与配对信任","sublabel":"指纹、验证码、设备授权","width":174},
+    {"id":"group","lane":"device","col":2,"type":"messagebus","label":"群组与 @ 路由","sublabel":"成员、在线状态、定向消息","width":174},
+    {"id":"dispatch","lane":"transfer","col":3,"type":"backend","label":"任务分发与审批","sublabel":"官方兼容轨 / 自有协议轨","width":180},
+    {"id":"transfer","lane":"transfer","col":4,"type":"backend","label":"传输与同步","sublabel":"文本、图片、目录、剪贴板","width":180},
+    {"id":"adb","lane":"adbmedia","col":5,"type":"external","label":"ADB 联调","sublabel":"push/pull、文本、受控 shell","width":172},
+    {"id":"media","lane":"adbmedia","col":6,"type":"backend","label":"远程最小闭环","sublabel":"观看 / 控制 / 一对一音视频","width":180},
+    {"id":"finish","lane":"user","col":7,"type":"frontend","label":"状态、回执与审计","sublabel":"--json、通知、可恢复任务","width":180},
+    {"id":"nopeer","lane":"exceptions","col":1,"type":"security","label":"无响应 / 指纹不符","sublabel":"网卡、防火墙、手动 IP、停止配对","width":180},
+    {"id":"transferfail","lane":"exceptions","col":4,"type":"security","label":"拒收 / 中断 / 校验失败","sublabel":"重试、断点、取消、人工处理","width":190},
+    {"id":"adbdenied","lane":"exceptions","col":5,"type":"security","label":"ADB 未授权 / 离线","sublabel":"不猜目标，等待授权或重连","width":180},
+    {"id":"degrade","lane":"exceptions","col":6,"type":"security","label":"权限 / 直连 / 编解码失败","sublabel":"降级为仅观看或仅文本","width":190}
+  ],
+  "edges":[
+    {"from":"start","to":"trust","label":"发起操作","role":"main"},
+    {"from":"trust","to":"group","label":"已信任","role":"main"},
+    {"from":"trust","to":"nopeer","label":"无响应/指纹不符","variant":"security","role":"error"},
+    {"from":"group","to":"dispatch","label":"目标明确","role":"main"},
+    {"from":"dispatch","to":"transfer","label":"批准或低风险操作","role":"main"},
+    {"from":"dispatch","to":"transferfail","label":"拒绝/策略不允许","variant":"security","role":"error"},
+    {"from":"transfer","to":"adb","label":"需要本机 Android 验收","variant":"dashed"},
+    {"from":"transfer","to":"finish","label":"任务完成或可恢复","role":"main"},
+    {"from":"transfer","to":"transferfail","label":"网络/磁盘/校验问题","variant":"security","role":"error"},
+    {"from":"adb","to":"media","label":"转入远程能力验收","variant":"dashed"},
+    {"from":"adb","to":"adbdenied","label":"未授权/离线/多设备","variant":"security","role":"error"},
+    {"from":"media","to":"finish","label":"闭环结束","role":"main"},
+    {"from":"media","to":"degrade","label":"能力或权限不足","variant":"security","role":"error"},
+    {"from":"degrade","to":"finish","label":"显示降级原因","variant":"dashed"},
+    {"from":"nopeer","to":"finish","label":"人工处理/重试","variant":"dashed"},
+    {"from":"transferfail","to":"finish","label":"保留状态/重试/取消","variant":"dashed"},
+    {"from":"adbdenied","to":"finish","label":"授权后重连","variant":"dashed"}
+  ],
+  "cards":[
+    {"title":"安全默认值","items":["远程命令必须人工明确批准","ADB 按序列号和授权状态选择目标","摄像头、麦克风、输入注入不自动开启"]},
+    {"title":"可靠性","items":["文件/目录具备进度、校验、取消和断点语义","中断任务保留状态，不静默丢失","离线成员状态可见并可重试"]},
+    {"title":"兼容边界","items":["官方互通首批限已取证的发现、配对、文本、文件、剪贴板","未解官方媒体信令走自有协议或标记未实现","直连失败时降级为仅观看/仅文本"]}
+  ],
+  "mapping":[
+    {"file":"src/flixcli/gui.py","change":"GUI 读取设备、ADB、消息、文件任务和群组；支持群消息发送","nodes":["start","group","transfer","finish"]},
+    {"file":"src/flixcli/groupchat.py","change":"@ 指纹前缀定向路由；未知 @ 保持群发","nodes":["group","dispatch","transfer"]},
+    {"file":"src/flixcli/cli.py","change":"ADB 设备/报告/文件/审批命令","nodes":["start","adb","finish"]},
+    {"file":"src/flixcli/mcp_server.py","change":"AI 只读 ADB 与文件工具","nodes":["start","adb","finish"]},
+    {"file":"src/flixcli/desktop_api.py","change":"loopback ADB 设备和 push/pull 路由","nodes":["dispatch","adb","finish"]},
+    {"file":"src/flixcli/adb.py","change":"明确 serial、授权设备、MSYS 路径和审批门控","nodes":["adb","adbdenied","finish"]},
+    {"area":"发现、配对、群组（既有实现保留）","nodes":["trust","group","nopeer"]},
+    {"area":"传输与剪贴板（既有实现保留）","nodes":["dispatch","transfer","transferfail"]},
+    {"area":"远程能力（下一批，当前只有实验性信令）","nodes":["media","degrade"]}
+  ],
+  "open_questions":[
+    "确认本工作流作为首批验收主链",
+    "确认人工批准覆盖远程命令、屏幕、输入、音视频权限",
+    "确认官方媒体未解部分不作为互通硬门槛"
+  ],
+  "verification":[
+    "ADB 专项测试 4/4：设备解析、授权状态、serial 选择和审批门控",
+    "群组专项测试 4/4：@ 指纹前缀定向、多 @ 保序、未知 @ 和普通文本广播回退",
+    "真实 USB ADB push/pull 字节比对 PASS；Git Bash 远端路径转换已覆盖",
+    "MCP 工具列表 19 个，其中 ADB 工具 4 个且无 shell 工具",
+    "临时 daemon 的 /api/adb/devices 返回两条已授权 Android 设备；真实 GUI 读取同一 API 并显示 ADB 设备 2、服务在线",
+    "真实 Windows GUI PrintWindow 截图确认 Flix Control 标题、统计卡、导航和浅色布局：F:/cache/temp/flix-gui-printwindow-20261022.png",
+    "另一台电脑 DESKTOP-K087HI9：自研 18991 与官方 8891 通道探测均通过；MCP 文本消息 85314d49-0271-47ac-859d-f5584e8e73be 返回 received bubble；双向回复未验收",
+    "远程观看/控制/音视频未完成，失败降级出口保留为下一批实现目标"
+  ]
+}

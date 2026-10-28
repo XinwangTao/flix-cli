@@ -8,10 +8,12 @@ Flix 2.4.0+127（com.ifreedomer 江河智连）局域网互操作复刻：`flixd
 git clone https://github.com/XinwangTao/flix-cli.git
 cd flix-cli
 python -m venv .venv
-.venv\Scripts\pip install -e .        # Windows
+.venv\Scripts\pip install -e .        # Windows / CLI + daemon
+.venv\Scripts\pip install -e ".[gui]" # Windows 桌面 GUI
 # source .venv/bin/activate && pip install -e .   # Linux/macOS
 
 flixd                       # 常驻：设备通道 8891 + Desktop API 8898（默认）
+flix gui                    # 打开桌面控制台（需 [gui] extra）
 ```
 
 与官方客户端同机共存：`flixd --device-port 18991 --api-port 18998`。
@@ -43,6 +45,9 @@ announce 同时以**局域网广播兜底**（子网定向 + 255.255.255.255，�
 | Web 界面（PIN 登录 → 发送页 + **群聊实时视图**：历史+3s 轮询） | `flixd --web-port 18992`（`flix serve` 同） | — | 群视图为 flixcli 附加 |
 | WebRTC 信令面（offer/answer/ice/hangup） | REST `/webrtc/signal`、`/api/webrtc/*` | — | flixcli 间 [compat] |
 | Desktop API（self/devices/settings/events SSE/send-text） | `http://127.0.0.1:8898` | flix_status | 形状对齐 |
+| Windows 桌面控制台 | `flix gui`（PySide6 Essentials） | — | 自有 GUI |
+| Android ADB 设备/报告 | `flix adb devices|report` | flix_adb_devices / flix_adb_report | 本机 USB/无线 ADB |
+| ADB 文件往返 | `flix adb push|pull` | flix_adb_push / flix_adb_pull | 本机授权设备 |
 
 ## AI 接入（MCP）
 
@@ -53,10 +58,9 @@ announce 同时以**局域网广播兜底**（子网定向 + 255.255.255.255，�
                             "args": ["mcp"] } } }
 ```
 
-工具（15）：flix_self / flix_discover / flix_devices / flix_probe / flix_send_text /
-flix_send_clipboard / flix_send_files / flix_bubbles / flix_group_list /
-flix_group_create / flix_group_add / flix_group_send / flix_group_history /
-flix_pair / flix_status。
+工具（19）：原有设备/消息/群组工具，加上 `flix_adb_devices`、`flix_adb_report`、
+`flix_adb_push`、`flix_adb_pull`。ADB 工具要求明确的 `serial`（多设备时不猜目标），
+只执行文件传输和只读报告；shell 不通过 MCP 暴露。
 
 局域网多设备 AI 通讯：每台设备跑 `flixd` + `flix mcp`，AI 之间即可互发文本/剪贴板/
 文件/群消息：
@@ -67,6 +71,42 @@ flix_group_create "ops" → flix_group_add ops <fp2> …        # 多设备群
 flix_group_send ops "广播指令"                               # AI 群发
 flix_bubbles                                                # 读收件
 ```
+
+## 远程会话（自研端）
+
+首批远程能力只支持 flixcli↔flixcli Windows 局域网一对一。请求默认仅观看，音频和控制必须显式
+请求并由接收端本地批准；控制不执行命令，只允许受限鼠标/滚轮/按键白名单。安装媒体依赖：
+
+```bash
+.venv\\Scripts\\pip install -e ".[media]"  # aiortc + av + mss + Pillow + numpy
+flix call --json request <fingerprint> [--audio] [--control]
+flix call --json list
+flix call --json approve <call-id> [--control]
+flix call --json connect <call-id>
+flix call --json revoke <call-id>
+```
+
+媒体使用局域网 host ICE，不接公网中继；权限、直连或编解码失败会返回明确错误并降级，不宣称与官方
+Flix WebRTC/远控互通。会话票据通过临时 X25519 密钥交换派生 HMAC 密钥，线上不传共享密钥。
+
+## Android / ADB 联调
+
+```bash
+flix adb --json --serial cc75218b devices
+flix adb --json --serial cc75218b report
+flix adb --json --serial cc75218b push ./photo.png /sdcard/Download/photo.png
+flix adb --json --serial cc75218b pull /sdcard/Download/photo.png F:\\cache\\photo.png
+```
+
+当前设备可能同时显示 USB 序列号和无线序列号；必须显式指定 `--serial`，避免传输目标歧义。
+ADB shell 默认只返回 `approval_required`；只有本机操作者显式加 `--approve` 才会执行。
+通过 Git Bash 调用时，适配器会还原被 MSYS 转换的 `/sdcard/...` 远端路径。
+
+## 桌面控制台
+
+`flix gui` 展示 daemon 统一状态：局域网设备、ADB 设备、最近消息和传输工作区。
+GUI 通过 `127.0.0.1:8898` Desktop API 工作，CLI/MCP 与 GUI 读取同一状态。若缺少依赖，
+执行 `pip install -e ".[gui]"`。
 
 ## 自动应答（flix agent）
 
@@ -121,8 +161,12 @@ python tests/e2e.py         # 双节点 11 项：ping/pair/text/file/group/web/
 
 - 官方「创建群组」为 Flix MAX 付费功能；群 resolve 的**创建方应答**格式未解
   （官方对构造应答静默丢弃），flixcli 间群聊用本地群表 + groupId 逐发（官方可收）。
-- WebRTC 媒体面（aiortc）未接，信令面为 flixcli 间 [compat]；官方信令
-  TransAction 真名待解。
+- flixcli 自有 LAN 媒体面已实现：X25519/HMAC 会话认证、host ICE、主屏视频快照、分级批准和有限控制；
+  已通过单机 offer/answer、双隔离 HTTP 节点和主屏单帧验收。真实两台 Windows 的持续视频帧、控制效果、
+  音频样本与断线清理仍待对端升级同一版本；官方 Flix WebRTC/远控互通不承诺。
+- `/webrtc/signal` 是旧实验性信令兼容面，不能把其 HTTP 200 当作媒体完成；新媒体走
+  `/webrtc/v1/session`、`/webrtc/v1/signal`，要求配对、来源 IP、nonce/seq 和 HMAC。
+- Windows GUI 已扩展远程请求、分级批准、快照预览和有限控制；音频采集/播放仍未接入。
 - 二维码 payload 为 flixcli 自有 `flix2://` 格式（官方编解码待解）。
 - 合规约束：不复制品牌资源、不绕过付费、不上传敏感数据。
 

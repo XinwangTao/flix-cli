@@ -58,8 +58,9 @@ async def send_file(ip: str, path: str, *, from_fp: str, to_fp: str,
                         headers={"Content-Type": "application/octet-stream"},
                         timeout=aiohttp.ClientTimeout(total=timeout)) as r:
                     if r.status != 200:
+                        detail = (await r.text()).strip()[:180]
                         return {"ok": False, "error": "upload-failed",
-                                "detail": f"HTTP {r.status}"}
+                                "detail": f"HTTP {r.status} {detail}"}
         return {"ok": True, "id": bubble["id"], "resourceId": resource_id,
                 "name": name, "size": size, "to": to_fp}
     except asyncio.TimeoutError:

@@ -24,13 +24,24 @@ def find_group(store, gid_or_name: str) -> dict | None:
     return None
 
 
+def _mention_targets(members: list[str], text: str) -> list[str]:
+    """Resolve @<fingerprint prefix> mentions without changing wire shape."""
+    tokens = {part[1:].rstrip(",.!?:;，。！？：；")
+              for part in text.split() if part.startswith("@") and len(part) > 1}
+    if not tokens:
+        return members
+    selected = [member for member in members
+                if any(member.startswith(token) for token in tokens)]
+    return selected or members
+
+
 async def send_group_text(store, ident, gid_or_name: str, text: str) -> dict:
     g = find_group(store, gid_or_name)
     if g is None:
         return {"ok": False, "error": "no-group",
                 "detail": f"unknown group {gid_or_name!r}; see flix group list"}
     me = ident["fingerprint"]
-    members = [m for m in g["members"] if m != me]
+    members = _mention_targets([m for m in g["members"] if m != me], text)
     results = []
     delivered = 0
     for m in members:

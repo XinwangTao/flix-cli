@@ -61,7 +61,8 @@ def main() -> int:
     for env, dp, ap in ((A, A_PORT, 18998), (B, B_PORT, 18997)):
         shutil.rmtree(env["APPDATA"], ignore_errors=True)
         p = subprocess.Popen([FLIX, "serve", "--device-port", str(dp),
-                              "--api-port", str(ap), "--web-port", str(dp + 1)],
+                              "--api-port", str(ap), "--web-port", str(dp + 1),
+                              "--no-announce"],
                              env={**os.environ, **env},
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         procs.append(p)
@@ -74,17 +75,28 @@ def main() -> int:
 
         r = sh(["pair", "--json", f"127.0.0.1:{B_PORT}"], env=A)
         check("pair", r.returncode == 0 and '"paired": true' in r.stdout)
+        # The isolated nodes communicate over loopback; align the test fixture
+        # with the production source-IP binding instead of weakening the server.
+        from flixcli.config import Store, load_or_create_identity
+        with Store(Path(A["APPDATA"]) / "flixcli" / "db.sqlite") as store_a:
+            own_a = load_or_create_identity(store_a)
+        with Store(Path(B["APPDATA"]) / "flixcli" / "db.sqlite") as store_b:
+            store_b.upsert_device(own_a["fingerprint"], ip="127.0.0.1", port=A_PORT)
 
         r = sh(["send-text", "--json", f"127.0.0.1:{B_PORT}", "e2e-hello"], env=A)
         check("send-text", r.returncode == 0 and '"ok": true' in r.stdout)
 
-        tf = ROOT / "reverse" / "e2e_file.txt"
+        file_name = f"e2e_file_{int(time.time() * 1000)}.txt"
+        tf = ROOT / "reverse" / file_name
         tf.parent.mkdir(exist_ok=True)
         tf.write_text(f"e2e-{time.time()}", encoding="utf-8")
         r = sh(["send", "--json", f"127.0.0.1:{B_PORT}", str(tf)], env=A)
-        check("send-file", r.returncode == 0 and '"ok": true' in r.stdout)
-        got = Path(os.path.expanduser("~")) / "Downloads" / "e2e_file.txt"
+        check("send-file", r.returncode == 0 and '"ok": true' in r.stdout,
+              f"stdout={r.stdout.strip()} stderr={r.stderr.strip()}")
+        got = Path(os.path.expanduser("~")) / "Downloads" / file_name
         check("file-landed", got.exists())
+        if got.exists():
+            got.unlink()
 
         r = sh(["group", "create", "--json", "reg-group",
                 "--member", fp_b], env=A)

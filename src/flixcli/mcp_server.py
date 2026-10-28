@@ -14,6 +14,7 @@ import json
 import sys
 
 from . import __version__
+from .adb import AdbClient, AdbError
 from .channel import PeerError, post_bubble, post_intent
 from .config import Store, load_or_create_identity
 from .discovery import Discovery
@@ -112,10 +113,39 @@ TOOLS = [
      "description": "Node status: identity, device/group/pairing counts, "
                     "runtime ports — use this first for self-orientation.",
      "inputSchema": {"type": "object", "properties": {}, "required": []}},
+    {"name": "flix_adb_devices",
+     "description": "List connected Android devices and authorization state. Read-only.",
+     "inputSchema": {"type": "object", "properties": {"adb_path": {"type": "string"}}}},
+    {"name": "flix_adb_report",
+     "description": "Return a structured ADB connectivity report. Read-only.",
+     "inputSchema": {"type": "object", "properties": {"serial": {"type": "string"}, "adb_path": {"type": "string"}}}},
+    {"name": "flix_adb_push",
+     "description": "Copy a local file to one explicitly selected authorized Android device.",
+     "inputSchema": {"type": "object", "properties": {"serial": {"type": "string"}, "source": {"type": "string"}, "destination": {"type": "string"}}, "required": ["serial", "source", "destination"]}},
+    {"name": "flix_adb_pull",
+     "description": "Copy a file from one explicitly selected authorized Android device.",
+     "inputSchema": {"type": "object", "properties": {"serial": {"type": "string"}, "source": {"type": "string"}, "destination": {"type": "string"}}, "required": ["serial", "source", "destination"]}},
 ]
 
 
 async def _tool_call(name: str, args: dict) -> dict:
+    if name in ("flix_adb_devices", "flix_adb_report", "flix_adb_push", "flix_adb_pull"):
+        client = AdbClient(adb_path=args.get("adb_path"))
+        try:
+            serial = str(args.get("serial")) if args.get("serial") else None
+            if name == "flix_adb_devices":
+                return {"ok": True, "devices": [d.as_dict() for d in await client.devices()]}
+            if name == "flix_adb_report":
+                return await client.report(serial)
+            if name == "flix_adb_push":
+                return await client.push(str(args.get("source", "")),
+                                         str(args.get("destination", "")), serial)
+            return await client.pull(str(args.get("source", "")),
+                                     str(args.get("destination", "")), serial)
+        except AdbError as e:
+            return {"ok": False, "error": e.kind, "detail": e.detail,
+                    "returncode": e.returncode}
+
     if name == "flix_self":
         store = Store()
         try:

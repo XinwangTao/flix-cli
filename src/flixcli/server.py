@@ -13,14 +13,19 @@ Confirmed official behaviors (reverse/protocol.md §2-§3, §8):
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import ipaddress
 import json
 import os
 import time
+import uuid
+from pathlib import Path
 from typing import Callable
 
 from aiohttp import web
 
 from . import DEVICE_PORT, model
+from .media_session import SessionError
 
 
 def _to_int(v, default: int = 0) -> int:
@@ -37,6 +42,9 @@ def _to_float(v, default: float = 0.0) -> float:
         return default
 
 
+DEFAULT_MAX_FILE_BYTES = 4 * 1024 * 1024 * 1024
+
+
 def _save_dir(store) -> str:
     p = store.prefs()
     d = p.get("saveDir") or os.path.join(os.path.expanduser("~"), "Downloads")
@@ -44,9 +52,31 @@ def _save_dir(store) -> str:
     return d
 
 
+def _max_file_bytes(store) -> int:
+    value = store.prefs().get("max_receive_bytes", DEFAULT_MAX_FILE_BYTES)
+    try:
+        return max(1, min(int(value), DEFAULT_MAX_FILE_BYTES))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_FILE_BYTES
+
+
+def _safe_destination(store, name: str) -> tuple[str, str] | None:
+    clean = os.path.basename(name.replace("\\", "/"))
+    if not clean or clean in (".", ".."):
+        return None
+    root = os.path.realpath(_save_dir(store))
+    dest = os.path.realpath(os.path.join(root, clean))
+    try:
+        if os.path.commonpath((root, dest)) != root:
+            return None
+    except ValueError:
+        return None
+    return root, dest
+
+
 def make_app(store, ident: dict, publish: Callable[[str, dict], None],
              clipboard_setter=None, device_port: int = DEVICE_PORT,
-             signal_hub=None) -> web.Application:
+             signal_hub=None, media_manager=None, media_runtime=None) -> web.Application:
     async def ping_v2_post(request: web.Request) -> web.Response:
         # Manual-add handshake [RT 2026-10-21]: the official client ignores
         # the request body except `from` (echoed back) and answers with its
@@ -105,9 +135,8 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
             store.con.commit()
             publish("bubbleChanged", {"bubbleId": bubble["id"], "type": "file",
                                       "groupId": gid})
-            # Official receiver semantics [RT log 22:15]: for a PAIRED sender
-            # the receiver answers with a confirmReceive intent (retrying 5x
-            # while the sender looks offline), then accepts POST /file.
+            # Only a paired sender may auto-arm the raw /file phase. Unpaired
+            # bubbles remain visible for a later user decision but cannot write.
             if store.is_paired(bubble["from"]):
                 sender_port = store.con.execute(
                     "SELECT port FROM persistence_devices WHERE fingerprint=?",
@@ -204,36 +233,68 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
 
     async def file_post(request: web.Request) -> web.Response:
         rid = request.query.get("share_id", "")
-        name = os.path.basename(request.query.get("file_name", "") or "")
+        supplied_name = request.query.get("file_name", "") or ""
         row = store.con.execute(
-            "SELECT name, size FROM file_contents WHERE resource_id=?",
+            "SELECT f.name, f.size, f.path, b.from_device, f.waiting_for_accept "
+            "FROM file_contents f JOIN bubble_entities b ON b.id=f.id "
+            "WHERE f.resource_id=?",
             (rid,)).fetchone()
-        if not row or not name:
+        if not row:
             return web.Response(status=404, text="Route not found")
-        dest_dir = _save_dir(store)
-        dest = os.path.join(dest_dir, name)
-        base = os.path.abspath(dest_dir)
-        if not os.path.abspath(dest).startswith(base + os.sep):
+        expected_name, declared, existing_path, sender, waiting = row
+        if not store.is_paired(str(sender)):
+            return web.Response(status=403, text="sender not paired")
+        known = store.con.execute(
+            "SELECT COALESCE(ip,'') FROM persistence_devices WHERE fingerprint=?", (sender,)
+        ).fetchone()
+        expected_ip = known[0] if known else ""
+        if expected_ip and request.remote and expected_ip != request.remote:
+            return web.Response(status=403, text=(
+                f"source mismatch: expected={expected_ip} remote={request.remote}"))
+        if existing_path or not waiting:
+            return web.Response(status=409, text="transfer already committed")
+        safe = _safe_destination(store, expected_name)
+        if safe is None or os.path.basename(supplied_name.replace("\\", "/")) != os.path.basename(expected_name):
             return web.Response(status=400, text="bad file name")
+        root, dest = safe
+        if os.path.exists(dest):
+            return web.Response(status=409, text="destination exists")
+        declared = _to_int(declared, -1)
+        maximum = _max_file_bytes(store)
+        if declared < 0 or declared > maximum:
+            return web.Response(status=413, text="file too large")
+        temp_dir = os.path.join(root, ".flix-incoming")
+        os.makedirs(temp_dir, exist_ok=True)
+        dest_tmp = os.path.join(temp_dir, f"{uuid.uuid4().hex}.part")
         got = 0
-        # Official receiver writes to "<name>.flixdownload" during transfer,
-        # then the final file appears [RT 2026-05-15 log _saveFileAndAddBubble].
-        dest_tmp = dest + ".flixdownload"
         try:
-            with open(dest_tmp, "wb") as f:
-                async for chunk in request.content.iter_any():
-                    f.write(chunk)
+            with open(dest_tmp, "xb") as f:
+                async for chunk in request.content.iter_chunked(256 * 1024):
                     got += len(chunk)
+                    if got > declared or got > maximum:
+                        raise ValueError("payload exceeds declared size")
+                    f.write(chunk)
+                f.flush()
+                os.fsync(f.fileno())
+            if got != declared:
+                raise ValueError(f"size mismatch: {got} != {declared}")
+            if os.path.exists(dest):
+                raise FileExistsError(dest)
             os.replace(dest_tmp, dest)
         except (ConnectionResetError, asyncio.CancelledError):
+            with contextlib.suppress(OSError):
+                os.unlink(dest_tmp)
             return web.Response(status=400, text="transfer aborted")
+        except (OSError, ValueError) as error:
+            with contextlib.suppress(OSError):
+                os.unlink(dest_tmp)
+            return web.Response(status=400, text=str(error))
         store.con.execute(
-            "UPDATE file_contents SET path=?, progress=1.0 WHERE resource_id=?",
+            "UPDATE file_contents SET path=?, progress=1.0, waiting_for_accept=0 WHERE resource_id=?",
             (dest, rid))
         store.con.commit()
-        publish("fileReceived", {"resourceId": rid, "name": name,
-                                 "size": _to_int(row[1]), "received": got,
-                                 "path": dest})
+        publish("fileReceived", {"resourceId": rid, "name": expected_name,
+                                 "size": declared, "received": got, "path": dest})
         return web.Response(text="ok")
 
     async def group_command_post(request: web.Request) -> web.Response:
@@ -265,6 +326,78 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
         return web.Response(status=404, text='{"error":"找不到群组"}',
                             content_type="application/json")
 
+    async def media_session_post(request: web.Request) -> web.Response:
+        if media_manager is None:
+            return web.json_response({"ok": False, "error": "media-disabled"}, status=503)
+        try:
+            body = await request.json()
+            action = body.get("action")
+            peer = str(body.get("from") or "")
+            if action == "request":
+                session = media_manager.request(peer, body.get("capabilities") or ["view"],
+                                                incoming=True,
+                                                call_id=str(body.get("callId") or "") or None,
+                                                source_ip=request.remote,
+                                                peer_public_key=str(body.get("publicKey") or ""))
+                return web.json_response({"ok": True, "action": "requested", "session": session})
+            if action == "decision":
+                call_id = str(body.get("callId") or "")
+                current = media_manager.require(call_id)
+                sender = str(body.get("from") or "")
+                expected_sender = current.initiator if current.receiver == ident.get("fingerprint") else current.receiver
+                if sender != expected_sender:
+                    raise ValueError("decision sender mismatch")
+                expected_ip = media_manager.peer_address(sender)
+                if expected_ip and request.remote and expected_ip != request.remote:
+                    raise SessionError("source-mismatch",
+                                       "decision source IP does not match paired device")
+                if current.receiver == ident.get("fingerprint"):
+                    raise ValueError("receiver decisions must come from local API")
+                if body.get("approve") is True:
+                    decision = media_manager.accept_decision(
+                        call_id, body.get("capabilities") or ["view"],
+                        str(body.get("publicKey") or ""),
+                        float(body.get("expiresAt") or 0) / 1000)
+                    return web.json_response({"ok": True, "action": "approved", "session": decision})
+                denied = media_manager.accept_denial(call_id, str(body.get("reason") or "denied"))
+                return web.json_response({"ok": True, "action": "denied", "session": denied})
+            return web.json_response({"ok": False, "error": "unknown-action"}, status=400)
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            return web.json_response({"ok": False, "error": "bad-json", "detail": str(exc)}, status=400)
+        except SessionError as exc:
+            return web.json_response({"ok": False, "error": exc.kind,
+                                      "detail": exc.detail}, status=403)
+
+    async def media_signal_post(request: web.Request) -> web.Response:
+        if media_manager is None:
+            return web.json_response({"ok": False, "error": "media-disabled"}, status=503)
+        try:
+            body = await request.json()
+            session = media_manager.verify_signal(body, source_ip=request.remote)
+            signal_type = body.get("type")
+            if signal_type == "offer":
+                if media_runtime is None:
+                    return web.json_response({"ok": False, "error": "media-disabled"}, status=503)
+                peer = media_runtime.create(session.call_id)
+                answer = await peer.answer(body.get("payload") or {},
+                                           share_screen="view" in session.approved)
+                envelope = media_manager.next_signal(session.call_id, "answer", answer)
+                return web.json_response({"ok": True, "callId": session.call_id,
+                                          "signal": envelope})
+            if signal_type == "answer":
+                if media_runtime is None:
+                    return web.json_response({"ok": False, "error": "media-disabled"}, status=503)
+                await media_runtime.get(session.call_id).apply_answer(body.get("payload") or {})
+            elif signal_type == "hangup":
+                media_manager.revoke(session.call_id, "peer hangup")
+            media_manager._emit(session, "signal-received")
+            return web.json_response({"ok": True, "callId": session.call_id})
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            return web.json_response({"ok": False, "error": "bad-json", "detail": str(exc)}, status=400)
+        except SessionError as exc:
+            return web.json_response({"ok": False, "error": exc.kind,
+                                      "detail": exc.detail}, status=403)
+
     async def not_found(request: web.Request) -> web.Response:
         return web.Response(status=404, text="Route not found")
 
@@ -272,13 +405,24 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
     @web.middleware
     async def _wire_log(request, handler):
         import time as _t
-        try:
-            body = await request.read()
-        except Exception:
-            body = b"?"
+        if request.path == "/file":
+            # /file is a streaming upload; reading here would consume the body
+            # before file_post can enforce size and commit it.
+            body_repr = "<streaming file body redacted>"
+        else:
+            try:
+                body = await request.read()
+            except Exception:
+                body = b"?"
+            if request.path.startswith("/webrtc/v1/"):
+                import hashlib as _hashlib
+                digest = _hashlib.sha256(body).hexdigest()[:16]
+                body_repr = f"<redacted media envelope bytes={len(body)} sha256={digest}>"
+            else:
+                body_repr = repr(body[:2000])
         rec = (f"[{_t.strftime('%H:%M:%S')}] {request.method} {request.path_qs}\n"
                f"headers={dict(request.headers)}\n"
-               f"body={body[:2000]!r}\n----\n")
+               f"body={body_repr}\n----\n")
         with open(r"D:/flix-cli/reverse/wire_capture.log", "ab") as f:
             f.write(rec.encode("utf-8", "replace"))
         return await handler(request)
@@ -286,6 +430,9 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
     app = web.Application(middlewares=[_wire_log])
 
     app.router.add_post("/ping_v2", ping_v2_post)
+    if media_manager is not None:
+        app.router.add_post("/webrtc/v1/session", media_session_post)
+        app.router.add_post("/webrtc/v1/signal", media_signal_post)
     if signal_hub is not None:
         from .webrtc import make_signal_app
         app.add_subapp("/webrtc", make_signal_app(signal_hub))
@@ -299,11 +446,12 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
 
 async def serve_channel(store, ident, port: int, clipboard_setter=None,
                         publish: Callable[[str, dict], None] | None = None,
-                        signal_hub=None):
+                        signal_hub=None, media_manager=None, media_runtime=None):
     if publish is None:
         publish = lambda t, p: None  # noqa: E731
     app = make_app(store, ident, publish, clipboard_setter, device_port=port,
-                   signal_hub=signal_hub)
+                   signal_hub=signal_hub, media_manager=media_manager,
+                   media_runtime=media_runtime)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)

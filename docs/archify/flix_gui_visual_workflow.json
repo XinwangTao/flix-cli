@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Flix Control 高保真设备会话界面",
+    "locale": "zh-CN",
+    "status": "已确认并实施（L1-D，2026-10-23；三栏与会话 populated 验收通过）"
+  },
+  "scope": {
+    "in": ["Windows 深色桌面 GUI", "设备列表", "设备会话", "文本/图片/文件发送", "群组与远程入口", "ADB 状态"],
+    "out": ["复制 Flix 商标/图标/付费素材", "官方云账号页面", "媒体能力超出已确认安全子图"]
+  },
+  "nodes": [
+    {"id":"shell","kind":"frontend","label":"深色桌面壳","note":"窄侧栏 + 设备栏 + 会话区 + 底部输入区"},
+    {"id":"rail","kind":"frontend","label":"能力导航栏","note":"发现、搜索、设备、设置；自有图标资源"},
+    {"id":"devices","kind":"backend","label":"设备列表","note":"在线状态、别名、系统、最近文件/消息摘要"},
+    {"id":"session","kind":"messagebus","label":"设备会话页","note":"顶部能力操作、消息气泡、时间分隔、滚动历史"},
+    {"id":"composer","kind":"frontend","label":"多模态输入栏","note":"文本、图片、文件、发送、更多动作"},
+    {"id":"group","kind":"backend","label":"群组会话","note":"成员列表、@ 前缀定向、群消息历史"},
+    {"id":"transfer","kind":"backend","label":"传输任务抽屉","note":"进度、速度、取消、重试、断点与接收审批"},
+    {"id":"remote","kind":"security","label":"远程会话入口","note":"独立批准 view/audio/control，默认关闭 control"},
+    {"id":"adb","kind":"external","label":"ADB 设备状态","note":"授权、序列号、push/pull、受控 shell"},
+    {"id":"settings","kind":"frontend","label":"设置与状态","note":"服务端口、主题、通知、剪贴板、媒体依赖状态"}
+  ],
+  "edges": [
+    {"from":"shell","to":"rail","label":"切换工作区"},
+    {"from":"rail","to":"devices","label":"发现/搜索设备"},
+    {"from":"devices","to":"session","label":"选择设备"},
+    {"from":"session","to":"composer","label":"输入消息或附件"},
+    {"from":"composer","to":"transfer","label":"文件/图片任务"},
+    {"from":"session","to":"group","label":"进入群组会话"},
+    {"from":"session","to":"remote","label":"请求观看/远程能力","variant":"security"},
+    {"from":"rail","to":"adb","label":"本机 Android 联调"},
+    {"from":"rail","to":"settings","label":"配置与状态"},
+    {"from":"transfer","to":"session","label":"完成/失败回执"},
+    {"from":"remote","to":"session","label":"批准后回到会话状态","variant":"security"}
+  ],
+  "visual_contract": [
+    "深色背景、蓝色主操作、青色/绿色状态色；避免单一紫色渐变",
+    "固定三栏结构：窄能力栏、设备列表栏、主会话区；窗口缩放不改变信息层级",
+    "设备卡片优先显示在线状态与最近活动，不用营销式大标题",
+    "圆形图标按钮只用于熟悉动作，陌生动作保留图标+文字和悬浮提示",
+    "输入栏始终固定在会话底部，附件发送显示进度与可取消状态",
+    "远程控制、ADB shell 和媒体权限都必须在会话内显示批准状态"
+  ],
+  "mapping": [
+    {"file":"src/flixcli/gui.py","change":"重做三栏桌面壳、设备列表、会话页、输入栏、群组/传输/远程/ADB 状态入口","nodes":["shell","rail","devices","session","composer","group","transfer","remote","adb","settings"]},
+    {"file":"src/flixcli/desktop_api.py","change":"为 GUI 提供设备、消息、群组、传输、媒体、ADB 统一状态","nodes":["devices","session","group","transfer","remote","adb","settings"]},
+    {"file":"src/flixcli/groupchat.py","change":"群组 @ 定向发送保持现有 wire 语义","nodes":["group","session"]}
+  ],
+  "open_questions": [
+    "确认按官方截图的信息架构重做当前 GUI，但使用自有品牌和资源",
+    "确认首屏默认进入设备会话/设备列表，不保留当前统计卡式首页",
+    "确认传输、群组、远程和 ADB 作为同一桌面壳内的工作区"
+  ],
+  "verification": [
+    "真实 Windows RelayDesk 空状态截图：F:/cache/temp/relaydesk-three-column-20261023.png；三栏、深色层级、能力栏和空状态通过",
+    "真实 Windows populated 设备列表截图：F:/cache/temp/relaydesk-populated-20261023.png；两台设备、在线/离线、系统、地址和底部统计通过",
+    "真实 Windows populated 会话截图：F:/cache/temp/relaydesk-session-20261023-02.png；设备头、左右消息气泡、固定输入栏和发送按钮通过",
+    "本地发送文本/群消息现在写入本地 bubble store，下一次刷新即时显示蓝色回显",
+    "真实 API 驱动设备、消息、群组、ADB、媒体和设置状态；16/16 专项、11/11 兼容 e2e、compileall 通过"
+  ]
+}

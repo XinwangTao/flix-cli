@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Flix 自有远程会话：观看、音视频与有限控制",
+    "locale": "zh-CN",
+    "status": "已确认并实施（L1-D，2026-10-23；真实双 Windows 联调待对端升级）"
+  },
+  "scope": {
+    "in": ["flixcli↔flixcli Windows LAN", "一对一观看", "可选单向音频", "会话级有限鼠标/键盘控制", "GUI/CLI/MCP 状态"],
+    "out": ["官方 Flix WebRTC 互通", "公网中继/NAT 穿透", "无人值守控制", "任意远程命令", "安全桌面/UAC 绕过", "多方会议"]
+  },
+  "lanes": [
+    {"id":"request","label":"发起端 GUI / CLI"},
+    {"id":"session","label":"对端 flixd 会话与认证"},
+    {"id":"media","label":"媒体与控制通道"},
+    {"id":"exceptions","label":"拒绝、撤销与降级","variant":"exception"}
+  ],
+  "mainPath":["request","negotiate","approve","connect","run","revoke"],
+  "nodes":[
+    {"id":"request","lane":"request","col":0,"type":"frontend","label":"发起观看请求","sublabel":"目标指纹、view/audio/control 能力","width":180},
+    {"id":"negotiate","lane":"session","col":1,"type":"security","label":"认证与能力协商","sublabel":"已配对 peer、HMAC 会话票据、nonce/seq","width":190},
+    {"id":"approve","lane":"session","col":2,"type":"security","label":"对端本地批准","sublabel":"独立批准屏幕 / 音频 / 控制权限","width":190},
+    {"id":"connect","lane":"media","col":3,"type":"backend","label":"建立自有媒体会话","sublabel":"LAN host ICE、DTLS-SRTP、DataChannel","width":190},
+    {"id":"run","lane":"media","col":4,"type":"backend","label":"观看 / 音频 / 有限控制","sublabel":"控制事件限速、序号、按键白名单","width":200},
+    {"id":"revoke","lane":"request","col":5,"type":"frontend","label":"结束与撤销","sublabel":"手动断开、超时、窗口关闭即清理","width":185},
+    {"id":"authfail","lane":"exceptions","col":1,"type":"security","label":"认证失败 / 未配对","sublabel":"拒绝，不建立会话","width":185},
+    {"id":"deny","lane":"exceptions","col":2,"type":"security","label":"权限拒绝","sublabel":"保持离线或仅请求允许的能力","width":185},
+    {"id":"connectfail","lane":"exceptions","col":3,"type":"security","label":"直连 / 编解码失败","sublabel":"提示原因，降级为仅文本","width":195},
+    {"id":"controlfail","lane":"exceptions","col":4,"type":"security","label":"输入不可用","sublabel":"UIPI、锁屏、安全桌面、超时即撤销控制","width":200},
+    {"id":"audit","lane":"session","col":5,"type":"database","label":"审计与状态","sublabel":"只记会话元数据，不记键盘内容或媒体 payload","width":205}
+  ],
+  "edges":[
+    {"from":"request","to":"negotiate","label":"发起 session","role":"main"},
+    {"from":"negotiate","to":"approve","label":"认证通过","role":"main"},
+    {"from":"negotiate","to":"authfail","label":"未知 peer / 重放 / seq 错误","variant":"security","role":"error"},
+    {"from":"approve","to":"connect","label":"批准至少 view","role":"main"},
+    {"from":"approve","to":"deny","label":"拒绝或部分批准","variant":"security","role":"error"},
+    {"from":"connect","to":"run","label":"媒体握手完成","role":"main"},
+    {"from":"connect","to":"connectfail","label":"LAN / ICE / codec 失败","variant":"security","role":"error"},
+    {"from":"run","to":"controlfail","label":"控制权限/输入不可用","variant":"security","role":"error"},
+    {"from":"run","to":"revoke","label":"结束、超时或窗口关闭","role":"main"},
+    {"from":"revoke","to":"audit","label":"清理并记录元数据","variant":"dashed"},
+    {"from":"authfail","to":"audit","label":"记录拒绝原因","variant":"dashed"},
+    {"from":"deny","to":"audit","label":"记录权限结果","variant":"dashed"},
+    {"from":"connectfail","to":"audit","label":"记录降级原因","variant":"dashed"},
+    {"from":"controlfail","to":"revoke","label":"立即撤销 control","variant":"security"}
+  ],
+  "security_defaults": [
+    "配对码只做人机确认，不作为长期密钥",
+    "远程控制默认关闭，view/audio/control 独立批准",
+    "控制仅限主显示器鼠标、滚轮、有限按键白名单；禁止任意 shell、Win+L、Ctrl+Alt+Del、安全桌面",
+    "会话过期、断线、锁屏、窗口关闭时撤销全部能力",
+    "本批仅允许局域网 host candidates，不引入公网中继"
+  ],
+  "mapping": [
+    {"file":"src/flixcli/media_session.py","change":"X25519/HKDF 会话密钥、HMAC 信令、peer/IP/seq/nonce 校验、过期撤销、审计元数据","nodes":["negotiate","approve","revoke","audit"]},
+    {"file":"src/flixcli/control.py","change":"控制事件白名单、归一化坐标、单调序号、速率限制和 Windows SendInput","nodes":["approve","run","controlfail","revoke"]},
+    {"file":"src/flixcli/media_transport.py","change":"aiortc host ICE、屏幕轨道、视频接收快照、DataChannel 控制","nodes":["connect","run","connectfail"]},
+    {"file":"src/flixcli/desktop_api.py","change":"媒体 request/decision/revoke/offer/control/snapshot loopback API","nodes":["request","approve","run","revoke","audit"]},
+    {"file":"src/flixcli/server.py","change":"/webrtc/v1/session 与 /webrtc/v1/signal 安全设备路由；媒体 body 脱敏日志","nodes":["negotiate","connect","connectfail"]},
+    {"file":"src/flixcli/gui.py","change":"远程请求、分级批准、连接、快照预览和有限控制事件","nodes":["request","approve","run","revoke"]},
+    {"file":"src/flixcli/cli.py","change":"call list/request/approve/deny/connect/revoke","nodes":["request","approve","revoke","audit"]}
+  ],
+  "open_questions": [
+    "是否确认只做 flixcli↔flixcli Windows 局域网一对一最小闭环",
+    "是否确认 view/audio/control 三种能力分别批准，control 默认关闭",
+    "是否接受首批仅 host ICE、无公网中继，失败降级为文本"
+  ],
+  "verification_plan": [
+    "tests/test_media_session.py 6/6：X25519/HKDF、HMAC、伪造来源、重放、过期、审批边界",
+    "tests/test_media_transport.py 1/1：aiortc offer/answer + DataChannel 闭环，无设备采集",
+    "tests/test_media_http.py 1/1：两隔离 HTTP 节点 request→approve→HMAC offer→answer→apply",
+    "全部专项测试 16/16；既有 tests/e2e.py 11/11；Python compileall 通过",
+    "真实 Windows 主屏单帧 PASS：1280x720 yuv420p；mss 线程句柄安全",
+    "隔离 daemon /api/media/sessions 初始为空；未配对请求返回 not-paired",
+    "真实双 Windows 屏幕帧、控制效果、音频样本和断线清理尚未联调；需要对端升级同一版本",
+    "日志只保留媒体 envelope 的长度与截断 SHA-256，不记录 SDP、密钥或控制 payload"
+  ]
+}
