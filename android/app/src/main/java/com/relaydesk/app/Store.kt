@@ -6,9 +6,9 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import org.json.JSONObject
 
-/** Local state: devices, pairing trust and chat history. */
+/** Local state: devices, pairing trust, groups and chat history. */
 class Store(context: Context) :
-    SQLiteOpenHelper(context, "relaydesk.db", null, 1) {
+    SQLiteOpenHelper(context, "relaydesk.db", null, 4) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("""CREATE TABLE devices(
@@ -19,13 +19,38 @@ class Store(context: Context) :
         db.execSQL("""CREATE TABLE messages(
             id TEXT PRIMARY KEY, from_device TEXT, to_device TEXT, type INTEGER,
             time INTEGER, group_id TEXT DEFAULT '', text_content TEXT,
-            file_name TEXT, file_size INTEGER DEFAULT 0, file_path TEXT)""")
+            file_name TEXT, file_size INTEGER DEFAULT 0, file_path TEXT,
+            status INTEGER NOT NULL DEFAULT 0)""")
         db.execSQL("""CREATE TABLE incoming(
             resource_id TEXT PRIMARY KEY, bubble_id TEXT, sender TEXT,
-            name TEXT, size INTEGER, path TEXT, waiting INTEGER DEFAULT 1)""")
+            name TEXT, size INTEGER, path TEXT, waiting INTEGER DEFAULT 1,
+            group_id TEXT DEFAULT '')""")
+        db.execSQL("""CREATE TABLE groups(
+            id TEXT PRIMARY KEY, name TEXT, created_at INTEGER,
+            rev INTEGER NOT NULL DEFAULT 0, left_at INTEGER NOT NULL DEFAULT 0)""")
+        db.execSQL("""CREATE TABLE group_members(
+            group_id TEXT, fingerprint TEXT, PRIMARY KEY(group_id, fingerprint))""")
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) {
+            // v1 databases predate delivery status; failed sends need a marker.
+            db.execSQL("ALTER TABLE messages ADD COLUMN status INTEGER NOT NULL DEFAULT 0")
+        }
+        if (oldVersion < 3) {
+            db.execSQL("""CREATE TABLE IF NOT EXISTS groups(
+                id TEXT PRIMARY KEY, name TEXT, created_at INTEGER)""")
+            db.execSQL("""CREATE TABLE IF NOT EXISTS group_members(
+                group_id TEXT, fingerprint TEXT, PRIMARY KEY(group_id, fingerprint))""")
+            db.execSQL("ALTER TABLE incoming ADD COLUMN group_id TEXT DEFAULT ''")
+        }
+        if (oldVersion < 4) {
+            // Group metadata sync (v2C): rev orders snapshots, left_at marks
+            // a group we were removed from (history stays readable).
+            db.execSQL("ALTER TABLE groups ADD COLUMN rev INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE groups ADD COLUMN left_at INTEGER NOT NULL DEFAULT 0")
+        }
+    }
 
     fun upsertDevice(fp: String, alias: String, model: String, port: Int,
                      version: Int, ip: String, os: String) {
@@ -41,14 +66,14 @@ class Store(context: Context) :
     fun devices(): List<JSONObject> {
         val out = mutableListOf<JSONObject>()
         readableDatabase.rawQuery(
-            "SELECT fingerprint, alias, device_model, port, version, ip, os" +
+            "SELECT fingerprint, alias, device_model, port, version, ip, os, seen_at" +
             " FROM devices ORDER BY alias", null).use { c ->
             while (c.moveToNext()) {
                 out.add(JSONObject().apply {
                     put("fingerprint", c.getString(0)); put("alias", c.getString(1) ?: "")
                     put("deviceModel", c.getString(2) ?: ""); put("port", c.getInt(3))
                     put("version", c.getInt(4)); put("ip", c.getString(5) ?: "")
-                    put("os", c.getString(6) ?: "")
+                    put("os", c.getString(6) ?: ""); put("seenAt", c.getLong(7))
                 })
             }
         }
@@ -80,15 +105,22 @@ class Store(context: Context) :
 
     fun addMessage(id: String, from: String, to: String, type: Int, time: Long,
                    groupId: String, text: String? = null, fileName: String? = null,
-                   fileSize: Long = 0, filePath: String? = null) {
+                   fileSize: Long = 0, filePath: String? = null, status: Int = 0) {
         val v = ContentValues().apply {
             put("id", id); put("from_device", from); put("to_device", to)
             put("type", type); put("time", time); put("group_id", groupId)
             put("text_content", text); put("file_name", fileName)
             put("file_size", fileSize); put("file_path", filePath)
+            put("status", status)
         }
         writableDatabase.insertWithOnConflict("messages", null, v,
             SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    /** 0 = delivered/local, 2 = send failed (retryable from the chat). */
+    fun setMessageStatus(id: String, status: Int) {
+        writableDatabase.execSQL("UPDATE messages SET status=? WHERE id=?",
+            arrayOf(status, id))
     }
 
     /** Latest messages for a peer conversation (either direction), newest last. */
@@ -96,7 +128,7 @@ class Store(context: Context) :
         val out = mutableListOf<JSONObject>()
         readableDatabase.rawQuery(
             "SELECT id, from_device, to_device, type, time, text_content," +
-            " file_name, file_size, file_path FROM messages" +
+            " file_name, file_size, file_path, status FROM messages" +
             " WHERE from_device=? OR to_device=? ORDER BY time DESC LIMIT ?",
             arrayOf(peer, peer, limit.toString())).use { c ->
             while (c.moveToNext()) {
@@ -108,6 +140,7 @@ class Store(context: Context) :
                     if (!c.isNull(6)) put("fileName", c.getString(6))
                     put("fileSize", c.getLong(7))
                     if (!c.isNull(8)) put("filePath", c.getString(8))
+                    put("status", c.getInt(9))
                 })
             }
         }
@@ -115,11 +148,11 @@ class Store(context: Context) :
     }
 
     fun armIncoming(resourceId: String, bubbleId: String, sender: String,
-                    name: String, size: Long) {
+                    name: String, size: Long, groupId: String = "") {
         val v = ContentValues().apply {
             put("resource_id", resourceId); put("bubble_id", bubbleId)
             put("sender", sender); put("name", name); put("size", size)
-            put("waiting", 1)
+            put("group_id", groupId); put("waiting", 1)
         }
         writableDatabase.insertWithOnConflict("incoming", null, v,
             SQLiteDatabase.CONFLICT_REPLACE)
@@ -127,13 +160,13 @@ class Store(context: Context) :
 
     fun incoming(resourceId: String): JSONObject? =
         readableDatabase.rawQuery(
-            "SELECT bubble_id, sender, name, size, path, waiting FROM incoming" +
-            " WHERE resource_id=?", arrayOf(resourceId)).use { c ->
+            "SELECT bubble_id, sender, name, size, path, waiting, group_id" +
+            " FROM incoming WHERE resource_id=?", arrayOf(resourceId)).use { c ->
             if (c.moveToFirst()) JSONObject().apply {
                 put("bubbleId", c.getString(0)); put("sender", c.getString(1))
                 put("name", c.getString(2)); put("size", c.getLong(3))
                 if (!c.isNull(4)) put("path", c.getString(4))
-                put("waiting", c.getInt(5))
+                put("waiting", c.getInt(5)); put("groupId", c.getString(6) ?: "")
             } else null
         }
 
@@ -149,5 +182,169 @@ class Store(context: Context) :
             "SELECT COALESCE(MAX(time), 0) FROM messages WHERE from_device=?",
             arrayOf(peer)).use { c ->
             if (c.moveToFirst()) c.getLong(0) else 0L
+        }
+
+    fun unreadCount(peer: String, since: Long): Int =
+        readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM messages WHERE from_device=? AND time>?",
+            arrayOf(peer, since.toString())).use { c ->
+            if (c.moveToFirst()) c.getInt(0) else 0
+        }
+
+    /** Last bubble in either direction, for the conversation-list preview. */
+    fun lastMessage(peer: String): JSONObject? =
+        readableDatabase.rawQuery(
+            "SELECT from_device, type, time, text_content, file_name FROM messages" +
+            " WHERE from_device=? OR to_device=? ORDER BY time DESC LIMIT 1",
+            arrayOf(peer, peer)).use { c ->
+            if (!c.moveToFirst()) null else JSONObject().apply {
+                put("from", c.getString(0)); put("type", c.getInt(1))
+                put("time", c.getLong(2))
+                if (!c.isNull(3)) put("text", c.getString(3))
+                if (!c.isNull(4)) put("fileName", c.getString(4))
+            }
+        }
+
+    // ---------- groups ----------
+
+    /** rev 0 = placeholder for an unknown group; any real snapshot beats it. */
+    fun upsertGroup(id: String, name: String,
+                    createdAt: Long = System.currentTimeMillis(), rev: Long = 0L) {
+        writableDatabase.execSQL(
+            "INSERT INTO groups(id, name, created_at, rev) VALUES(?,?,?,?)" +
+            " ON CONFLICT(id) DO UPDATE SET name=excluded.name",
+            arrayOf<Any?>(id, name, createdAt, rev))
+    }
+
+    fun addGroupMember(groupId: String, fingerprint: String) {
+        writableDatabase.execSQL(
+            "INSERT OR IGNORE INTO group_members(group_id, fingerprint) VALUES(?,?)",
+            arrayOf(groupId, fingerprint))
+    }
+
+    fun removeGroupMember(groupId: String, fingerprint: String) {
+        writableDatabase.execSQL(
+            "DELETE FROM group_members WHERE group_id=? AND fingerprint=?",
+            arrayOf<Any?>(groupId, fingerprint))
+    }
+
+    fun groups(): List<JSONObject> {
+        val out = mutableListOf<JSONObject>()
+        readableDatabase.rawQuery(
+            "SELECT g.id, g.name, g.created_at, g.rev, g.left_at," +
+            " (SELECT COUNT(*) FROM group_members m WHERE m.group_id=g.id)" +
+            " FROM groups g ORDER BY g.created_at DESC", null).use { c ->
+            while (c.moveToNext()) {
+                out.add(JSONObject().apply {
+                    put("id", c.getString(0)); put("name", c.getString(1))
+                    put("createdAt", c.getLong(2)); put("rev", c.getLong(3))
+                    put("leftAt", c.getLong(4)); put("memberCount", c.getInt(5))
+                })
+            }
+        }
+        return out
+    }
+
+    fun group(id: String): JSONObject? =
+        groups().firstOrNull { it.optString("id") == id }
+
+    fun groupMembers(groupId: String): List<String> {
+        val out = mutableListOf<String>()
+        readableDatabase.rawQuery(
+            "SELECT fingerprint FROM group_members WHERE group_id=? ORDER BY fingerprint",
+            arrayOf(groupId)).use { c ->
+            while (c.moveToNext()) out.add(c.getString(0))
+        }
+        return out
+    }
+
+    fun groupRev(groupId: String): Long =
+        readableDatabase.rawQuery("SELECT rev FROM groups WHERE id=?",
+            arrayOf(groupId)).use { if (it.moveToFirst()) it.getLong(0) else 0L }
+
+    /** Local authoritative write from the group-management UI (always wins). */
+    fun writeGroup(id: String, name: String, members: List<String>, rev: Long) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.execSQL(
+                "INSERT INTO groups(id, name, created_at, rev, left_at) VALUES(?,?,?,?,0)" +
+                " ON CONFLICT(id) DO UPDATE SET name=excluded.name, rev=excluded.rev," +
+                " left_at=0",
+                arrayOf<Any?>(id, name, System.currentTimeMillis(), rev))
+            db.execSQL("DELETE FROM group_members WHERE group_id=?", arrayOf<Any?>(id))
+            for (fp in members) {
+                db.execSQL("INSERT OR IGNORE INTO group_members(group_id, fingerprint)" +
+                    " VALUES(?,?)", arrayOf<Any?>(id, fp))
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    /** Incoming snapshot: only a strictly newer rev overwrites name + members. */
+    fun applyGroupSnapshot(id: String, name: String, members: List<String>, rev: Long): Boolean {
+        val known = readableDatabase.rawQuery(
+            "SELECT rev FROM groups WHERE id=?", arrayOf(id)).use {
+            if (it.moveToFirst()) it.getLong(0) else -1L
+        }
+        if (known >= 0 && rev <= known) return false
+        writeGroup(id, name, members, rev)
+        return true
+    }
+
+    /** Removed from the group: keep the history, stop sending, drop the badge. */
+    fun markGroupLeft(id: String, rev: Long) {
+        writableDatabase.execSQL(
+            "UPDATE groups SET left_at=?, rev=? WHERE id=?",
+            arrayOf<Any?>(System.currentTimeMillis(), rev, id))
+    }
+
+    fun isGroupLeft(groupId: String): Boolean =
+        readableDatabase.rawQuery("SELECT left_at FROM groups WHERE id=?",
+            arrayOf(groupId)).use { it.moveToFirst() && it.getLong(0) > 0 }
+
+    fun groupConversation(groupId: String, limit: Int = 200): List<JSONObject> {
+        val out = mutableListOf<JSONObject>()
+        readableDatabase.rawQuery(
+            "SELECT id, from_device, to_device, type, time, text_content," +
+            " file_name, file_size, file_path, status FROM messages" +
+            " WHERE group_id=? ORDER BY time DESC LIMIT ?",
+            arrayOf(groupId, limit.toString())).use { c ->
+            while (c.moveToNext()) {
+                out.add(JSONObject().apply {
+                    put("id", c.getString(0)); put("from", c.getString(1))
+                    put("to", c.getString(2)); put("type", c.getInt(3))
+                    put("time", c.getLong(4))
+                    if (!c.isNull(5)) put("text", c.getString(5))
+                    if (!c.isNull(6)) put("fileName", c.getString(6))
+                    put("fileSize", c.getLong(7))
+                    if (!c.isNull(8)) put("filePath", c.getString(8))
+                    put("status", c.getInt(9))
+                })
+            }
+        }
+        return out.reversed()
+    }
+
+    fun groupLastMessage(groupId: String): JSONObject? =
+        readableDatabase.rawQuery(
+            "SELECT from_device, type, time, text_content, file_name FROM messages" +
+            " WHERE group_id=? ORDER BY time DESC LIMIT 1", arrayOf(groupId)).use { c ->
+            if (!c.moveToFirst()) null else JSONObject().apply {
+                put("from", c.getString(0)); put("type", c.getInt(1))
+                put("time", c.getLong(2))
+                if (!c.isNull(3)) put("text", c.getString(3))
+                if (!c.isNull(4)) put("fileName", c.getString(4))
+            }
+        }
+
+    /** Messages from others in a group newer than [since]. */
+    fun groupUnread(groupId: String, me: String, since: Long): Int =
+        readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM messages WHERE group_id=? AND from_device<>? AND time>?",
+            arrayOf(groupId, me, since.toString())).use { c ->
+            if (c.moveToFirst()) c.getInt(0) else 0
         }
 }

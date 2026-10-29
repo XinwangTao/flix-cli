@@ -16,6 +16,7 @@ object Wire {
     const val TYPE_FILE = 3
     const val MAX_RECEIVE_BYTES = 4L * 1024 * 1024 * 1024
     const val APP_VERSION = 1
+    const val ACTION_GROUP_SYNC = "rdGroupSync"
 
     fun newId(): String = UUID.randomUUID().toString()
 
@@ -66,11 +67,13 @@ object Wire {
         }
     }
 
-    fun textBubble(from: String, to: String, content: String, groupId: String = ""): JSONObject =
+    fun textBubble(from: String, to: String, content: String, groupId: String = "",
+                   id: String = newId(),
+                   time: Long = System.currentTimeMillis()): JSONObject =
         JSONObject().apply {
-            put("id", newId()); put("from", from); put("to", to)
+            put("id", id); put("from", from); put("to", to)
             put("type", TYPE_TEXT); put("content", content)
-            put("time", System.currentTimeMillis()); put("groupId", groupId)
+            put("time", time); put("groupId", groupId)
         }
 
     fun fileBubble(from: String, to: String, resourceId: String, name: String,
@@ -104,6 +107,23 @@ object Wire {
         JSONObject().apply {
             put("deviceId", myFp); put("bubbleId", bubbleId)
             put("action", "confirmReceive"); put("extra", JSONObject())
+        }
+
+    /**
+     * Group metadata snapshot (v2C). `rd` prefix keeps it clear of the official
+     * TransAction names: an official peer answers 500 and the sender degrades
+     * silently, so group chat itself is never blocked by this.
+     */
+    fun groupSyncIntent(myFp: String, groupId: String, name: String,
+                        members: List<String>, rev: Long): JSONObject =
+        JSONObject().apply {
+            put("deviceId", myFp); put("bubbleId", ""); put("action", ACTION_GROUP_SYNC)
+            put("extra", JSONObject().apply {
+                put("groupId", groupId)
+                put("name", name)
+                put("members", org.json.JSONArray(members))
+                put("rev", rev)
+            })
         }
 
     /** Official /intent replies are Dart map toString: `{0: success}` / `{301: ...}`. */

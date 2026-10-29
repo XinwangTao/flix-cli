@@ -31,4 +31,6 @@ android {
 
 dependencies {
     implementation("org.nanohttpd:nanohttpd:2.3.1")
+    // QR encode/decode only (no camera UI): the scanner is Camera2 + ZXing core.
+    implementation("com.google.zxing:core:3.5.3")
 }

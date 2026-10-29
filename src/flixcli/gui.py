@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from .icons import icon, logo_icon, logo_pixmap
+from .presence import is_online
 
 
 class ApiError(RuntimeError):
@@ -809,7 +810,7 @@ class MainWindow(QMainWindow):
                 subtitle = (f"{device.get('os') or 'unknown'} · "
                             f"{device.get('ip') or '离线'}:{device.get('port') or ''}")
                 entities.append((title, subtitle, device.get("fingerprint", ""),
-                                 "device", bool(device.get("ip"))))
+                                 "device", is_online(device)))
         if mode in ("groups", "search"):
             for group in self.payload.get("groups") or []:
                 entities.append((group.get("name") or "未命名群组",

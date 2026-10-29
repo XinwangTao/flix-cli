@@ -26,6 +26,18 @@ flix gui                    # 打开桌面控制台（需 [gui] extra）
 announce 同时以**局域网广播兜底**（子网定向 + 255.255.255.255，端口不变）：部分企业安全代理
 （Tencent iOA、Sangfor 等内核 callout）会在协议栈内吞掉全部出站多播（pktmon 实证），广播是
 这类网络上唯一能出卡的 announce；flixcli 间发现不受影响，官方客户端是否接受广播未证实。
+flixd 启动突发后还会每 30s 重发一次（2 包），让晚启动的节点也能发现本机。
+
+## 设备在线判定与诊断
+
+在线状态（RelayDesk 侧边栏绿点）= 设备有 IP 且 `seenAt` 在 **90s** 内。官方客户端只在启动时
+announce，因此 flixd 每 60s 对库内设备做一次 `/ping_v2` 探活并刷新 `seenAt`；探活失败不改写
+时间戳，设备自然显示离线，重启后不会再把历史设备画成绿点。
+
+`flix netcheck [--json]` 是只读诊断：选中网卡、组播 join（临时端口，不抢占运行中的 8891）、
+8891 占用、防火墙配置、库内设备端口可达性。对端设备通道不通时，把
+`scripts/fix_firewall.ps1` 交给**对端**管理员，在其机器上以管理员 PowerShell 执行
+（默认放行 `dist\flixd.exe`，`-Remove` 撤销）；flixd/RelayDesk 不会自动执行它，也不会改动远端。
 
 ## 功能矩阵
 
@@ -33,6 +45,7 @@ announce 同时以**局域网广播兜底**（子网定向 + 255.255.255.255，�
 |---|---|---|---|
 | 发现（UDP 224.0.0.168:8891，启动突发 11 包） | `flix discover [--announce]` | flix_discover | ✅ |
 | 探测 | `flix probe <ip[:port]>` | flix_probe | ✅ 404 "Route not found" |
+| 局域网诊断（网卡/组播/防火墙/端口可达） | `flix netcheck [--json]` | — | — |
 | 手动添加（ping_v2 握手） | `flix ping <ip[:port]>` | — | ✅ 官方 UI 添加成功 |
 | 配对（askPairDevice/confirmPairDevice） | `flix pair [--code]` | flix_pair | ✅ 双侧 pair_devices 落库 |
 | 文本气泡（type 0） | `flix send-text` | flix_send_text | ✅ |

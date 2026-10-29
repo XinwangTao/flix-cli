@@ -75,7 +75,8 @@ object ChannelClient {
 
     fun uploadFile(ip: String, port: Int, resourceId: String, name: String,
                    size: Long, content: java.io.InputStream,
-                   timeoutMs: Int = 600_000) {
+                   timeoutMs: Int = 600_000,
+                   onProgress: ((Long) -> Unit)? = null) {
         val conn = open(
             "http://$ip:$port/file?share_id=$resourceId&file_name=" +
             java.net.URLEncoder.encode(name, "UTF-8"), timeoutMs)
@@ -85,10 +86,17 @@ object ChannelClient {
             content.use { input ->
                 val out: OutputStream = conn.outputStream
                 val buf = ByteArray(256 * 1024)
+                var sent = 0L
+                var lastTick = 0L
                 while (true) {
                     val n = input.read(buf)
                     if (n < 0) break
                     out.write(buf, 0, n)
+                    sent += n
+                    if (onProgress != null && (sent - lastTick >= 1_048_576 || sent == size)) {
+                        lastTick = sent
+                        onProgress(sent)
+                    }
                 }
                 out.flush()
             }

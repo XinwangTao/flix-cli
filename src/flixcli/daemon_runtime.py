@@ -11,7 +11,7 @@ from . import DEVICE_PORT, local_ip, model
 from .adb import AdbClient
 from .media_session import SessionManager
 from .media_transport import MediaRuntime
-from .channel import PeerError, post_bubble, post_intent
+from .channel import PeerError, ping_v2, post_bubble, post_intent
 from .desktop_api import serve_desktop_api
 from .discovery import Discovery
 from .server import serve_channel
@@ -250,6 +250,48 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
 
     tasks.append(asyncio.create_task(announce_loop()))
     print("[flixd] periodic announce every 30s", file=sys.stderr, flush=True)
+
+    async def presence_probe_loop() -> None:
+        # Official clients only announce at startup, so their seenAt would fall
+        # outside the 90s presence TTL. Probe each known device with the normal
+        # /ping_v2 handshake and refresh seenAt on success. Failures leave the
+        # stored timestamp untouched (the device simply reads as offline).
+        try:
+            while True:
+                await asyncio.sleep(3)
+                refreshed = 0
+                for row in store.devices():
+                    fp = row.get("fingerprint") or ""
+                    ip = row.get("ip") or ""
+                    port = row.get("port")
+                    if (not fp or not ip or not port
+                            or fp == ident["fingerprint"]):
+                        continue
+                    try:
+                        modal = await ping_v2(ip, ident, port=int(port),
+                                              device_port=device_port,
+                                              timeout=3.0)
+                    except Exception:
+                        continue
+                    try:
+                        store.upsert_device(
+                            fp, alias=modal.get("alias", ""),
+                            device_model=modal.get("deviceModel", ""),
+                            port=modal.get("port") or port,
+                            version=modal.get("version"), ip=ip,
+                            os_name=modal.get("os", ""))
+                        refreshed += 1
+                    except Exception as e:
+                        print(f"[presence] {e}", file=sys.stderr, flush=True)
+                if refreshed:
+                    print(f"[presence] refreshed {refreshed} device(s)",
+                          file=sys.stderr, flush=True)
+                await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            pass
+
+    tasks.append(asyncio.create_task(presence_probe_loop()))
+    print("[flixd] presence probe every 60s", file=sys.stderr, flush=True)
 
     print(f"[flixd] identity {ident['fingerprint']} alias {ident['alias']} "
           f"ip {local_ip()}", file=sys.stderr)

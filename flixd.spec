@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['build/launch_flixd.py'],
+    ['scripts/launch_flixd.py'],
     pathex=['src'],
     binaries=[],
     datas=[],

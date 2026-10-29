@@ -1,19 +1,17 @@
 package com.relaydesk.app
 
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
 import android.content.Context
-import android.content.Intent
 import android.os.Environment
 import android.provider.MediaStore
 import fi.iki.elonen.NanoHTTPD
 import org.json.JSONObject
 
 /**
- * Device channel server on :8891 mirroring flixcli server.py semantics and the
- * confirmed transfer-security gates: paired senders only, source-IP binding,
- * declared-size limits, no overwrite, atomic (IS_PENDING) commit.
+ * Device channel server on the first free port (8891, then 18991) mirroring
+ * flixcli server.py semantics and the confirmed transfer-security gates:
+ * paired senders only, source-IP binding, declared-size limits, no overwrite,
+ * atomic (IS_PENDING) commit. Notifications and unread state live in
+ * RelayService; this class only reports events.
  */
 class ChannelServer(
     private val context: Context,
@@ -22,11 +20,16 @@ class ChannelServer(
     private val alias: String,
     private val port: Int,
     private val onEvent: (String, JSONObject) -> Unit,
+    private val onProgress: (JSONObject) -> Unit,
+    private val confirmPair: (String, String) -> Boolean,
 ) : NanoHTTPD(port) {
 
     private val ownKey: String
         get() = store.ownPairKey(
             context.getSharedPreferences("relaydesk", Context.MODE_PRIVATE))
+
+    private val UUID_RE = Regex(
+        "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
     override fun serve(session: IHTTPSession): Response {
         val path = session.uri ?: "/"
@@ -88,13 +91,23 @@ class ChannelServer(
         }
         val type = bubble.optInt("type")
         val groupId = bubble.optString("groupId")
+        if (groupId.isNotEmpty() && store.isGroupLeft(groupId)) {
+            // Removed from this group: history stays read-only, new traffic is dropped
+            // (still 200 so the sender does not keep retrying).
+            return text(Response.Status.OK, "received bubble")
+        }
+        if (groupId.isNotEmpty() && store.group(groupId) == null) {
+            // Peers may know a group we do not; keep the bubble, label it clearly.
+            store.upsertGroup(groupId, "未知群")
+        }
         when (type) {
             Wire.TYPE_TEXT -> {
                 val content = bubble.optString("content")
                 store.addMessage(id, from, bubble.optString("to"), type,
                     bubble.optLong("time"), groupId, text = content)
-                notifyText(from, content)
-                onEvent("message", JSONObject().put("from", from).put("id", id))
+                onEvent("message", JSONObject().put("from", from).put("id", id)
+                    .put("groupId", groupId)
+                    .put("kind", "text").put("preview", content.take(80)))
             }
             Wire.TYPE_FILE -> {
                 val content = bubble.optJSONObject("content")
@@ -104,7 +117,8 @@ class ChannelServer(
                     return text(Response.Status.BAD_REQUEST, "receive bubble failed")
                 }
                 val rid = meta?.optString("resourceId")?.ifEmpty { id } ?: id
-                store.armIncoming(rid, id, from, name, meta?.optLong("size") ?: 0L)
+                store.armIncoming(rid, id, from, name, meta?.optLong("size") ?: 0L,
+                    groupId)
                 // Paired senders get the official confirmReceive ack, then /file.
                 if (store.isPaired(from)) {
                     val senderIp = store.deviceIp(from)
@@ -119,7 +133,10 @@ class ChannelServer(
                         }.start()
                     }
                 }
-                onEvent("message", JSONObject().put("from", from).put("id", id))
+                onEvent("filePending", JSONObject().put("from", from).put("id", id)
+                    .put("groupId", groupId)
+                    .put("rid", rid).put("name", name)
+                    .put("size", meta?.optLong("size") ?: 0L))
             }
         }
         return text(Response.Status.OK, "received bubble")
@@ -155,14 +172,19 @@ class ChannelServer(
                     is String -> extra.optString("accept").lowercase() != "false"
                     else -> extra.optBoolean("accept", true)
                 }
+                val peer = intent.optString("deviceId")
+                val code = extra.optString("verifyCode")
                 if (verify.isEmpty()) text(Response.Status.OK, "{301: pair Device Null}")
                 else if (verify != ownFp) text(Response.Status.OK,
                     "{302: device not match}")
-                else {
-                    if (accept) {
-                        store.addPair(intent.optString("deviceId"), ownKey)
-                        notifyPair(intent.optString("deviceId"))
-                    }
+                else if (!accept || !confirmPair(peer, code)) {
+                    // No visible Activity (or the user declined): default reject.
+                    text(Response.Status.OK, "{301: pair Device Null}")
+                } else {
+                    store.addPair(peer, ownKey)
+                    onEvent("message", JSONObject().put("from", peer)
+                        .put("kind", "pair").put("preview", "设备已配对"))
+                    confirmPeer(peer, ownKey)
                     text(Response.Status.OK, "{0: success}")
                 }
             }
@@ -178,14 +200,44 @@ class ChannelServer(
                 else {
                     if (accept) {
                         store.addPair(who, ownKey)
-                        notifyPair(who)
+                        onEvent("message", JSONObject().put("from", who)
+                            .put("kind", "pair").put("preview", "设备已配对"))
                     }
                     text(Response.Status.OK, "{0: success}")
                 }
             }
             "confirmReceive" -> text(Response.Status.OK, "{0: success}")
+            Wire.ACTION_GROUP_SYNC -> groupSync(intent)
             else -> text(Response.Status.INTERNAL_ERROR, "receive intent failed")
         }
+    }
+
+    /**
+     * Group metadata snapshot (v2C). Trust gate: the sender must be paired or
+     * already a member; anything else is dropped without touching the store.
+     */
+    private fun groupSync(intent: JSONObject): Response {
+        val extra = intent.optJSONObject("extra")
+            ?: return text(Response.Status.INTERNAL_ERROR, "receive intent failed")
+        val gid = extra.optString("groupId")
+        val name = extra.optString("name").trim()
+        val rev = extra.optLong("rev", 0L)
+        val sender = intent.optString("deviceId").ifEmpty { extra.optString("from") }
+        val raw = extra.optJSONArray("members")
+        val bad = text(Response.Status.BAD_REQUEST, "receive intent failed")
+        if (!UUID_RE.matches(gid) || name.isEmpty() || rev <= 0 ||
+            sender.isEmpty() || raw == null) return bad
+        val members = (0 until raw.length()).mapNotNull { i ->
+            raw.optString(i).takeIf { it.isNotEmpty() }
+        }.distinct()
+        if (members.isEmpty()) return bad
+        if (!store.isPaired(sender) && !store.groupMembers(gid).contains(sender)) return bad
+        if (store.applyGroupSnapshot(gid, name, members, rev)) {
+            // The snapshot itself tells us we were removed: history stays, sending stops.
+            if (!members.contains(ownFp)) store.markGroupLeft(gid, rev)
+            onEvent("groupSync", JSONObject().put("groupId", gid))
+        }
+        return text(Response.Status.OK, "{0: success}")
     }
 
     /** Streaming upload with the desktop security gates, landing via MediaStore. */
@@ -234,7 +286,11 @@ class ChannelServer(
         val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
             ?: return text(Response.Status.INTERNAL_ERROR, "cannot create file")
         var got = 0L
+        var lastTick = 0L
         try {
+            onProgress(JSONObject().put("from", sender).put("rid", rid)
+                .put("name", cleanName).put("got", 0L)
+                .put("total", declared).put("done", false))
             resolver.openOutputStream(uri)?.use { out ->
                 // NO .use on the session stream: closing it closes the whole
                 // socket before NanoHTTPD can deliver the response.
@@ -252,6 +308,12 @@ class ChannelServer(
                         throw IllegalStateException("payload exceeds declared size")
                     }
                     out.write(buf, 0, n)
+                    if (got - lastTick >= 1_048_576 || got == declared) {
+                        lastTick = got
+                        onProgress(JSONObject().put("from", sender).put("rid", rid)
+                            .put("name", cleanName).put("got", got)
+                            .put("total", declared).put("done", false))
+                    }
                 }
                 out.flush()
             } ?: throw IllegalStateException("no output stream")
@@ -265,10 +327,16 @@ class ChannelServer(
             }
             resolver.update(uri, done, null, null)
             store.commitIncoming(rid, uri.toString())
+            store.addMessage(rec.optString("bubbleId"), sender, ownFp, Wire.TYPE_FILE,
+                System.currentTimeMillis(), rec.optString("groupId"),
+                fileName = cleanName, fileSize = got, filePath = uri.toString())
             android.util.Log.e("RD", "file committed got=$got uri=$uri")
+            onProgress(JSONObject().put("from", sender).put("rid", rid)
+                .put("name", cleanName).put("got", got)
+                .put("total", declared).put("done", true))
             onEvent("message", JSONObject().put("from", sender)
-                .put("id", rec.optString("bubbleId")))
-            notifyReceived(cleanName, got)
+                .put("id", rec.optString("bubbleId")).put("groupId", rec.optString("groupId"))
+                .put("kind", "file").put("preview", "收到文件 $cleanName"))
             return text(Response.Status.OK, "ok")
         } catch (e: Exception) {
             android.util.Log.e("RD", "file FAILED got=$got", e)
@@ -288,66 +356,18 @@ class ChannelServer(
         return false
     }
 
-    private fun notifyPair(peer: String) {
-        val alias = store.device(peer)?.optString("alias") ?: peer.take(8)
-        if (android.os.Build.VERSION.SDK_INT >= 33) {
-            val pm = context.getSystemService(NotificationManager::class.java)
-            if (pm.areNotificationsEnabled()) {
-                ensureChannel(pm)
-                val notification = android.app.Notification.Builder(context, "relaydesk")
-                    .setSmallIcon(android.R.drawable.stat_sys_download_done)
-                    .setContentTitle("设备已配对")
-                    .setContentText(alias)
-                    .build()
-                pm.notify(2, notification)
+    /** Official flow: the accepting side replies confirmPairDevice to the asker. */
+    private fun confirmPeer(peerFp: String, code: String) {
+        val row = store.device(peerFp) ?: return
+        val ip = row.optString("ip")
+        val peerPort = row.optInt("port", 0).takeIf { it > 0 } ?: Wire.DEVICE_PORT
+        if (ip.isEmpty()) return
+        Thread {
+            runCatching {
+                ChannelClient.postIntent(ip, peerPort,
+                    Wire.pairIntent(ownFp, peerFp, code,
+                        action = "confirmPairDevice", accept = true))
             }
-        }
-    }
-
-    private fun notifyReceived(name: String, size: Long) {
-        if (android.os.Build.VERSION.SDK_INT >= 33) {
-            val pm = context.getSystemService(NotificationManager::class.java)
-            if (!pm.areNotificationsEnabled()) return
-            ensureChannel(pm)
-            val intent = Intent(context, MainActivity::class.java)
-            val pending = PendingIntent.getActivity(context, 0, intent,
-                PendingIntent.FLAG_IMMUTABLE)
-            val notification = android.app.Notification.Builder(context, "relaydesk")
-                .setSmallIcon(android.R.drawable.stat_sys_download_done)
-                .setContentTitle("收到文件")
-                .setContentText("$name (${size} B)")
-                .setContentIntent(pending)
-                .build()
-            pm.notify(1, notification)
-        }
-    }
-
-    private fun notifyText(peer: String, content: String) {
-        if (android.os.Build.VERSION.SDK_INT >= 33) {
-            val pm = context.getSystemService(NotificationManager::class.java)
-            if (!pm.areNotificationsEnabled()) return
-        }
-        ensureChannel(pm())
-        val alias = store.device(peer)?.optString("alias") ?: peer.take(8)
-        val intent = Intent(context, MainActivity::class.java)
-        val pending = PendingIntent.getActivity(context, 0, intent,
-            PendingIntent.FLAG_IMMUTABLE)
-        val preview = content.take(60)
-        val notification = android.app.Notification.Builder(context, "relaydesk")
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle(alias)
-            .setContentText(preview)
-            .setContentIntent(pending)
-            .setAutoCancel(true)
-            .build()
-        pm().notify(3, notification)
-    }
-
-    private fun pm(): NotificationManager =
-        context.getSystemService(NotificationManager::class.java)
-
-    private fun ensureChannel(pm: NotificationManager) {
-        pm.createNotificationChannel(NotificationChannel(
-            "relaydesk", "RelayDesk", NotificationManager.IMPORTANCE_DEFAULT))
+        }.start()
     }
 }

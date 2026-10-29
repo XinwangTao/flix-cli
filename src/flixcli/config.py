@@ -9,6 +9,7 @@ import contextlib
 import json
 import os
 import sqlite3
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -16,6 +17,10 @@ from pathlib import Path
 from . import DEVICE_PORT
 
 APP_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "flixcli"
+# APPDATA occasionally points at the state dir itself (tests, shell exports);
+# appending "flixcli" again would mint a second identity under flixcli/flixcli.
+if APP_DIR.parent.name.lower() == "flixcli":
+    APP_DIR = APP_DIR.parent
 DB_PATH = APP_DIR / "db.sqlite"
 PREFS_PATH = APP_DIR / "shared_preferences.json"
 
@@ -80,7 +85,8 @@ CREATE TABLE IF NOT EXISTS save_locations (
 CREATE TABLE IF NOT EXISTS groups (
   id TEXT NOT NULL PRIMARY KEY,
   name TEXT NOT NULL,
-  created_at INTEGER NOT NULL DEFAULT 0
+  created_at INTEGER NOT NULL DEFAULT 0,
+  rev INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS group_members (
   group_id TEXT NOT NULL,
@@ -100,6 +106,9 @@ class Store:
         self.con.executescript(SCHEMA)
         with contextlib.suppress(Exception):
             self.con.execute("ALTER TABLE groups ADD COLUMN code TEXT")
+        with contextlib.suppress(Exception):
+            self.con.execute(
+                "ALTER TABLE groups ADD COLUMN rev INTEGER NOT NULL DEFAULT 0")
         self.con.commit()
 
     # -- devices -------------------------------------------------------------
@@ -239,6 +248,32 @@ class Store:
             (gid, fingerprint))
         self.con.commit()
 
+    def group_rev(self, gid: str) -> int:
+        """-1 = unknown group, so any incoming snapshot wins."""
+        row = self.con.execute("SELECT rev FROM groups WHERE id=?", (gid,)).fetchone()
+        return int(row[0]) if row and row[0] is not None else -1
+
+    def merge_group_sync(self, gid: str, name: str, members: list[str],
+                         rev: int) -> bool:
+        """Full-snapshot merge, last-writer-wins by rev (v2C).
+
+        Only a strictly newer revision overwrites the name and the member list;
+        equal rev keeps local state so two nodes cannot ping-pong forever.
+        """
+        known = self.group_rev(gid)
+        if known >= 0 and rev <= known:
+            return False
+        with self.con:
+            self.con.execute(
+                "INSERT INTO groups (id, name, created_at, rev) VALUES (?,?,?,?)"
+                " ON CONFLICT(id) DO UPDATE SET name=excluded.name, rev=excluded.rev",
+                (gid, name, int(time.time() * 1000), int(rev)))
+            self.con.execute("DELETE FROM group_members WHERE group_id=?", (gid,))
+            self.con.executemany(
+                "INSERT OR IGNORE INTO group_members (group_id, fingerprint)"
+                " VALUES (?,?)", [(gid, m) for m in members])
+        return True
+
     def groups(self) -> list[dict]:
         cur = self.con.execute("SELECT id, name, created_at FROM groups ORDER BY created_at")
         out = []
@@ -272,9 +307,18 @@ class Store:
 
     # -- prefs ---------------------------------------------------------------
     def prefs(self) -> dict:
-        if PREFS_PATH.exists():
+        if not PREFS_PATH.exists():
+            return {}
+        try:
             return json.loads(PREFS_PATH.read_text(encoding="utf-8"))
-        return {}
+        except (OSError, ValueError):
+            # Keep the damaged file for inspection instead of overwriting it.
+            bad = PREFS_PATH.with_name(
+                f"{PREFS_PATH.name}.bad-{int(time.time())}")
+            with contextlib.suppress(OSError):
+                PREFS_PATH.replace(bad)
+            print(f"[flixcli] prefs unreadable, moved to {bad}", file=sys.stderr)
+            return {}
 
     def set_pref(self, key: str, value) -> None:
         p = self.prefs()
@@ -295,17 +339,87 @@ class Store:
         self.close()
 
 
+def _valid_identity(value) -> bool:
+    if not isinstance(value, dict):
+        return False
+    try:
+        uuid.UUID(str(value.get("fingerprint")))
+    except (ValueError, TypeError, AttributeError):
+        return False
+    return True
+
+
+def _legacy_prefs_files() -> list[Path]:
+    """State dirs older builds may have used; only near the canonical one.
+
+    When APPDATA is set we look at siblings/nested dirs only: a sandbox or a
+    second profile must not inherit the identity of an unrelated home dir.
+    """
+    base = os.environ.get("APPDATA", "").strip()
+    if base:
+        candidates = [APP_DIR / "flixcli", Path(base) / "flixcli"]
+    else:
+        home = Path.home()
+        candidates = [home / "flixcli", home / "AppData" / "Roaming" / "flixcli"]
+    out, seen = [], set()
+    for path in candidates:
+        key = str(path).lower()
+        if path == APP_DIR or key in seen:
+            continue
+        seen.add(key)
+        out.append(path / "shared_preferences.json")
+    return out
+
+
+def _adopt_legacy_identity() -> dict | None:
+    """Reuse the newest identity from a stale state dir instead of minting one."""
+    found: list[tuple[float, Path, dict]] = []
+    for path in _legacy_prefs_files():
+        try:
+            if not path.exists():
+                continue
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        ident = data.get("identity")
+        if _valid_identity(ident):
+            found.append((path.stat().st_mtime, path.parent, ident))
+    if not found:
+        return None
+    found.sort(key=lambda item: item[0], reverse=True)
+    if len(found) > 1:
+        names = ", ".join(str(d) for _, d, _ in found)
+        print(f"[flixcli] multiple legacy identities ({names}); "
+              f"adopting {found[0][1]}", file=sys.stderr)
+    mtime, source, ident = found[0]
+    adopted = dict(ident)
+    adopted["adopted_from"] = str(source)
+    adopted.setdefault("created_at", int(mtime * 1000))
+    return adopted
+
+
 def load_or_create_identity(store: Store) -> dict:
-    """fingerprint (uuid4) + alias; mirrors deviceModal fields."""
+    """fingerprint (uuid4) + alias; mirrors deviceModal fields.
+
+    Prefs loss used to mint a fresh uuid, so peers saw the same PC twice.
+    Now the newest legacy identity is adopted and written back to the
+    canonical state dir; a new uuid is only created when none exists.
+    """
     p = store.prefs()
     ident = p.get("identity")
-    if not ident:
-        ident = {
-            "fingerprint": str(uuid.uuid4()),
-            "alias": os.environ.get("COMPUTERNAME", "flixd"),
-            "deviceModel": "Windows",
-            "deviceType": "desktop",
-            "os": "windows",
-        }
-        store.set_pref("identity", ident)
+    if _valid_identity(ident):
+        return ident
+    adopted = _adopt_legacy_identity()
+    if adopted:
+        store.set_pref("identity", adopted)
+        return adopted
+    ident = {
+        "fingerprint": str(uuid.uuid4()),
+        "alias": os.environ.get("COMPUTERNAME", "flixd"),
+        "deviceModel": "Windows",
+        "deviceType": "desktop",
+        "os": "windows",
+        "created_at": int(time.time() * 1000),
+    }
+    store.set_pref("identity", ident)
     return ident

@@ -12,10 +12,10 @@ import sys
 import urllib.error
 import urllib.request
 
-from . import DEVICE_PORT, __version__
+from . import DEVICE_PORT, __version__, local_ip
 from .adb import AdbClient, AdbError
 from .channel import PeerError, post_bubble, post_intent
-from .config import Store, load_or_create_identity
+from .config import APP_DIR, Store, load_or_create_identity
 from .discovery import Discovery
 from .model import clipboard_intent, text_bubble
 from .routing import resolve_target
@@ -187,6 +187,161 @@ async def cmd_ping(args) -> int:
         store.close()
 
 
+def _tcp_reachable(ip: str, port: int, timeout: float) -> bool:
+    import socket
+    try:
+        with socket.create_connection((ip, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _firewall_programs() -> tuple[dict, list[str]]:
+    """Enabled inbound-allow application filters matching flix/RelayDesk."""
+    if not sys.platform.startswith("win"):
+        return {}, []
+    import subprocess
+    script = (
+        "$out = @();"
+        "Get-NetFirewallApplicationFilter | "
+        "Where-Object { $_.Program -match 'flixd|flix-cli|RelayDesk|flix\\.exe' } | "
+        "ForEach-Object { $prog = $_.Program;"
+        "$rules = Get-NetFirewallRule -AssociatedNetFirewallApplicationFilter $_ "
+        "-ErrorAction SilentlyContinue;"
+        "if ($rules | Where-Object { $_.Enabled -eq 'True' -and "
+        "$_.Direction -eq 'Inbound' -and $_.Action -eq 'Allow' }) "
+        "{ $out += $prog } };"
+        "$p = Get-NetFirewallProfile | Select-Object Name,Enabled;"
+        "@{profiles=@($p); programs=@($out | Select-Object -Unique)} | "
+        "ConvertTo-Json -Depth 4 -Compress"
+    )
+    try:
+        proc = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=12)
+        data = json.loads((proc.stdout or "{}").lstrip("﻿"))
+    except Exception:
+        return {}, []
+    rows = data.get("profiles") or []
+    if isinstance(rows, dict):
+        rows = [rows]
+    profiles = {str(row.get("Name")): bool(row.get("Enabled"))
+                for row in rows if isinstance(row, dict)}
+    programs = data.get("programs") or []
+    if isinstance(programs, str):
+        programs = [programs]
+    return profiles, [str(p) for p in programs if p]
+
+
+def _multicast_probe(iface: str, group: str) -> dict:
+    """Join the group on an ephemeral port so a running flixd keeps :8891."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("", 0))
+        mreq = (socket.inet_aton(group)
+                + socket.inet_aton(iface or "0.0.0.0"))
+        s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        return {"ok": True, "probePort": s.getsockname()[1]}
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
+    finally:
+        s.close()
+
+
+def _udp_port_probe(port: int) -> dict:
+    """Non-reuse bind: a listener holding the port makes this fail."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.bind(("", port))
+        return {"port": port, "inUse": False}
+    except OSError as e:
+        return {"port": port, "inUse": True, "detail": str(e)}
+    finally:
+        s.close()
+
+
+async def cmd_netcheck(args) -> int:
+    """Read-only LAN diagnosis: interface, multicast join, firewall, peers."""
+    from .discovery import MULTICAST_GROUP, default_iface_ip
+    from .presence import PRESENCE_TTL_MS
+
+    store = Store()
+    try:
+        iface = args.multicast_if or default_iface_ip() or ""
+        join = {"interface": iface, **_multicast_probe(iface, MULTICAST_GROUP)}
+        udp_port = _udp_port_probe(DEVICE_PORT)
+
+        profiles, programs = _firewall_programs()
+        exe_norm = sys.executable.lower().replace("/", "\\")
+        allowed = any(str(p).lower().replace("/", "\\") == exe_norm
+                      for p in programs)
+        firewall = {"supported": sys.platform.startswith("win"),
+                    "profiles": profiles, "programs": programs,
+                    "anyProfileEnabled": any(profiles.values()),
+                    "currentExe": sys.executable,
+                    "currentExeAllowed": allowed}
+
+        peers = []
+        for row in store.devices():
+            ip = row.get("ip") or ""
+            port = row.get("port")
+            if not ip or not port:
+                continue
+            peers.append({
+                "fingerprint": row.get("fingerprint"),
+                "alias": row.get("alias"), "ip": ip, "port": port,
+                "reachable": await asyncio.to_thread(
+                    _tcp_reachable, ip, int(port), args.timeout),
+                "seenAt": row.get("seenAt"),
+            })
+
+        payload = {"interface": iface, "localIp": local_ip(),
+                   "group": f"{MULTICAST_GROUP}:{DEVICE_PORT}",
+                   "multicastJoin": join, "udpPort": udp_port,
+                   "presenceTtlMs": PRESENCE_TTL_MS,
+                   "firewall": firewall, "peers": peers}
+        if args.json:
+            emit(payload, True)
+        else:
+            print(f"[netcheck] interface   {iface or 'none'}  "
+                  f"local {payload['localIp']}")
+            state = "ok" if join["ok"] else "FAILED: " + str(join.get("error", ""))
+            print(f"[netcheck] multicast   {payload['group']}  join={state}")
+            held = ("held by a process (normal when flixd is running)"
+                    if udp_port["inUse"] else "free")
+            print(f"[netcheck] udp port    :{DEVICE_PORT} {held}")
+            if firewall["supported"]:
+                states = ", ".join(f"{k}={v}" for k, v in profiles.items()) or "unknown"
+                if profiles and not firewall["anyProfileEnabled"]:
+                    print("[netcheck] firewall    all profiles disabled; "
+                          "inbound rules not needed")
+                else:
+                    print(f"[netcheck] firewall    profiles: {states}  "
+                          f"current exe allowed: {'yes' if allowed else 'no'}")
+            else:
+                print("[netcheck] firewall    unsupported on this platform")
+            for peer in peers:
+                name = peer["alias"] or str(peer["fingerprint"])[:8]
+                print(f"[netcheck] peer        {name} "
+                      f"{peer['ip']}:{peer['port']}  "
+                      f"{'reachable' if peer['reachable'] else 'unreachable'}")
+            if not join["ok"]:
+                print("[netcheck] hint        multicast join failed; the NIC is "
+                      "down, the interface IP is wrong, or a security agent "
+                      "blocks multicast")
+            elif peers and not any(p["reachable"] for p in peers):
+                print("[netcheck] hint        multicast joined but peers are "
+                      "unreachable; check the peer firewall "
+                      "(scripts/fix_firewall.ps1)")
+        return 0 if join["ok"] else 5
+    finally:
+        store.close()
+
+
 def cmd_qrcode(args) -> int:
     """Print the pairing QR payload (flix2:// base64url) for this node."""
     store = Store()
@@ -210,6 +365,8 @@ def cmd_self(args) -> int:
         ident = load_or_create_identity(store)
         emit({"fingerprint": ident["fingerprint"], "alias": ident["alias"],
               "deviceModel": ident.get("deviceModel"), "os": ident.get("os"),
+              "appDir": str(APP_DIR),
+              "identitySource": ident.get("adopted_from") or "canonical",
               "version": __version__}, args.json)
     finally:
         store.close()
@@ -564,6 +721,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--device-port", type=int, default=DEVICE_PORT,
                    help="port advertised in our deviceModal")
     p.add_argument("--timeout", type=float, default=6.0)
+
+    p = add("netcheck", "read-only LAN diagnosis: interface, multicast join, "
+                      "firewall rules and peer reachability", cmd_netcheck)
+    p.add_argument("--multicast-if", default=None,
+                   help="pin the discovery NIC by local IP (default: auto)")
+    p.add_argument("--timeout", type=float, default=2.0,
+                   help="TCP connect timeout per peer in seconds")
 
     add("self", "print our identity", cmd_self)
     add("devices", "list known devices from local store", cmd_devices)

@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['build/launch_relaydesk.py'],
+    ['scripts/launch_relaydesk.py'],
     pathex=['src'],
     binaries=[],
     datas=[],

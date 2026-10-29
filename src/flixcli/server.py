@@ -188,6 +188,8 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
             # Receiver -> sender "accepted, upload now" ack. The bubble is
             # already armed in file_contents; nothing else to do here.
             return web.Response(text="{0: success}")
+        if action == model.ACTION_GROUP_SYNC:
+            return _group_sync_intent(intent, store)
         return web.Response(status=500, text="receive intent failed")
 
     def _pair_intent(intent: dict) -> web.Response:
@@ -229,6 +231,31 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
         if accept is not False:
             store.add_pair(who, store.own_pair_key())
             publish("pairChanged", {"fingerprint": who, "action": "confirm"})
+        return web.Response(text="{0: success}")
+
+    def _group_sync_intent(intent: dict, store) -> web.Response:
+        """Group metadata snapshot (v2C). Trust gate: the sender must be paired
+        or already a member; anything else is dropped without touching state."""
+        extra = intent.get("extra") if isinstance(intent.get("extra"), dict) else {}
+        gid = extra.get("groupId")
+        name = extra.get("name")
+        members = extra.get("members")
+        sender = intent.get("deviceId") or extra.get("from")
+        try:
+            rev = int(extra.get("rev", 0))
+            ok = (isinstance(gid, str) and bool(uuid.UUID(gid))
+                  and isinstance(name, str) and bool(name.strip())
+                  and isinstance(members, list) and bool(members)
+                  and all(isinstance(m, str) and m for m in members)
+                  and rev > 0)
+        except (TypeError, ValueError, AttributeError):
+            ok = False
+        if not ok:
+            return web.Response(status=400, text="receive intent failed")
+        if not (store.is_paired(sender) or sender in store.group_members(gid)):
+            return web.Response(status=400, text="receive intent failed")
+        if store.merge_group_sync(gid, name.strip(), list(dict.fromkeys(members)), rev):
+            publish("groupsChanged", {"groupId": gid})
         return web.Response(text="{0: success}")
 
     async def file_post(request: web.Request) -> web.Response:

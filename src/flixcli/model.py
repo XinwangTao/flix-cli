@@ -158,6 +158,25 @@ def parse_ping_v2_response(text: str) -> dict:
 ACTION_ASK_PAIR = "askPairDevice"
 ACTION_CONFIRM_PAIR = "confirmPairDevice"
 ACTION_CONFIRM_RECEIVE = "confirmReceive"
+# Group metadata snapshot (v2C). `rd` prefix keeps it clear of the official
+# TransAction names: an official peer answers 500 and the sender degrades
+# silently, so group chat itself is never blocked by metadata sync.
+ACTION_GROUP_SYNC = "rdGroupSync"
+
+
+def group_sync_intent(from_fp: str, group_id: str, name: str,
+                      members: list[str], rev: int) -> dict:
+    return {
+        "deviceId": from_fp,
+        "bubbleId": "",
+        "action": ACTION_GROUP_SYNC,
+        "extra": {
+            "groupId": group_id,
+            "name": name,
+            "members": list(members),
+            "rev": int(rev),
+        },
+    }
 
 
 def confirm_receive_intent(from_fp: str, bubble_id: str) -> dict:
