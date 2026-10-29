@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RelayDesk 桌面身份持久化：同一台 PC 只有一个指纹</title>
+<style>
+  :root {
+    --bg: #070b14;
+    --panel: #0d1628;
+    --panel-2: #121d33;
+    --line: #22304a;
+    --line-soft: #1a2740;
+    --text: #e8edf7;
+    --muted: #8ba0c2;
+    --dim: #6f84a8;
+    --green: #21c78a;
+    --blue: #5aa9ff;
+    --red: #ef5b6b;
+    --amber: #f5a524;
+    --violet: #7c5cff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background:
+      radial-gradient(900px 500px at 12% -10%, rgba(124, 92, 255, .16), transparent 60%),
+      radial-gradient(800px 460px at 92% 0%, rgba(33, 199, 138, .10), transparent 55%),
+      var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .page { max-width: 1320px; margin: 0 auto; padding: 34px 34px 46px; }
+  header .eyebrow {
+    font-size: 11px; letter-spacing: 2.6px; text-transform: uppercase;
+    color: var(--violet); font-weight: 600;
+  }
+  header h1 { margin: 8px 0 12px; font-size: 26px; line-height: 1.25; font-weight: 650; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    border: 1px solid var(--line); background: rgba(13, 22, 40, .72);
+    color: var(--muted); font-size: 11.5px; padding: 4px 10px; border-radius: 999px;
+  }
+  .chip b { color: var(--text); font-weight: 600; }
+  .chip.warn { border-color: rgba(245, 165, 36, .5); color: var(--amber); }
+  .chip.ok { border-color: rgba(33, 199, 138, .5); color: var(--green); }
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 18px; align-items: center;
+    margin: 22px 0 14px; font-size: 12px; color: var(--muted);
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .sw { width: 22px; height: 0; border-top: 2.5px solid var(--green); border-radius: 2px; }
+  .sw.aux { border-top: 2px dashed var(--blue); }
+  .sw.diag { border-top: 2px dashed var(--red); }
+  .sw.box { width: 14px; height: 14px; border: 1.5px solid var(--violet); border-radius: 4px; background: rgba(124, 92, 255, .12); }
+  .sw.box.changed { border-color: var(--amber); background: rgba(245, 165, 36, .12); }
+  .sw.box.existing { border-color: #2c3d5c; background: rgba(44, 61, 92, .25); }
+
+  .stage-wrap { overflow: auto; padding-bottom: 6px; }
+  .stage {
+    position: relative;
+    background:
+      radial-gradient(600px 300px at 20% 10%, rgba(90, 169, 255, .08), transparent 60%),
+      linear-gradient(180deg, rgba(13, 22, 40, .92), rgba(9, 15, 27, .96));
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    box-shadow: 0 26px 70px rgba(0, 0, 0, .45), inset 0 1px 0 rgba(255, 255, 255, .04);
+    overflow: hidden;
+  }
+  #lanes, #nodes { position: absolute; inset: 0; }
+  .band {
+    position: absolute; left: 14px; right: 14px;
+    border: 1px dashed var(--line-soft); border-radius: 16px;
+    background: rgba(18, 29, 51, .28); pointer-events: none;
+  }
+  .band-label {
+    position: absolute; top: 10px; left: 16px;
+    font-size: 10.5px; letter-spacing: 2px; text-transform: uppercase;
+    color: var(--dim); font-weight: 600;
+  }
+  #edges { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+  .edge-label {
+    font-size: 11px; fill: #9fb3d1;
+    paint-order: stroke; stroke: #070b14; stroke-width: 4px; stroke-linejoin: round;
+  }
+  .node {
+    position: absolute; z-index: 2;
+    display: flex; flex-direction: column; justify-content: center; gap: 5px;
+    padding: 12px 14px; border-radius: 14px;
+    background: linear-gradient(180deg, var(--panel-2), var(--panel));
+    border: 1px solid #273854;
+    box-shadow: 0 10px 26px rgba(0, 0, 0, .28), inset 0 1px 0 rgba(255, 255, 255, .035);
+  }
+  .node .label { font-size: 14.5px; font-weight: 620; letter-spacing: .2px; }
+  .node .sub { font-size: 11.5px; color: var(--muted); line-height: 1.35; }
+  .node .badge {
+    position: absolute; top: 8px; right: 9px;
+    font-size: 9.5px; letter-spacing: .6px; padding: 2px 6px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--dim); background: rgba(7, 11, 20, .55);
+  }
+  .node.new { border-color: var(--violet); box-shadow: 0 0 0 1px rgba(124, 92, 255, .25), 0 12px 30px rgba(124, 92, 255, .16); }
+  .node.new .badge { color: var(--violet); border-color: rgba(124, 92, 255, .55); }
+  .node.changed { border-color: var(--amber); box-shadow: 0 0 0 1px rgba(245, 165, 36, .22), 0 12px 30px rgba(245, 165, 36, .12); }
+  .node.changed .badge { color: var(--amber); border-color: rgba(245, 165, 36, .55); }
+  .node.start { border-color: rgba(33, 199, 138, .65); }
+  .node.start .badge { color: var(--green); border-color: rgba(33, 199, 138, .45); }
+  .node.bus { background: linear-gradient(180deg, #10233a, #0c1a2c); }
+
+  .section-title {
+    display: flex; align-items: baseline; gap: 10px;
+    margin: 28px 0 12px; font-size: 13px; letter-spacing: 1.4px;
+    text-transform: uppercase; color: var(--dim); font-weight: 600;
+  }
+  .section-title small { text-transform: none; letter-spacing: 0; color: var(--dim); font-weight: 400; }
+  .changes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .change {
+    display: flex; gap: 10px; align-items: flex-start;
+    border: 1px solid var(--line-soft); border-radius: 12px;
+    background: rgba(13, 22, 40, .6); padding: 11px 13px; font-size: 12.5px;
+    color: #c3d1e6; line-height: 1.5;
+  }
+  .change .lv {
+    flex: 0 0 auto; font-size: 10px; padding: 2px 7px; border-radius: 999px;
+    border: 1px solid var(--violet); color: var(--violet); margin-top: 1px;
+  }
+  .change .lv.changed { border-color: var(--amber); color: var(--amber); }
+  .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .card {
+    border: 1px solid var(--line-soft); border-left: 3px solid var(--red);
+    border-radius: 12px; background: rgba(13, 22, 40, .6); padding: 12px 14px;
+  }
+  .card.note { border-left-color: var(--blue); }
+  .card h3 { margin: 0 0 6px; font-size: 12.5px; font-weight: 600; }
+  .card p { margin: 0; font-size: 11.5px; color: var(--muted); line-height: 1.55; }
+  footer { margin-top: 26px; font-size: 11.5px; color: var(--dim); }
+  code { font-family: "JetBrains Mono", Consolas, monospace; font-size: .94em; color: #b9c9e2; }
+  @media (max-width: 1000px) {
+    .page { padding: 24px 18px 36px; }
+    .changes, .cards { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <div class="eyebrow">Archify · L1 Workflow</div>
+    <h1 id="title">RelayDesk 桌面身份持久化：同一台 PC 只有一个指纹</h1>
+    <div class="chips">
+      <span class="chip">级别 <b>L1</b></span>
+      <span class="chip" id="status-chip">状态 <b id="status-value">已确认</b></span>
+      <span class="chip">日期 <b id="date-value">2026-10-29</b></span>
+      <span class="chip">主路径 <b id="main-count">8 节点</b></span>
+      <span class="chip">失败/兜底 <b id="fail-count">4 条</b></span>
+    </div>
+  </header>
+
+  <div class="legend">
+    <span><i class="sw"></i>主路径</span>
+    <span><i class="sw aux"></i>配对 / 辅助</span>
+    <span><i class="sw diag"></i>失败 / 降级</span>
+    <span><i class="sw box existing"></i>已上线</span>
+    <span><i class="sw box changed"></i>调整</span>
+    <span><i class="sw box"></i>新增</span>
+  </div>
+
+  <div class="stage-wrap">
+    <div class="stage" id="stage">
+      <div id="lanes"></div>
+      <svg id="edges"></svg>
+      <div id="nodes"></div>
+    </div>
+  </div>
+
+  <div class="section-title">本批改动 <small>确认后才进入实现</small></div>
+  <section class="changes" id="changes"></section>
+
+  <div class="section-title">失败出口与边界 <small>主路径之外必须可走</small></div>
+  <section class="cards" id="cards"></section>
+
+  <footer>
+    旁路 JSON：<code>docs/archify/relaydesk_identity_workflow.json</code> ·
+    本页由同一份 JSON 渲染，节点/边/改动与旁路文件一致。
+  </footer>
+</div>
+
+<script id="diagram-data" type="application/json">{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RelayDesk 桌面身份持久化：同一台 PC 只有一个指纹",
+    "locale": "zh-CN",
+    "level": "L1",
+    "status": "已确认",
+    "date": "2026-10-29",
+    "quality_profile": "showcase"
+  },
+  "scope": {
+    "in": [
+      "状态目录 :: 规范化（去嵌套）",
+      "identity :: 缺失时沿用历史身份",
+      "对外指纹稳定（announce/ping/配对）",
+      "冲突与损坏的显式出口"
+    ],
+    "out": [
+      "迁移消息/设备数据库",
+      "合并已分裂的配对关系",
+      "改变 fingerprint 的 wire 语义",
+      "多用户/便携模式"
+    ]
+  },
+  "canvas": {
+    "width": 1240,
+    "height": 620
+  },
+  "lanes": [
+    {
+      "id": "boot",
+      "label": "启动与目录"
+    },
+    {
+      "id": "id",
+      "label": "身份解析"
+    },
+    {
+      "id": "exits",
+      "label": "冲突与出口"
+    }
+  ],
+  "bands": [
+    {
+      "lane": "boot",
+      "y": 64,
+      "h": 170
+    },
+    {
+      "lane": "id",
+      "y": 254,
+      "h": 140
+    },
+    {
+      "lane": "exits",
+      "y": 414,
+      "h": 170
+    }
+  ],
+  "mainPath": [
+    "start",
+    "resolve",
+    "load",
+    "check",
+    "adopt",
+    "persist",
+    "announce"
+  ],
+  "nodes": [
+    {
+      "id": "start",
+      "lane": "boot",
+      "type": "start",
+      "status": "existing",
+      "x": 60,
+      "y": 100,
+      "w": 190,
+      "h": 78,
+      "label": "任一端启动",
+      "sublabel": "flixd / flix CLI / GUI"
+    },
+    {
+      "id": "resolve",
+      "lane": "boot",
+      "type": "process",
+      "status": "changed",
+      "x": 300,
+      "y": 100,
+      "w": 230,
+      "h": 78,
+      "label": "规范状态目录",
+      "sublabel": "APPDATA 以 flixcli 结尾→回退父目录"
+    },
+    {
+      "id": "persist",
+      "lane": "boot",
+      "type": "process",
+      "status": "new",
+      "x": 580,
+      "y": 100,
+      "w": 200,
+      "h": 78,
+      "label": "写回规范位置",
+      "sublabel": "adopted_from / created_at"
+    },
+    {
+      "id": "announce",
+      "lane": "boot",
+      "type": "process",
+      "status": "changed",
+      "x": 830,
+      "y": 100,
+      "w": 220,
+      "h": 78,
+      "label": "对外指纹稳定",
+      "sublabel": "announce / ping / 配对同源"
+    },
+    {
+      "id": "load",
+      "lane": "id",
+      "type": "process",
+      "status": "changed",
+      "x": 60,
+      "y": 288,
+      "w": 190,
+      "h": 78,
+      "label": "读取 identity",
+      "sublabel": "prefs.identity · 校验 uuid"
+    },
+    {
+      "id": "check",
+      "lane": "id",
+      "type": "decision",
+      "status": "new",
+      "x": 300,
+      "y": 288,
+      "w": 200,
+      "h": 78,
+      "label": "已有有效指纹？",
+      "sublabel": "缺失或损坏才走迁移"
+    },
+    {
+      "id": "adopt",
+      "lane": "id",
+      "type": "process",
+      "status": "new",
+      "x": 550,
+      "y": 288,
+      "w": 220,
+      "h": 78,
+      "label": "沿用历史身份",
+      "sublabel": "扫描旧状态目录，取最近修改"
+    },
+    {
+      "id": "create",
+      "lane": "id",
+      "type": "process",
+      "status": "changed",
+      "x": 830,
+      "y": 288,
+      "w": 200,
+      "h": 78,
+      "label": "生成新身份",
+      "sublabel": "仅当找不到任何旧身份"
+    },
+    {
+      "id": "exits",
+      "lane": "exits",
+      "type": "security",
+      "status": "new",
+      "x": 330,
+      "y": 500,
+      "w": 380,
+      "h": 78,
+      "label": "冲突与失败出口",
+      "sublabel": "多身份 / prefs 损坏 / 目录只读"
+    }
+  ],
+  "edges": [
+    {
+      "from": "start",
+      "to": "resolve",
+      "kind": "main",
+      "label": "定位",
+      "labelAt": [
+        268,
+        128
+      ],
+      "points": [
+        [
+          250,
+          139
+        ],
+        [
+          300,
+          139
+        ]
+      ]
+    },
+    {
+      "from": "resolve",
+      "to": "load",
+      "kind": "main",
+      "label": "读取",
+      "labelAt": [
+        250,
+        232
+      ],
+      "points": [
+        [
+          400,
+          178
+        ],
+        [
+          400,
+          240
+        ],
+        [
+          155,
+          240
+        ],
+        [
+          155,
+          288
+        ]
+      ]
+    },
+    {
+      "from": "load",
+      "to": "check",
+      "kind": "main",
+      "label": "校验",
+      "labelAt": [
+        270,
+        318
+      ],
+      "points": [
+        [
+          250,
+          327
+        ],
+        [
+          300,
+          327
+        ]
+      ]
+    },
+    {
+      "from": "check",
+      "to": "adopt",
+      "kind": "aux",
+      "label": "缺失",
+      "labelAt": [
+        516,
+        306
+      ],
+      "points": [
+        [
+          500,
+          327
+        ],
+        [
+          550,
+          327
+        ]
+      ]
+    },
+    {
+      "from": "check",
+      "to": "announce",
+      "kind": "main",
+      "label": "已有",
+      "labelAt": [
+        700,
+        222
+      ],
+      "points": [
+        [
+          400,
+          288
+        ],
+        [
+          400,
+          236
+        ],
+        [
+          940,
+          236
+        ],
+        [
+          940,
+          178
+        ]
+      ]
+    },
+    {
+      "from": "adopt",
+      "to": "persist",
+      "kind": "main",
+      "label": "沿用",
+      "labelAt": [
+        666,
+        226
+      ],
+      "points": [
+        [
+          660,
+          288
+        ],
+        [
+          660,
+          178
+        ]
+      ]
+    },
+    {
+      "from": "create",
+      "to": "persist",
+      "kind": "diag",
+      "label": "新建",
+      "labelAt": [
+        790,
+        226
+      ],
+      "points": [
+        [
+          900,
+          288
+        ],
+        [
+          900,
+          240
+        ],
+        [
+          720,
+          240
+        ],
+        [
+          720,
+          178
+        ]
+      ]
+    },
+    {
+      "from": "persist",
+      "to": "announce",
+      "kind": "main",
+      "label": "落盘",
+      "labelAt": [
+        800,
+        128
+      ],
+      "points": [
+        [
+          780,
+          139
+        ],
+        [
+          830,
+          139
+        ]
+      ]
+    },
+    {
+      "from": "load",
+      "to": "exits",
+      "kind": "diag",
+      "label": "损坏",
+      "labelAt": [
+        196,
+        470
+      ],
+      "points": [
+        [
+          155,
+          366
+        ],
+        [
+          155,
+          470
+        ],
+        [
+          400,
+          470
+        ],
+        [
+          400,
+          500
+        ]
+      ]
+    },
+    {
+      "from": "adopt",
+      "to": "exits",
+      "kind": "diag",
+      "label": "多身份",
+      "labelAt": [
+        600,
+        440
+      ],
+      "points": [
+        [
+          660,
+          366
+        ],
+        [
+          660,
+          500
+        ]
+      ]
+    }
+  ],
+  "changes": [
+    {
+      "node": "resolve",
+      "level": "调整",
+      "text": "APP_DIR 规范化：APPDATA 以 flixcli 结尾时回退父目录，杜绝 flixcli\\flixcli 这类嵌套状态目录。"
+    },
+    {
+      "node": "load",
+      "level": "调整",
+      "text": "读取 prefs.identity 时校验 uuid 格式；缺失/损坏不再静默生成。"
+    },
+    {
+      "node": "check",
+      "level": "新增",
+      "text": "新增有效性判定，只有缺失或损坏才进入迁移分支。"
+    },
+    {
+      "node": "adopt",
+      "level": "新增",
+      "text": "扫描历史状态目录（%APPDATA%\\flixcli\\flixcli、~\\flixcli 等），沿用最近修改的 identity。"
+    },
+    {
+      "node": "create",
+      "level": "调整",
+      "text": "仅当找不到任何旧身份才生成 uuid，并写 created_at，避免无痕迹换指纹。"
+    },
+    {
+      "node": "persist",
+      "level": "新增",
+      "text": "写回规范位置并记录 adopted_from，`flix self --json` 可自查来源。"
+    },
+    {
+      "node": "announce",
+      "level": "调整",
+      "text": "announce/ping_v2/配对一律使用同一稳定指纹，PC 在安卓列表只出现一行。"
+    }
+  ],
+  "cards": [
+    {
+      "kind": "fail",
+      "title": "出口 1 · 多个旧身份",
+      "body": "旧目录各有不同 identity：取 prefs mtime 最新者并写日志，不静默改动其它目录。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 2 · prefs 损坏",
+      "body": "JSON 解析失败 → 备份 shared_preferences.json.bad-<ts>，再按无身份走迁移。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 3 · 目录只读",
+      "body": "写盘失败时本次仅用内存身份并告警，不阻断收发。"
+    },
+    {
+      "kind": "note",
+      "title": "本批不改",
+      "body": "不迁移 DB/消息历史；不合并已分裂的配对；不改 wire 与端口；配对仍按指纹。"
+    }
+  ]
+}</script>
+
+<script>
+(function () {
+  const DATA = JSON.parse(document.getElementById('diagram-data').textContent);
+  const statusText = { existing: '已上线', new: '新增', changed: '调整' };
+  const laneLabel = Object.fromEntries(DATA.lanes.map(l => [l.id, l.label]));
+
+  document.getElementById('title').textContent = DATA.meta.title;
+  const statusChip = document.getElementById('status-chip');
+  document.getElementById('status-value').textContent = DATA.meta.status;
+  statusChip.className = 'chip' + (DATA.meta.status === '已确认' ? ' ok' : ' warn');
+  document.getElementById('date-value').textContent = DATA.meta.date;
+  document.getElementById('main-count').textContent = DATA.mainPath.length + ' 节点';
+  document.getElementById('fail-count').textContent =
+    DATA.cards.filter(c => c.kind === 'fail').length + ' 条';
+  const stage = document.getElementById('stage');
+  stage.style.width = DATA.canvas.width + 'px';
+  stage.style.height = DATA.canvas.height + 'px';
+
+  const lanes = document.getElementById('lanes');
+  DATA.bands.forEach(b => {
+    const el = document.createElement('div');
+    el.className = 'band';
+    el.style.top = b.y + 'px';
+    el.style.height = b.h + 'px';
+    const tag = document.createElement('span');
+    tag.className = 'band-label';
+    tag.textContent = laneLabel[b.lane] || b.lane;
+    el.appendChild(tag);
+    lanes.appendChild(el);
+  });
+
+  const svg = document.getElementById('edges');
+  const NS = 'http://www.w3.org/2000/svg';
+  svg.setAttribute('viewBox', `0 0 ${DATA.canvas.width} ${DATA.canvas.height}`);
+  svg.setAttribute('width', DATA.canvas.width);
+  svg.setAttribute('height', DATA.canvas.height);
+  const colors = { main: '#21c78a', aux: '#5aa9ff', diag: '#ef5b6b' };
+  const defs = document.createElementNS(NS, 'defs');
+  Object.entries(colors).forEach(([kind, color]) => {
+    const marker = document.createElementNS(NS, 'marker');
+    marker.setAttribute('id', 'arrow-' + kind);
+    marker.setAttribute('viewBox', '0 0 10 10');
+    marker.setAttribute('refX', '8');
+    marker.setAttribute('refY', '5');
+    marker.setAttribute('markerWidth', '7');
+    marker.setAttribute('markerHeight', '7');
+    marker.setAttribute('orient', 'auto-start-reverse');
+    const path = document.createElementNS(NS, 'path');
+    path.setAttribute('d', 'M 0 0 L 10 5 L 0 10 z');
+    path.setAttribute('fill', color);
+    marker.appendChild(path);
+    defs.appendChild(marker);
+  });
+  svg.appendChild(defs);
+
+  DATA.edges.forEach(e => {
+    const poly = document.createElementNS(NS, 'polyline');
+    poly.setAttribute('points', e.points.map(p => p.join(',')).join(' '));
+    poly.setAttribute('fill', 'none');
+    poly.setAttribute('stroke', colors[e.kind] || colors.main);
+    poly.setAttribute('stroke-width', e.kind === 'main' ? '2.4' : '1.8');
+    poly.setAttribute('stroke-linecap', 'round');
+    poly.setAttribute('stroke-linejoin', 'round');
+    poly.setAttribute('marker-end', `url(#arrow-${e.kind || 'main'})`);
+    if (e.kind !== 'main') poly.setAttribute('stroke-dasharray', '6 6');
+    svg.appendChild(poly);
+    if (e.label) {
+      const at = e.labelAt || e.points[e.points.length - 1];
+      const text = document.createElementNS(NS, 'text');
+      text.setAttribute('x', at[0]);
+      text.setAttribute('y', at[1]);
+      text.setAttribute('class', 'edge-label');
+      text.textContent = e.label;
+      svg.appendChild(text);
+    }
+  });
+
+  const nodes = document.getElementById('nodes');
+  DATA.nodes.forEach(n => {
+    const el = document.createElement('div');
+    el.className = 'node ' + (n.status || 'existing') + ' ' + (n.type || '');
+    el.style.left = n.x + 'px';
+    el.style.top = n.y + 'px';
+    el.style.width = n.w + 'px';
+    el.style.height = n.h + 'px';
+    const badge = document.createElement('span');
+    badge.className = 'badge';
+    badge.textContent = statusText[n.status] || n.status;
+    const label = document.createElement('div');
+    label.className = 'label';
+    label.textContent = n.label;
+    const sub = document.createElement('div');
+    sub.className = 'sub';
+    sub.textContent = n.sublabel || '';
+    el.append(badge, label, sub);
+    nodes.appendChild(el);
+  });
+
+  const changes = document.getElementById('changes');
+  DATA.changes.forEach(c => {
+    const el = document.createElement('div');
+    el.className = 'change';
+    const lv = document.createElement('span');
+    lv.className = 'lv' + (c.level === '调整' ? ' changed' : '');
+    lv.textContent = c.level;
+    const tx = document.createElement('span');
+    tx.textContent = c.text;
+    el.append(lv, tx);
+    changes.appendChild(el);
+  });
+
+  const cards = document.getElementById('cards');
+  DATA.cards.forEach(c => {
+    const el = document.createElement('div');
+    el.className = 'card' + (c.kind === 'note' ? ' note' : '');
+    const h = document.createElement('h3');
+    h.textContent = c.title;
+    const p = document.createElement('p');
+    p.textContent = c.body;
+    el.append(h, p);
+    cards.appendChild(el);
+  });
+})();
+</script>
+</body>
+</html>

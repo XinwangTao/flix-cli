@@ -1,0 +1,123 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RelayDesk Android v2A：常驻、在线与通知",
+    "locale": "zh-CN",
+    "level": "L2",
+    "status": "已确认",
+    "date": "2026-10-29",
+    "quality_profile": "showcase"
+  },
+  "scope": {
+    "in": [
+      "前台服务常驻",
+      "端口自适应与回落",
+      "在线判定与探活",
+      "通知聚合与未读角标",
+      "会话体验与文件进度",
+      "入站配对确认",
+      "发送重试"
+    ],
+    "out": [
+      "群组与 @（v2B）",
+      "相机扫码配对（v2B）",
+      "剪贴板发送",
+      "远程观看/控制",
+      "开机自启与账号云"
+    ]
+  },
+  "canvas": { "width": 1240, "height": 620 },
+  "lanes": [
+    { "id": "app", "label": "平板 UI" },
+    { "id": "channel", "label": "常驻通道" },
+    { "id": "aux", "label": "配对 / 失败出口" }
+  ],
+  "bands": [
+    { "lane": "app", "y": 64, "h": 170 },
+    { "lane": "channel", "y": 254, "h": 140 },
+    { "lane": "aux", "y": 414, "h": 170 }
+  ],
+  "mainPath": ["start", "service", "discovery", "presence", "ui", "chat", "transport", "notify"],
+  "nodes": [
+    {
+      "id": "start", "lane": "app", "type": "start", "status": "existing",
+      "x": 60, "y": 100, "w": 180, "h": 78,
+      "label": "启动与授权", "sublabel": "通知权限 + 电池优化提示"
+    },
+    {
+      "id": "service", "lane": "app", "type": "process", "status": "new",
+      "x": 290, "y": 100, "w": 210, "h": 78,
+      "label": "前台服务常驻", "sublabel": "FGS dataSync · 常驻通知"
+    },
+    {
+      "id": "ui", "lane": "app", "type": "process", "status": "changed",
+      "x": 550, "y": 100, "w": 210, "h": 78,
+      "label": "会话列表", "sublabel": "未读数 · 最后消息 · 在线点"
+    },
+    {
+      "id": "chat", "lane": "app", "type": "process", "status": "changed",
+      "x": 810, "y": 100, "w": 220, "h": 78,
+      "label": "会话页", "sublabel": "气泡 · 文件进度/打开 · 失败重发"
+    },
+    {
+      "id": "discovery", "lane": "channel", "type": "process", "status": "changed",
+      "x": 60, "y": 288, "w": 210, "h": 78,
+      "label": "发现与端口", "sublabel": "8891 占用→18991 · announce 实际端口"
+    },
+    {
+      "id": "presence", "lane": "channel", "type": "process", "status": "new",
+      "x": 320, "y": 288, "w": 200, "h": 78,
+      "label": "在线判定", "sublabel": "seenAt ≤ 90s · 60s 探活"
+    },
+    {
+      "id": "transport", "lane": "channel", "type": "process", "status": "changed",
+      "x": 570, "y": 288, "w": 210, "h": 78,
+      "label": "收发通道", "sublabel": "bubble + /file · 3 次退避重试"
+    },
+    {
+      "id": "notify", "lane": "channel", "type": "process", "status": "changed",
+      "x": 830, "y": 288, "w": 220, "h": 78,
+      "label": "通知与未读", "sublabel": "按设备聚合 · 点击直达会话"
+    },
+    {
+      "id": "pair", "lane": "aux", "type": "security", "status": "changed",
+      "x": 60, "y": 500, "w": 220, "h": 78,
+      "label": "配对确认", "sublabel": "入站 askPair 先询问（默认拒绝）"
+    },
+    {
+      "id": "exits", "lane": "aux", "type": "decision", "status": "new",
+      "x": 330, "y": 500, "w": 330, "h": 78,
+      "label": "失败出口", "sublabel": "组播被吞 / 无通知权限 / 被杀 / 离线"
+    }
+  ],
+  "edges": [
+    { "from": "start", "to": "service", "kind": "main", "label": "授权通过", "labelAt": [240, 128], "points": [[240, 139], [290, 139]] },
+    { "from": "service", "to": "discovery", "kind": "main", "label": "拉起通道", "labelAt": [270, 232], "points": [[395, 178], [395, 240], [165, 240], [165, 288]] },
+    { "from": "discovery", "to": "presence", "kind": "main", "label": "设备列表", "labelAt": [240, 280], "points": [[270, 327], [320, 327]] },
+    { "from": "presence", "to": "ui", "kind": "main", "label": "seenAt ≤ 90s", "labelAt": [480, 232], "points": [[420, 288], [420, 240], [655, 240], [655, 178]] },
+    { "from": "ui", "to": "chat", "kind": "main", "label": "选择会话", "labelAt": [762, 128], "points": [[760, 139], [810, 139]] },
+    { "from": "chat", "to": "transport", "kind": "main", "label": "文本 / 文件", "labelAt": [780, 232], "points": [[920, 178], [920, 240], [675, 240], [675, 288]] },
+    { "from": "transport", "to": "notify", "kind": "main", "label": "送达", "labelAt": [784, 280], "points": [[780, 327], [830, 327]] },
+    { "from": "discovery", "to": "pair", "kind": "aux", "label": "手动 IP / 配对码", "labelAt": [172, 445], "points": [[165, 366], [165, 500]] },
+    { "from": "presence", "to": "exits", "kind": "diag", "label": "探活失败 → 离线", "labelAt": [428, 455], "points": [[420, 366], [420, 500]] },
+    { "from": "transport", "to": "exits", "kind": "diag", "label": "超时 / 拒绝", "labelAt": [682, 468], "points": [[675, 366], [675, 480], [600, 480], [600, 500]] }
+  ],
+  "changes": [
+    { "node": "service", "level": "新增", "text": "新增前台服务：发现、接收、探活全部下沉，退后台/锁屏仍可达；常驻通知独立渠道。" },
+    { "node": "discovery", "level": "调整", "text": "8891 被占自动回落 18991；announce 广播实际端口，PC 在 18991/8898 也能发现。" },
+    { "node": "presence", "level": "新增", "text": "对齐桌面 presence：90s TTL + 60s /ping_v2 探活；离线灰显并显示最后在线时间。" },
+    { "node": "ui", "level": "调整", "text": "会话列表补未读数字、最后一条消息/时间、空态与下拉刷新；在线点接 TTL。" },
+    { "node": "chat", "level": "调整", "text": "文件接收显示进度并可打开；发送失败标红、可重发；气泡与输入区视觉打磨。" },
+    { "node": "notify", "level": "调整", "text": "通知按设备聚合（setGroup），点击直达会话；无通知权限时应用内未读继续工作。" },
+    { "node": "pair", "level": "调整", "text": "入站 askPairDevice 改为先弹确认（默认拒绝），确认后才落库；保留 4 位码。" },
+    { "node": "transport", "level": "调整", "text": "发送失败 3 次退避重试并可手动重发；不做离线持久队列（明示边界）。" }
+  ],
+  "cards": [
+    { "kind": "fail", "title": "出口 1 · 8891 被占", "body": "平板上官方 Flix 先占 8891 时，服务回落 18991，announce 携带实际端口，PC 仍可发现。" },
+    { "kind": "fail", "title": "出口 2 · 组播被吞", "body": "保留 v1 手动 IP:端口 兜底；填入 PC 的 18991 即可 ping_v2 直连。" },
+    { "kind": "fail", "title": "出口 3 · 无通知权限", "body": "只降级提示：收消息/文件不受影响，未读数仍在应用内可见。" },
+    { "kind": "fail", "title": "出口 4 · 进程被杀", "body": "系统强杀后不再接收（诚实边界），UI 明示；重开 App 即恢复。" },
+    { "kind": "note", "title": "本批不改", "body": "wire 格式、配对/文件安全门禁、群组与 @、相机扫码、剪贴板发送。" }
+  ]
+}

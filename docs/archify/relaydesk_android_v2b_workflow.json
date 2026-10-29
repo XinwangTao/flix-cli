@@ -1,0 +1,554 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RelayDesk Android v2B：群组 @ 与扫码配对",
+    "locale": "zh-CN",
+    "level": "L2",
+    "status": "已确认",
+    "date": "2026-10-29",
+    "quality_profile": "showcase"
+  },
+  "scope": {
+    "in": [
+      "群会话列表与建群",
+      "群消息收发（groupId）",
+      "@ 成员的输入与高亮",
+      "群通知与未读",
+      "我的配对二维码",
+      "扫对方二维码发起配对"
+    ],
+    "out": [
+      "群管理（改名/踢人/退群）的桌面 UI",
+      "红包/投票/表情包",
+      "剪贴板发送",
+      "开机自启与账号云",
+      "离线持久队列"
+    ]
+  },
+  "canvas": {
+    "width": 1240,
+    "height": 700
+  },
+  "lanes": [
+    {
+      "id": "groups",
+      "label": "群组消息"
+    },
+    {
+      "id": "wire",
+      "label": "接收与通知"
+    },
+    {
+      "id": "qr",
+      "label": "扫码配对"
+    },
+    {
+      "id": "exits",
+      "label": "失败出口"
+    }
+  ],
+  "bands": [
+    {
+      "lane": "groups",
+      "y": 64,
+      "h": 210
+    },
+    {
+      "lane": "wire",
+      "y": 284,
+      "h": 130
+    },
+    {
+      "lane": "qr",
+      "y": 424,
+      "h": 150
+    },
+    {
+      "lane": "exits",
+      "y": 584,
+      "h": 104
+    }
+  ],
+  "mainPath": [
+    "list",
+    "create",
+    "gchat",
+    "send",
+    "recv"
+  ],
+  "nodes": [
+    {
+      "id": "list",
+      "lane": "groups",
+      "type": "process",
+      "status": "new",
+      "x": 60,
+      "y": 96,
+      "w": 190,
+      "h": 78,
+      "label": "群会话列表",
+      "sublabel": "群名 · 成员数 · 未读"
+    },
+    {
+      "id": "create",
+      "lane": "groups",
+      "type": "process",
+      "status": "new",
+      "x": 300,
+      "y": 96,
+      "w": 210,
+      "h": 78,
+      "label": "建群",
+      "sublabel": "从已配对设备选成员"
+    },
+    {
+      "id": "gchat",
+      "lane": "groups",
+      "type": "process",
+      "status": "new",
+      "x": 550,
+      "y": 96,
+      "w": 200,
+      "h": 78,
+      "label": "群会话页",
+      "sublabel": "成员行 · @ 输入 · 文件"
+    },
+    {
+      "id": "send",
+      "lane": "groups",
+      "type": "process",
+      "status": "new",
+      "x": 790,
+      "y": 96,
+      "w": 230,
+      "h": 78,
+      "label": "群消息发送",
+      "sublabel": "groupId + @别名 文本"
+    },
+    {
+      "id": "recv",
+      "lane": "wire",
+      "type": "process",
+      "status": "changed",
+      "x": 60,
+      "y": 318,
+      "w": 250,
+      "h": 78,
+      "label": "接收归组",
+      "sublabel": "按 groupId 归档 · @我高亮"
+    },
+    {
+      "id": "notify",
+      "lane": "wire",
+      "type": "process",
+      "status": "changed",
+      "x": 350,
+      "y": 318,
+      "w": 240,
+      "h": 78,
+      "label": "群通知与未读",
+      "sublabel": "按群聚合 · @我 优先提示"
+    },
+    {
+      "id": "qr_show",
+      "lane": "qr",
+      "type": "process",
+      "status": "new",
+      "x": 60,
+      "y": 458,
+      "w": 200,
+      "h": 78,
+      "label": "我的二维码",
+      "sublabel": "relaydesk://pair?fp&ip&port&code"
+    },
+    {
+      "id": "qr_scan",
+      "lane": "qr",
+      "type": "process",
+      "status": "new",
+      "x": 300,
+      "y": 458,
+      "w": 220,
+      "h": 78,
+      "label": "扫对方码",
+      "sublabel": "ZXing core + Camera2 预览"
+    },
+    {
+      "id": "pair",
+      "lane": "qr",
+      "type": "security",
+      "status": "changed",
+      "x": 560,
+      "y": 458,
+      "w": 210,
+      "h": 78,
+      "label": "配对确认",
+      "sublabel": "复用现有弹窗（默认拒绝）"
+    },
+    {
+      "id": "exits",
+      "lane": "exits",
+      "type": "security",
+      "status": "new",
+      "x": 300,
+      "y": 598,
+      "w": 420,
+      "h": 78,
+      "label": "失败与兜底",
+      "sublabel": "相机拒绝 / 码无效 / 成员离线 / 未知群"
+    }
+  ],
+  "edges": [
+    {
+      "from": "list",
+      "to": "create",
+      "kind": "main",
+      "label": "新建群",
+      "labelAt": [
+        258,
+        88
+      ],
+      "points": [
+        [
+          250,
+          135
+        ],
+        [
+          300,
+          135
+        ]
+      ]
+    },
+    {
+      "from": "create",
+      "to": "gchat",
+      "kind": "main",
+      "label": "创建",
+      "labelAt": [
+        508,
+        88
+      ],
+      "points": [
+        [
+          510,
+          135
+        ],
+        [
+          550,
+          135
+        ]
+      ]
+    },
+    {
+      "from": "gchat",
+      "to": "send",
+      "kind": "main",
+      "label": "发送",
+      "labelAt": [
+        748,
+        88
+      ],
+      "points": [
+        [
+          750,
+          135
+        ],
+        [
+          790,
+          135
+        ]
+      ]
+    },
+    {
+      "from": "send",
+      "to": "recv",
+      "kind": "main",
+      "label": "groupId 投递",
+      "labelAt": [
+        186,
+        232
+      ],
+      "points": [
+        [
+          905,
+          174
+        ],
+        [
+          905,
+          240
+        ],
+        [
+          185,
+          240
+        ],
+        [
+          185,
+          318
+        ]
+      ]
+    },
+    {
+      "from": "recv",
+      "to": "notify",
+      "kind": "main",
+      "label": "新消息",
+      "labelAt": [
+        314,
+        346
+      ],
+      "points": [
+        [
+          310,
+          357
+        ],
+        [
+          350,
+          357
+        ]
+      ]
+    },
+    {
+      "from": "list",
+      "to": "qr_show",
+      "kind": "aux",
+      "label": "扫码",
+      "labelAt": [
+        36,
+        560
+      ],
+      "points": [
+        [
+          120,
+          174
+        ],
+        [
+          120,
+          240
+        ],
+        [
+          32,
+          240
+        ],
+        [
+          32,
+          497
+        ],
+        [
+          60,
+          497
+        ]
+      ]
+    },
+    {
+      "from": "qr_show",
+      "to": "qr_scan",
+      "kind": "aux",
+      "label": "展示",
+      "labelAt": [
+        252,
+        448
+      ],
+      "points": [
+        [
+          260,
+          497
+        ],
+        [
+          300,
+          497
+        ]
+      ]
+    },
+    {
+      "from": "qr_scan",
+      "to": "pair",
+      "kind": "main",
+      "label": "校验",
+      "labelAt": [
+        512,
+        448
+      ],
+      "points": [
+        [
+          520,
+          497
+        ],
+        [
+          560,
+          497
+        ]
+      ]
+    },
+    {
+      "from": "pair",
+      "to": "list",
+      "kind": "aux",
+      "label": "配对落库",
+      "labelAt": [
+        420,
+        34
+      ],
+      "points": [
+        [
+          665,
+          458
+        ],
+        [
+          665,
+          44
+        ],
+        [
+          155,
+          44
+        ],
+        [
+          155,
+          96
+        ]
+      ]
+    },
+    {
+      "from": "qr_scan",
+      "to": "exits",
+      "kind": "diag",
+      "label": "相机拒绝 / 码无效",
+      "labelAt": [
+        300,
+        556
+      ],
+      "points": [
+        [
+          410,
+          536
+        ],
+        [
+          410,
+          598
+        ]
+      ]
+    },
+    {
+      "from": "pair",
+      "to": "exits",
+      "kind": "diag",
+      "label": "对方超时",
+      "labelAt": [
+        560,
+        556
+      ],
+      "points": [
+        [
+          665,
+          536
+        ],
+        [
+          665,
+          598
+        ]
+      ]
+    },
+    {
+      "from": "send",
+      "to": "exits",
+      "kind": "diag",
+      "label": "成员离线",
+      "labelAt": [
+        1080,
+        380
+      ],
+      "points": [
+        [
+          1020,
+          135
+        ],
+        [
+          1150,
+          135
+        ],
+        [
+          1150,
+          637
+        ],
+        [
+          720,
+          637
+        ]
+      ]
+    }
+  ],
+  "changes": [
+    {
+      "node": "list",
+      "level": "新增",
+      "text": "群会话列表：群名、成员数、最后一条与未读；与单聊列表同页分区。"
+    },
+    {
+      "node": "create",
+      "level": "新增",
+      "text": "建群：从已配对设备多选成员，生成 uuid 作为 groupId并广播建群气泡。"
+    },
+    {
+      "node": "gchat",
+      "level": "新增",
+      "text": "群会话页：成员头像行、@ 选择器、文本/文件发送、发送状态。"
+    },
+    {
+      "node": "send",
+      "level": "新增",
+      "text": "群消息发送：bubble 带 groupId；@ 以文本 @别名 表示，不新增 wire 字段。"
+    },
+    {
+      "node": "recv",
+      "level": "调整",
+      "text": "接收按 groupId 归组；识别 @我的别名时高亮并升级通知。"
+    },
+    {
+      "node": "notify",
+      "level": "调整",
+      "text": "群通知按群聚合，与单聊通知分渠道；@我 用优先提示。"
+    },
+    {
+      "node": "qr_show",
+      "level": "新增",
+      "text": "我的二维码：relaydesk://pair?fp&ip&port&code，含本机当前端口。"
+    },
+    {
+      "node": "qr_scan",
+      "level": "新增",
+      "text": "扫对方码：ZXing core 解码 + Camera2 预览（无 AndroidX 依赖）。"
+    },
+    {
+      "node": "pair",
+      "level": "调整",
+      "text": "扫码后自动发起 askPairDevice，仍走现有确认弹窗与 6s 超时。"
+    }
+  ],
+  "cards": [
+    {
+      "kind": "fail",
+      "title": "出口 1 · 相机权限拒绝",
+      "body": "引导授权；拒绝则退回手动 IP + 4 位配对码，v1 通道保留。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 2 · 二维码无效",
+      "body": "非 relaydesk://pair 或字段缺失：提示重扫，不发起配对。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 3 · 成员离线",
+      "body": "群消息仅投递在线成员；离线成员靠群历史补齐（不做离线队列）。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 4 · 未知群",
+      "body": "收到本地无记录的 groupId：落库标「未知群」，提示向群主拉取群信息。"
+    },
+    {
+      "kind": "note",
+      "title": "本批不改",
+      "body": "wire 文本格式、配对/文件安全门禁、剪贴板发送、桌面群管理 UI。"
+    }
+  ]
+}

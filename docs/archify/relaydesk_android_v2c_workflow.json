@@ -1,0 +1,359 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RelayDesk Android v2C：群信息同步与群管理",
+    "locale": "zh-CN",
+    "level": "L1",
+    "status": "已确认",
+    "date": "2026-10-29",
+    "quality_profile": "showcase"
+  },
+  "scope": {
+    "in": [
+      "群管理：改名、加人、移出、退出群",
+      "群信息快照（name/members/rev）通过 /intent 广播",
+      "接收侧合并：rev 大者胜，未知群补名与成员",
+      "群列表随同步刷新"
+    ],
+    "out": [
+      "群历史消息同步",
+      "群主/管理员权限模型（若选对等则本批不引入）",
+      "桌面群管理 UI（若选仅 Android 则本批不做）",
+      "多端并发编辑的 op-log / CRDT",
+      "bubble 报文格式变更"
+    ]
+  },
+  "canvas": {
+    "width": 1240,
+    "height": 700
+  },
+  "lanes": [
+    {
+      "id": "manage",
+      "label": "群管理（Android）"
+    },
+    {
+      "id": "sync",
+      "label": "群信息同步"
+    },
+    {
+      "id": "apply",
+      "label": "落库与展示"
+    },
+    {
+      "id": "exits",
+      "label": "失败出口"
+    }
+  ],
+  "bands": [
+    { "lane": "manage", "y": 64, "h": 190 },
+    { "lane": "sync", "y": 274, "h": 150 },
+    { "lane": "apply", "y": 444, "h": 130 },
+    { "lane": "exits", "y": 584, "h": 100 }
+  ],
+  "mainPath": [
+    "gchat",
+    "edit",
+    "pack",
+    "push",
+    "recv",
+    "merge",
+    "store",
+    "list"
+  ],
+  "nodes": [
+    {
+      "id": "gchat",
+      "lane": "manage",
+      "type": "process",
+      "status": "existing",
+      "x": 60,
+      "y": 96,
+      "w": 200,
+      "h": 78,
+      "label": "群会话页",
+      "sublabel": "成员行 · @ · 文件（v2B）"
+    },
+    {
+      "id": "edit",
+      "lane": "manage",
+      "type": "process",
+      "status": "new",
+      "x": 300,
+      "y": 96,
+      "w": 200,
+      "h": 78,
+      "label": "群管理",
+      "sublabel": "改名 · 加人 · 移出 · 退出"
+    },
+    {
+      "id": "pack",
+      "lane": "manage",
+      "type": "process",
+      "status": "new",
+      "x": 540,
+      "y": 96,
+      "w": 210,
+      "h": 78,
+      "label": "群信息快照",
+      "sublabel": "name · members · rev"
+    },
+    {
+      "id": "push",
+      "lane": "manage",
+      "type": "process",
+      "status": "new",
+      "x": 790,
+      "y": 96,
+      "w": 230,
+      "h": 78,
+      "label": "广播群信息",
+      "sublabel": "/intent action=rdGroupSync"
+    },
+    {
+      "id": "recv",
+      "lane": "sync",
+      "type": "security",
+      "status": "new",
+      "x": 300,
+      "y": 310,
+      "w": 230,
+      "h": 78,
+      "label": "接收群信息",
+      "sublabel": "发送者须为成员或已配对"
+    },
+    {
+      "id": "merge",
+      "lane": "sync",
+      "type": "process",
+      "status": "new",
+      "x": 580,
+      "y": 310,
+      "w": 250,
+      "h": 78,
+      "label": "合并判定",
+      "sublabel": "rev 大者胜 · 未知群补名"
+    },
+    {
+      "id": "store",
+      "lane": "apply",
+      "type": "process",
+      "status": "new",
+      "x": 340,
+      "y": 470,
+      "w": 250,
+      "h": 78,
+      "label": "群记录更新",
+      "sublabel": "groups + group_members + rev"
+    },
+    {
+      "id": "bubble",
+      "lane": "apply",
+      "type": "process",
+      "status": "existing",
+      "x": 60,
+      "y": 470,
+      "w": 230,
+      "h": 78,
+      "label": "群消息收发",
+      "sublabel": "groupId 扇出（v2B 不变）"
+    },
+    {
+      "id": "list",
+      "lane": "apply",
+      "type": "process",
+      "status": "changed",
+      "x": 640,
+      "y": 470,
+      "w": 250,
+      "h": 78,
+      "label": "群列表刷新",
+      "sublabel": "名称 · 成员数 · 未读"
+    },
+    {
+      "id": "exits",
+      "lane": "exits",
+      "type": "security",
+      "status": "new",
+      "x": 300,
+      "y": 598,
+      "w": 590,
+      "h": 78,
+      "label": "失败与兜底",
+      "sublabel": "对端 500 · 成员离线 · 伪造 · rev 落后"
+    }
+  ],
+  "edges": [
+    {
+      "from": "gchat",
+      "to": "edit",
+      "kind": "main",
+      "label": "成员行",
+      "labelAt": [262, 126],
+      "points": [[260, 135], [300, 135]]
+    },
+    {
+      "from": "edit",
+      "to": "pack",
+      "kind": "main",
+      "label": "保存",
+      "labelAt": [503, 126],
+      "points": [[500, 135], [540, 135]]
+    },
+    {
+      "from": "pack",
+      "to": "push",
+      "kind": "main",
+      "label": "推送",
+      "labelAt": [759, 126],
+      "points": [[750, 135], [790, 135]]
+    },
+    {
+      "from": "push",
+      "to": "recv",
+      "kind": "main",
+      "label": "逐成员投递",
+      "labelAt": [600, 232],
+      "points": [[905, 174], [905, 240], [415, 240], [415, 310]]
+    },
+    {
+      "from": "recv",
+      "to": "merge",
+      "kind": "main",
+      "label": "校验通过",
+      "labelAt": [531, 338],
+      "points": [[530, 349], [580, 349]]
+    },
+    {
+      "from": "merge",
+      "to": "store",
+      "kind": "main",
+      "label": "rev 更大",
+      "labelAt": [560, 444],
+      "points": [[705, 388], [705, 452], [465, 452], [465, 470]]
+    },
+    {
+      "from": "store",
+      "to": "list",
+      "kind": "main",
+      "label": "刷新名称",
+      "labelAt": [596, 500],
+      "points": [[590, 509], [640, 509]]
+    },
+    {
+      "from": "list",
+      "to": "gchat",
+      "kind": "aux",
+      "label": "回到群聊",
+      "labelAt": [900, 36],
+      "points": [[890, 509], [1200, 509], [1200, 44], [160, 44], [160, 96]]
+    },
+    {
+      "from": "gchat",
+      "to": "bubble",
+      "kind": "aux",
+      "label": "发消息",
+      "labelAt": [108, 330],
+      "points": [[100, 174], [100, 509], [60, 509]]
+    },
+    {
+      "from": "bubble",
+      "to": "list",
+      "kind": "aux",
+      "label": "新消息",
+      "labelAt": [712, 558],
+      "points": [[175, 548], [175, 562], [700, 562], [700, 548]]
+    },
+    {
+      "from": "recv",
+      "to": "exits",
+      "kind": "diag",
+      "label": "非成员 / 非法组",
+      "labelAt": [318, 420],
+      "points": [[310, 388], [310, 598]]
+    },
+    {
+      "from": "push",
+      "to": "exits",
+      "kind": "diag",
+      "label": "对端 500 / 成员离线",
+      "labelAt": [1026, 128],
+      "points": [[1020, 135], [1150, 135], [1150, 637], [890, 637]]
+    }
+  ],
+  "changes": [
+    {
+      "node": "edit",
+      "level": "新增",
+      "text": "群管理页：改名、从已配对设备加人、移出成员、退出群；入口在群会话页成员行。"
+    },
+    {
+      "node": "pack",
+      "level": "新增",
+      "text": "每次管理动作生成全量快照 {groupId,name,members,rev=updatedAt(ms)}。"
+    },
+    {
+      "node": "push",
+      "level": "新增",
+      "text": "快照逐成员 POST /intent action=rdGroupSync；新加入者先落本地再推。"
+    },
+    {
+      "node": "recv",
+      "level": "新增",
+      "text": "接收校验：groupId 必须是 uuid，发送者须在本地成员表或已配对列表，否则丢弃。"
+    },
+    {
+      "node": "merge",
+      "level": "新增",
+      "text": "合并规则：incoming.rev > local.rev 才覆盖 name+members；齐平时保留本地并记日志。"
+    },
+    {
+      "node": "store",
+      "level": "新增",
+      "text": "groups 表加 rev 列（DB v4，幂等迁移）；成员表整体替换为快照成员。"
+    },
+    {
+      "node": "list",
+      "level": "调整",
+      "text": "群列表显示同步后的真实群名与成员数；未读口径不变。"
+    }
+  ],
+  "cards": [
+    {
+      "kind": "fail",
+      "title": "出口 1 · 对端不支持",
+      "body": "官方桌面/旧版对未知 action 返回 500：本地改动照常生效，只标记未同步，下次群发前按 rev 重试。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 2 · 成员离线",
+      "body": "投递跳过离线成员，不做离线队列；该成员下次上线后收到任一群消息时回推快照补齐。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 3 · 双向冲突",
+      "body": "两端同时改名：rev 大者胜；rev 相同时保留本地，避免来回抖动，日志记录被丢弃的快照。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 4 · 伪造与越权",
+      "body": "sender 既不在本地成员表也不是已配对设备，或 groupId 非 uuid：直接丢弃，不写库。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 5 · 未知群",
+      "body": "v2B 落成「未知群」的 groupId 收到快照后补真名与成员，群列表立即更正。"
+    },
+    {
+      "kind": "note",
+      "title": "本批不改",
+      "body": "bubble 报文格式、@ 文本语义、群历史同步、多端 op-log；桌面端是否同步按待决问题 3 决定。"
+    },
+    {
+      "kind": "note",
+      "title": "实现补充 · 群设置随快照重建",
+      "body": "对端快照到达时，若群设置对话框正开着就立即重建：改名与成员实时刷新；被移出则整窗翻成只读，保存/加人/退出全部消失。"
+    }
+  ]
+}

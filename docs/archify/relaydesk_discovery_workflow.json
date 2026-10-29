@@ -1,0 +1,87 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RelayDesk 设备发现与在线判定（阶段 1）",
+    "locale": "zh-CN",
+    "level": "L1",
+    "status": "已确认",
+    "date": "2026-10-28",
+    "quality_profile": "showcase"
+  },
+  "canvas": { "width": 1240, "height": 720 },
+  "lanes": [
+    { "id": "daemon", "label": "flixd 守护进程" },
+    { "id": "lan", "label": "LAN 发现通道" },
+    { "id": "ui", "label": "RelayDesk / CLI" }
+  ],
+  "bands": [
+    { "lane": "daemon", "y": 64, "h": 170 },
+    { "lane": "lan", "y": 254, "h": 140 },
+    { "lane": "ui", "y": 414, "h": 260 }
+  ],
+  "mainPath": ["start", "iface", "join", "announce", "listen", "presence"],
+  "nodes": [
+    {
+      "id": "start", "lane": "daemon", "type": "start", "status": "existing",
+      "x": 60, "y": 100, "w": 170, "h": 78,
+      "label": "启动 flixd", "sublabel": "--device-port 18991"
+    },
+    {
+      "id": "iface", "lane": "daemon", "type": "process", "status": "existing",
+      "x": 290, "y": 100, "w": 190, "h": 78,
+      "label": "选网卡", "sublabel": "拒绝 /32 虚拟网卡"
+    },
+    {
+      "id": "join", "lane": "daemon", "type": "process", "status": "existing",
+      "x": 540, "y": 100, "w": 200, "h": 78,
+      "label": "bind :8891 + join", "sublabel": "224.0.0.168"
+    },
+    {
+      "id": "listen", "lane": "daemon", "type": "process", "status": "existing",
+      "x": 920, "y": 100, "w": 240, "h": 78,
+      "label": "收 announce → 落库", "sublabel": "解析后 upsert seenAt"
+    },
+    {
+      "id": "announce", "lane": "lan", "type": "bus", "status": "existing",
+      "x": 540, "y": 288, "w": 260, "h": 78,
+      "label": "30s 周期 announce", "sublabel": "组播 + 子网广播 + 255.255.255.255"
+    },
+    {
+      "id": "probe", "lane": "lan", "type": "process", "status": "new",
+      "x": 920, "y": 288, "w": 240, "h": 78,
+      "label": "库内设备探活", "sublabel": "60s · TCP /ping_v2 刷新 seenAt"
+    },
+    {
+      "id": "presence", "lane": "ui", "type": "decision", "status": "changed",
+      "x": 920, "y": 460, "w": 240, "h": 78,
+      "label": "在线判定", "sublabel": "now − seenAt ≤ 90s"
+    },
+    {
+      "id": "netcheck", "lane": "ui", "type": "tool", "status": "new",
+      "x": 540, "y": 566, "w": 230, "h": 78,
+      "label": "flix netcheck", "sublabel": "网卡 / 组播 / 防火墙 / 端口探测"
+    }
+  ],
+  "edges": [
+    { "from": "start", "to": "iface", "kind": "main", "points": [[230, 139], [290, 139]] },
+    { "from": "iface", "to": "join", "kind": "main", "points": [[480, 139], [540, 139]] },
+    { "from": "join", "to": "announce", "kind": "main", "label": "出站 announce", "labelAt": [652, 238], "points": [[640, 178], [640, 288]] },
+    { "from": "announce", "to": "listen", "kind": "main", "label": "UDP :8891", "labelAt": [868, 300], "points": [[800, 327], [860, 327], [860, 139], [920, 139]] },
+    { "from": "listen", "to": "presence", "kind": "main", "label": "设备列表", "labelAt": [846, 430], "points": [[940, 178], [900, 178], [900, 499], [920, 499]] },
+    { "from": "probe", "to": "presence", "kind": "aux", "label": "探活刷新", "labelAt": [1050, 418], "points": [[1040, 366], [1040, 460]] },
+    { "from": "presence", "to": "netcheck", "kind": "diag", "label": "收不到 / 显示异常", "labelAt": [848, 552], "points": [[920, 499], [845, 499], [845, 605], [770, 605]] }
+  ],
+  "changes": [
+    { "node": "presence", "level": "调整", "text": "在线判定由 bool(ip) 改为 seenAt TTL ≤ 90s，历史落库设备不再显示绿点。" },
+    { "node": "probe", "level": "新增", "text": "新增库内设备探活循环（60s，TCP /ping_v2），成功即刷新 seenAt。" },
+    { "node": "netcheck", "level": "新增", "text": "新增只读诊断命令 flix netcheck：选中网卡、组播 join、入站规则、端口可达性。" },
+    { "node": "netcheck", "level": "新增", "text": "新增 scripts/fix_firewall.ps1，仅提示由对端管理员执行，不自动改远端。" }
+  ],
+  "cards": [
+    { "kind": "fail", "title": "出口 1 · 组播被吞", "body": "安全代理拦截多播时，announce 仍走子网广播 + 255.255.255.255 兜底（已上线）。" },
+    { "kind": "fail", "title": "出口 2 · 对端 18991 DROP", "body": "netcheck 报端口不可达；对端管理员运行 scripts/fix_firewall.ps1 放行入站。" },
+    { "kind": "fail", "title": "出口 3 · 收不到任何 announce", "body": "用 flix pair <ip:port> 手动兜底，不影响已配对设备通信。" },
+    { "kind": "note", "title": "本批不改", "body": "wire 格式、官方客户端兼容、TCP 设备通道语义均保持不变。" }
+  ]
+}

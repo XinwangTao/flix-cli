@@ -1,0 +1,473 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RelayDesk 桌面身份持久化：同一台 PC 只有一个指纹",
+    "locale": "zh-CN",
+    "level": "L1",
+    "status": "已确认",
+    "date": "2026-10-29",
+    "quality_profile": "showcase"
+  },
+  "scope": {
+    "in": [
+      "状态目录 :: 规范化（去嵌套）",
+      "identity :: 缺失时沿用历史身份",
+      "对外指纹稳定（announce/ping/配对）",
+      "冲突与损坏的显式出口"
+    ],
+    "out": [
+      "迁移消息/设备数据库",
+      "合并已分裂的配对关系",
+      "改变 fingerprint 的 wire 语义",
+      "多用户/便携模式"
+    ]
+  },
+  "canvas": {
+    "width": 1240,
+    "height": 620
+  },
+  "lanes": [
+    {
+      "id": "boot",
+      "label": "启动与目录"
+    },
+    {
+      "id": "id",
+      "label": "身份解析"
+    },
+    {
+      "id": "exits",
+      "label": "冲突与出口"
+    }
+  ],
+  "bands": [
+    {
+      "lane": "boot",
+      "y": 64,
+      "h": 170
+    },
+    {
+      "lane": "id",
+      "y": 254,
+      "h": 140
+    },
+    {
+      "lane": "exits",
+      "y": 414,
+      "h": 170
+    }
+  ],
+  "mainPath": [
+    "start",
+    "resolve",
+    "load",
+    "check",
+    "adopt",
+    "persist",
+    "announce"
+  ],
+  "nodes": [
+    {
+      "id": "start",
+      "lane": "boot",
+      "type": "start",
+      "status": "existing",
+      "x": 60,
+      "y": 100,
+      "w": 190,
+      "h": 78,
+      "label": "任一端启动",
+      "sublabel": "flixd / flix CLI / GUI"
+    },
+    {
+      "id": "resolve",
+      "lane": "boot",
+      "type": "process",
+      "status": "changed",
+      "x": 300,
+      "y": 100,
+      "w": 230,
+      "h": 78,
+      "label": "规范状态目录",
+      "sublabel": "APPDATA 以 flixcli 结尾→回退父目录"
+    },
+    {
+      "id": "persist",
+      "lane": "boot",
+      "type": "process",
+      "status": "new",
+      "x": 580,
+      "y": 100,
+      "w": 200,
+      "h": 78,
+      "label": "写回规范位置",
+      "sublabel": "adopted_from / created_at"
+    },
+    {
+      "id": "announce",
+      "lane": "boot",
+      "type": "process",
+      "status": "changed",
+      "x": 830,
+      "y": 100,
+      "w": 220,
+      "h": 78,
+      "label": "对外指纹稳定",
+      "sublabel": "announce / ping / 配对同源"
+    },
+    {
+      "id": "load",
+      "lane": "id",
+      "type": "process",
+      "status": "changed",
+      "x": 60,
+      "y": 288,
+      "w": 190,
+      "h": 78,
+      "label": "读取 identity",
+      "sublabel": "prefs.identity · 校验 uuid"
+    },
+    {
+      "id": "check",
+      "lane": "id",
+      "type": "decision",
+      "status": "new",
+      "x": 300,
+      "y": 288,
+      "w": 200,
+      "h": 78,
+      "label": "已有有效指纹？",
+      "sublabel": "缺失或损坏才走迁移"
+    },
+    {
+      "id": "adopt",
+      "lane": "id",
+      "type": "process",
+      "status": "new",
+      "x": 550,
+      "y": 288,
+      "w": 220,
+      "h": 78,
+      "label": "沿用历史身份",
+      "sublabel": "扫描旧状态目录，取最近修改"
+    },
+    {
+      "id": "create",
+      "lane": "id",
+      "type": "process",
+      "status": "changed",
+      "x": 830,
+      "y": 288,
+      "w": 200,
+      "h": 78,
+      "label": "生成新身份",
+      "sublabel": "仅当找不到任何旧身份"
+    },
+    {
+      "id": "exits",
+      "lane": "exits",
+      "type": "security",
+      "status": "new",
+      "x": 330,
+      "y": 500,
+      "w": 380,
+      "h": 78,
+      "label": "冲突与失败出口",
+      "sublabel": "多身份 / prefs 损坏 / 目录只读"
+    }
+  ],
+  "edges": [
+    {
+      "from": "start",
+      "to": "resolve",
+      "kind": "main",
+      "label": "定位",
+      "labelAt": [
+        268,
+        128
+      ],
+      "points": [
+        [
+          250,
+          139
+        ],
+        [
+          300,
+          139
+        ]
+      ]
+    },
+    {
+      "from": "resolve",
+      "to": "load",
+      "kind": "main",
+      "label": "读取",
+      "labelAt": [
+        250,
+        232
+      ],
+      "points": [
+        [
+          400,
+          178
+        ],
+        [
+          400,
+          240
+        ],
+        [
+          155,
+          240
+        ],
+        [
+          155,
+          288
+        ]
+      ]
+    },
+    {
+      "from": "load",
+      "to": "check",
+      "kind": "main",
+      "label": "校验",
+      "labelAt": [
+        270,
+        318
+      ],
+      "points": [
+        [
+          250,
+          327
+        ],
+        [
+          300,
+          327
+        ]
+      ]
+    },
+    {
+      "from": "check",
+      "to": "adopt",
+      "kind": "aux",
+      "label": "缺失",
+      "labelAt": [
+        516,
+        306
+      ],
+      "points": [
+        [
+          500,
+          327
+        ],
+        [
+          550,
+          327
+        ]
+      ]
+    },
+    {
+      "from": "check",
+      "to": "announce",
+      "kind": "main",
+      "label": "已有",
+      "labelAt": [
+        700,
+        222
+      ],
+      "points": [
+        [
+          400,
+          288
+        ],
+        [
+          400,
+          236
+        ],
+        [
+          940,
+          236
+        ],
+        [
+          940,
+          178
+        ]
+      ]
+    },
+    {
+      "from": "adopt",
+      "to": "persist",
+      "kind": "main",
+      "label": "沿用",
+      "labelAt": [
+        666,
+        226
+      ],
+      "points": [
+        [
+          660,
+          288
+        ],
+        [
+          660,
+          178
+        ]
+      ]
+    },
+    {
+      "from": "create",
+      "to": "persist",
+      "kind": "diag",
+      "label": "新建",
+      "labelAt": [
+        790,
+        226
+      ],
+      "points": [
+        [
+          900,
+          288
+        ],
+        [
+          900,
+          240
+        ],
+        [
+          720,
+          240
+        ],
+        [
+          720,
+          178
+        ]
+      ]
+    },
+    {
+      "from": "persist",
+      "to": "announce",
+      "kind": "main",
+      "label": "落盘",
+      "labelAt": [
+        800,
+        128
+      ],
+      "points": [
+        [
+          780,
+          139
+        ],
+        [
+          830,
+          139
+        ]
+      ]
+    },
+    {
+      "from": "load",
+      "to": "exits",
+      "kind": "diag",
+      "label": "损坏",
+      "labelAt": [
+        196,
+        470
+      ],
+      "points": [
+        [
+          155,
+          366
+        ],
+        [
+          155,
+          470
+        ],
+        [
+          400,
+          470
+        ],
+        [
+          400,
+          500
+        ]
+      ]
+    },
+    {
+      "from": "adopt",
+      "to": "exits",
+      "kind": "diag",
+      "label": "多身份",
+      "labelAt": [
+        600,
+        440
+      ],
+      "points": [
+        [
+          660,
+          366
+        ],
+        [
+          660,
+          500
+        ]
+      ]
+    }
+  ],
+  "changes": [
+    {
+      "node": "resolve",
+      "level": "调整",
+      "text": "APP_DIR 规范化：APPDATA 以 flixcli 结尾时回退父目录，杜绝 flixcli\\flixcli 这类嵌套状态目录。"
+    },
+    {
+      "node": "load",
+      "level": "调整",
+      "text": "读取 prefs.identity 时校验 uuid 格式；缺失/损坏不再静默生成。"
+    },
+    {
+      "node": "check",
+      "level": "新增",
+      "text": "新增有效性判定，只有缺失或损坏才进入迁移分支。"
+    },
+    {
+      "node": "adopt",
+      "level": "新增",
+      "text": "扫描历史状态目录（%APPDATA%\\flixcli\\flixcli、~\\flixcli 等），沿用最近修改的 identity。"
+    },
+    {
+      "node": "create",
+      "level": "调整",
+      "text": "仅当找不到任何旧身份才生成 uuid，并写 created_at，避免无痕迹换指纹。"
+    },
+    {
+      "node": "persist",
+      "level": "新增",
+      "text": "写回规范位置并记录 adopted_from，`flix self --json` 可自查来源。"
+    },
+    {
+      "node": "announce",
+      "level": "调整",
+      "text": "announce/ping_v2/配对一律使用同一稳定指纹，PC 在安卓列表只出现一行。"
+    }
+  ],
+  "cards": [
+    {
+      "kind": "fail",
+      "title": "出口 1 · 多个旧身份",
+      "body": "旧目录各有不同 identity：取 prefs mtime 最新者并写日志，不静默改动其它目录。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 2 · prefs 损坏",
+      "body": "JSON 解析失败 → 备份 shared_preferences.json.bad-<ts>，再按无身份走迁移。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 3 · 目录只读",
+      "body": "写盘失败时本次仅用内存身份并告警，不阻断收发。"
+    },
+    {
+      "kind": "note",
+      "title": "本批不改",
+      "body": "不迁移 DB/消息历史；不合并已分裂的配对；不改 wire 与端口；配对仍按指纹。"
+    }
+  ]
+}
