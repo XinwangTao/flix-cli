@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import os
 import sys
 import urllib.error
 import urllib.parse
@@ -333,7 +334,8 @@ class MainWindow(QMainWindow):
         status.setSizeGripEnabled(False)
         self.setStatusBar(status)
         self.statusBar().showMessage("正在连接本机服务…")
-        self.setStyleSheet(STYLES)
+        self.theme = self._load_theme()
+        self.apply_theme(self.theme)
 
     def _build_rail(self):
         rail = QFrame()
@@ -688,9 +690,79 @@ class MainWindow(QMainWindow):
         self.settings_text.setObjectName("settingsText")
         self.settings_text.setWordWrap(True)
         card_box.addWidget(self.settings_text)
+        card_box.addSpacing(12)
+        row = QHBoxLayout()
+        self.copy_button = QPushButton("复制本机信息")
+        self.copy_button.clicked.connect(self.copy_settings_info)
+        self.open_dir_button = QPushButton("打开下载目录")
+        self.open_dir_button.clicked.connect(self.open_save_dir)
+        self.theme_button = QPushButton()
+        self.theme_button.clicked.connect(self.toggle_theme)
+        row.addWidget(self.copy_button)
+        row.addWidget(self.open_dir_button)
+        row.addWidget(self.theme_button)
+        row.addStretch()
+        card_box.addLayout(row)
+        self.notify_check = QCheckBox("桌面提醒：收到新消息时弹出提示")
+        self.notify_check.setChecked(self._load_prefs().get("notify", True) is not False)
+        self.notify_check.toggled.connect(self._toggle_notify)
+        card_box.addWidget(self.notify_check)
+        hint = QLabel("主题立即应用到整个窗口，下次启动沿用")
+        hint.setObjectName("muted")
+        card_box.addWidget(hint)
         box.addWidget(card)
         box.addStretch()
+        self._sync_theme_button()
         return page
+
+    def _load_prefs(self) -> dict:
+        try:
+            data = json.loads(PREFS_FILE.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _save_prefs(self, **changes):
+        data = self._load_prefs()
+        data.update(changes)
+        try:
+            PREFS_FILE.write_text(json.dumps(data), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _load_theme(self) -> str:
+        return "light" if self._load_prefs().get("theme") == "light" else "dark"
+
+    def apply_theme(self, theme: str):
+        self.theme = "light" if theme == "light" else "dark"
+        self.setStyleSheet(styles_for(self.theme))
+        self._save_prefs(theme=self.theme)
+
+    def copy_settings_info(self):
+        QApplication.clipboard().setText(self.settings_text.text())
+
+    def open_save_dir(self):
+        target = getattr(self, "save_dir", "")
+        if not target:
+            self.statusBar().showMessage("守护进程还没给出下载目录", 4000)
+            return
+        try:
+            os.startfile(target)
+        except OSError as exc:
+            self.statusBar().showMessage(f"打不开目录：{exc}", 4000)
+
+    def _toggle_notify(self, on: bool):
+        self._save_prefs(notify=bool(on))
+
+    def toggle_theme(self):
+        self.apply_theme("dark" if self.theme == "light" else "light")
+        self._sync_theme_button()
+
+    def _sync_theme_button(self):
+        button = getattr(self, "theme_button", None)
+        if button is not None:
+            theme = getattr(self, "theme", "dark")
+            button.setText("切换到浅色" if theme == "dark" else "切换到深色")
 
     def _build_remote(self):
         page = QWidget(); page.setObjectName("page")
@@ -780,6 +852,7 @@ class MainWindow(QMainWindow):
         adb = (payload.get("adb") or {}).get("devices", [])
         self.sidebar_footer.setText(
             f"{len(devices)} 台设备 · {len(payload.get('groups') or [])} 个群组 · {len(adb)} 条 ADB 连接")
+        self.save_dir = (payload.get("settings") or {}).get("saveDir") or ""
         self.settings_text.setText(
             f"本机别名：{(payload.get('self') or {}).get('alias', '—')}\n"
             f"指纹：{self.self_id}\n"
@@ -1257,6 +1330,28 @@ def main(argv: list[str] | None = None, *, api_port: int = 8898) -> int:
     window.show()
     return app.exec()
 
+
+PREFS_FILE = Path.home() / ".relaydesk_gui.json"
+
+
+def styles_for(theme: str) -> str:
+    """Dark is the authored sheet; light is the same sheet with flipped neutrals."""
+    if theme != "light":
+        return STYLES
+    out = STYLES
+    for dark, light in LIGHT_SWAP.items():
+        out = out.replace(dark, light)
+    return out
+
+
+LIGHT_SWAP = {
+    "#080b10": "#eef1f6", "#0b0f16": "#f4f6fa", "#0d1119": "#ffffff",
+    "#1a212c": "#ffffff", "#232c3a": "#e4e9f1", "#232c39": "#e9edf4",
+    "#242e3d": "#eceff5", "#2b3547": "#dbe2ec",
+    "#eef3fc": "#12161d", "#edf3ff": "#12161d", "#e5edf9": "#1b2230",
+    "#dce6f6": "#243044", "#dbe5f5": "#1b2230", "#c8d4e7": "#2a3446",
+    "#9fb0c8": "#5c6b80", "#93a4bd": "#65758c", "#7c8ba3": "#6b7a90",
+}
 
 STYLES = """
 QWidget#rootWindow, QWidget#page { background: qlineargradient(y1:0,y1:1,
