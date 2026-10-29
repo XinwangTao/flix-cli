@@ -101,6 +101,43 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
                                        str(body["group"]), body["text"])
         return web.json_response(result, status=200 if result.get("ok") else 400)
 
+    async def pair_post(request: web.Request) -> web.Response:
+        """Pair with a device from the desktop: askPairDevice over /intent.
+
+        Same handshake as `flix pair <ip>`; pairing is what later lets group
+        snapshots and file transfers through the peer's trust gate.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "bad-json"}, status=400)
+        to = body.get("to") if isinstance(body, dict) else None
+        if not isinstance(to, str) or not to.strip():
+            return web.json_response({"ok": False, "error": "bad-params"}, status=400)
+        ip, port, peer_fp = resolve_target(store, to.strip())
+        if not ip:
+            return web.json_response({"ok": False, "error": "no-device"}, status=404)
+        from .channel import PeerError, pair_device
+        try:
+            code, message = await pair_device(ip, ident["fingerprint"], peer_fp,
+                                              store.own_pair_key(),
+                                              port=int(port or channel_port))
+        except PeerError as error:
+            return web.json_response({"ok": False, "error": error.kind,
+                                      "detail": error.detail}, status=400)
+        ok = code == 0
+        if ok:
+            store.add_pair(peer_fp, store.own_pair_key())
+            publish({"type": "pairChanged", "payload": {"fingerprint": peer_fp}})
+        else:
+            # Official replies are `{301: pair Device Null}` / `{302: ...}` —
+            # useless to a GUI user without a translation.
+            message = {301: "对方没有确认配对（需要对方在前台点「接受」）",
+                       302: "对方指纹不匹配，请重新探测"}.get(code, message)
+        return web.json_response({"ok": ok, "paired": ok, "peer": peer_fp,
+                                  "replyCode": code, "detail": message},
+                                 status=200 if ok else 400)
+
     async def group_create_post(request: web.Request) -> web.Response:
         """Create a group locally, then announce it to every listed member."""
         try:
@@ -486,7 +523,8 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
     app.router.add_post("/api/media/answer", media_answer_post)
     app.router.add_post("/api/media/apply-answer", media_apply_answer_post)
     app.router.add_get("/api/media/{call_id}/snapshot", media_snapshot_get)
-    for route in ("/api/pair", "/api/respond-pair",
+    app.router.add_post("/api/pair", pair_post)
+    for route in ("/api/respond-pair",
                   "/api/accept-transfer", "/api/cancel-transfer"):
         app.router.add_post(route, stub_post)
 

@@ -1180,13 +1180,34 @@ class MainWindow(QMainWindow):
 
     def show_more(self):
         menu = QMenu(self)
-        if (self.current or {}).get("kind") == "group":
+        kind = (self.current or {}).get("kind")
+        if kind == "group":
             menu.addAction("群设置…", self.group_settings_dialog)
+            menu.addSeparator()
+        elif kind == "device":
+            key = (self.current or {}).get("key")
+            paired = key in set(self.payload.get("paired") or [])
+            action = menu.addAction("已配对 · 无需再配" if paired else "与这台设备配对",
+                                    self.pair_selected_device)
+            action.setEnabled(not paired)
             menu.addSeparator()
         menu.addAction("刷新会话", self.refresh)
         menu.addAction("查看传输任务", lambda: self.set_mode("transfers"))
         menu.addAction("设置与状态", lambda: self.set_mode("settings"))
         menu.exec(self.cursor().pos())
+
+    def pair_selected_device(self):
+        key = (self.current or {}).get("key")
+        device = next((d for d in self.payload.get("devices") or []
+                       if d.get("fingerprint") == key), None)
+        if device is None:
+            self.statusBar().showMessage("先选一台设备", 3000)
+            return
+        label = device.get("alias") or key[:8]
+        self.statusBar().showMessage(f"正在向 {label} 发起配对，请在对方设备上确认…", 8000)
+        self.run_action(
+            lambda: self.api.post("/api/pair", {"to": key}),
+            lambda _result: self.statusBar().showMessage(f"已与 {label} 配对", 6000))
 
     # ---------- group management ----------
 
