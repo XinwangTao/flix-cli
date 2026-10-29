@@ -251,6 +251,26 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
     tasks.append(asyncio.create_task(announce_loop()))
     print("[flixd] periodic announce every 30s", file=sys.stderr, flush=True)
 
+    async def agent_outbox_loop() -> None:
+        # An agent envelope queued while the peer was offline must still land
+        # when it comes back; the sender's tool call already returned "queued".
+        from .agentlink import flush_outbox
+        try:
+            while True:
+                await asyncio.sleep(30)
+                try:
+                    result = await flush_outbox(store, ident)
+                except Exception as exc:  # never let one bad peer kill the loop
+                    print(f"[flixd] agent outbox: {exc}", file=sys.stderr, flush=True)
+                    continue
+                if result.get("sent"):
+                    print(f"[flixd] agent outbox delivered {result['sent']}",
+                          file=sys.stderr, flush=True)
+        except asyncio.CancelledError:
+            pass
+
+    tasks.append(asyncio.create_task(agent_outbox_loop()))
+
     async def presence_probe_loop() -> None:
         # Official clients only announce at startup, so their seenAt would fall
         # outside the 90s presence TTL. Probe each known device with the normal

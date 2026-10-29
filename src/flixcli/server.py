@@ -195,7 +195,36 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
             return web.Response(text="{0: success}")
         if action == model.ACTION_GROUP_SYNC:
             return _group_sync_intent(intent, store)
+        if action == model.ACTION_AGENT:
+            return _agent_intent(intent, store)
         return web.Response(status=500, text="receive intent failed")
+
+    def _agent_intent(intent: dict, store) -> web.Response:
+        """Agent-to-agent envelope (v2K).
+
+        The transport only ever stores text: whatever the two AIs say to each
+        other, nothing here executes it. The trust gate is the same pairing
+        check the file routes use — an unpaired sender is dropped silently.
+        """
+        extra = intent.get("extra") if isinstance(intent.get("extra"), dict) else {}
+        sender = intent.get("deviceId") or extra.get("from")
+        mid = extra.get("id")
+        body = extra.get("body")
+        reply_to = extra.get("replyTo")
+        created = extra.get("created")
+        if not (isinstance(mid, str) and mid and isinstance(body, str) and body):
+            return web.Response(status=400, text="receive intent failed")
+        if not isinstance(sender, str) or not sender or not store.is_paired(sender):
+            return web.Response(status=403, text="receive intent failed")
+        try:
+            created_ms = int(created)
+        except (TypeError, ValueError):
+            created_ms = int(time.time() * 1000)
+        store.add_agent_message(mid, "in", sender, body,
+                                reply_to if isinstance(reply_to, str) else "",
+                                created=created_ms)
+        publish("agentMessage", {"id": mid, "from": sender})
+        return web.Response(text="{0: success}")
 
     def _pair_intent(intent: dict) -> web.Response:
         # Pairing rides /intent [RT 2026-10-21]: askPairDevice/confirmPairDevice

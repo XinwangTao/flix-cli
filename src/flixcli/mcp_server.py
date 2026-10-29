@@ -125,6 +125,31 @@ TOOLS = [
     {"name": "flix_adb_pull",
      "description": "Copy a file from one explicitly selected authorized Android device.",
      "inputSchema": {"type": "object", "properties": {"serial": {"type": "string"}, "source": {"type": "string"}, "destination": {"type": "string"}}, "required": ["serial", "source", "destination"]}},
+    {"name": "flix_agent_send",
+     "description": "Send a text message to the AI on another paired machine "
+                    "(machine-to-machine, not a chat bubble). Returns "
+                    "state=delivered|queued — queued means the daemon retries.",
+     "inputSchema": {"type": "object",
+                     "properties": {
+                         "to": {"type": "string",
+                                "description": "peer fingerprint/prefix or ip[:port]"},
+                         "text": {"type": "string"},
+                         "reply_to": {"type": "string",
+                                      "description": "id of the message being answered"}},
+                     "required": ["to", "text"]}},
+    {"name": "flix_agent_inbox",
+     "description": "Fetch unread messages other machines' AIs sent here. "
+                    "Fetched messages are marked read; wait_seconds long-polls.",
+     "inputSchema": {"type": "object",
+                     "properties": {"wait_seconds": {"type": "number"},
+                                    "limit": {"type": "number"}}}},
+    {"name": "flix_agent_reply",
+     "description": "Answer a message received via flix_agent_inbox.",
+     "inputSchema": {"type": "object",
+                     "properties": {"to": {"type": "string"},
+                                    "text": {"type": "string"},
+                                    "reply_to": {"type": "string"}},
+                     "required": ["to", "text", "reply_to"]}},
 ]
 
 
@@ -354,6 +379,21 @@ async def _tool_call(name: str, args: dict) -> dict:
                 return {"error": "no-group"}
             return {"group": g["id"], "messages": store.group_history(
                 g["id"], int(args.get("limit", 20)))}
+        finally:
+            store.close()
+    if name in ("flix_agent_send", "flix_agent_reply", "flix_agent_inbox"):
+        from .agentlink import inbox, send_agent_message
+        store = Store()
+        try:
+            ident = load_or_create_identity(store)
+            if name == "flix_agent_inbox":
+                return await inbox(store, float(args.get("wait_seconds") or 0),
+                                   int(args.get("limit") or 50))
+            reply_to = str(args.get("reply_to") or "")
+            if name == "flix_agent_reply" and not reply_to:
+                return {"ok": False, "error": "reply_to-required"}
+            return await send_agent_message(store, ident, str(args.get("to", "")),
+                                            str(args.get("text", "")), reply_to)
         finally:
             store.close()
     return {"error": f"unknown tool {name}"}

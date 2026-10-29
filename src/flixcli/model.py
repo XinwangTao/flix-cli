@@ -162,6 +162,19 @@ ACTION_CONFIRM_RECEIVE = "confirmReceive"
 # TransAction names: an official peer answers 500 and the sender degrades
 # silently, so group chat itself is never blocked by metadata sync.
 ACTION_GROUP_SYNC = "rdGroupSync"
+# Agent-to-agent envelope (v2K). Same `rd` rationale: an older peer answers 500
+# and the sender degrades to "queued" instead of pretending it was delivered.
+ACTION_AGENT = "rdAgent"
+
+
+def agent_intent(from_fp: str, to_fp: str, mid: str, body: str,
+                 reply_to: str = "", created: int = 0) -> dict:
+    return {
+        "action": ACTION_AGENT,
+        "deviceId": from_fp,
+        "extra": {"to": to_fp, "id": mid, "body": body,
+                  "replyTo": reply_to, "created": created},
+    }
 
 
 def group_sync_intent(from_fp: str, group_id: str, name: str,

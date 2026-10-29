@@ -46,6 +46,17 @@ CREATE TABLE IF NOT EXISTS blocked_devices (
   device_name TEXT,
   updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS agent_messages (
+  id TEXT NOT NULL PRIMARY KEY,
+  direction TEXT NOT NULL,
+  peer TEXT NOT NULL,
+  body TEXT NOT NULL,
+  reply_to TEXT NOT NULL DEFAULT '',
+  created INTEGER NOT NULL,
+  delivered INTEGER NOT NULL DEFAULT 0,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  read_at INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS bubble_entities (
   id TEXT NOT NULL PRIMARY KEY,
   from_device TEXT NOT NULL,
@@ -318,6 +329,63 @@ class Store:
                 item["content"] = {"name": fname, "size": fsize}
             out.append(item)
         return out
+
+    # -- agent messages (v2K) -------------------------------------------------
+    def add_agent_message(self, mid: str, direction: str, peer: str, body: str,
+                          reply_to: str = "", *, created: int = 0,
+                          delivered: bool = False) -> None:
+        self.con.execute(
+            "INSERT OR IGNORE INTO agent_messages"
+            " (id, direction, peer, body, reply_to, created, delivered)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (mid, direction, peer, body, reply_to, created or int(time.time() * 1000),
+             1 if delivered else 0))
+        self.con.commit()
+
+    def agent_inbox(self, *, unread_only: bool = True, limit: int = 50) -> list[dict]:
+        sql = ("SELECT id, peer, body, reply_to, created, read_at FROM agent_messages"
+               " WHERE direction='in'" + (" AND read_at=0" if unread_only else "")
+               + " ORDER BY created ASC LIMIT ?")
+        rows = self.con.execute(sql, (limit,)).fetchall()
+        return [{"id": r[0], "from": r[1], "body": r[2], "replyTo": r[3],
+                 "created": r[4], "read": bool(r[5])} for r in rows]
+
+    def mark_agent_read(self, ids: list[str]) -> int:
+        if not ids:
+            return 0
+        marks = ",".join("?" * len(ids))
+        cur = self.con.execute(
+            f"UPDATE agent_messages SET read_at=? WHERE id IN ({marks}) AND read_at=0",
+            (int(time.time() * 1000), *ids))
+        self.con.commit()
+        return cur.rowcount
+
+    def pending_agent_outbox(self, limit: int = 20) -> list[dict]:
+        """Outgoing messages the peer never acknowledged, oldest first."""
+        rows = self.con.execute(
+            "SELECT id, peer, body, reply_to, created, attempts FROM agent_messages"
+            " WHERE direction='out' AND delivered=0 ORDER BY created ASC LIMIT ?",
+            (limit,)).fetchall()
+        return [{"id": r[0], "to": r[1], "body": r[2], "replyTo": r[3],
+                 "created": r[4], "attempts": r[5]} for r in rows]
+
+    def mark_agent_delivered(self, mid: str) -> None:
+        self.con.execute("UPDATE agent_messages SET delivered=1 WHERE id=?", (mid,))
+        self.con.commit()
+
+    def note_agent_attempt(self, mid: str) -> None:
+        self.con.execute(
+            "UPDATE agent_messages SET attempts=attempts+1 WHERE id=?", (mid,))
+        self.con.commit()
+
+    def agent_message(self, mid: str) -> dict | None:
+        row = self.con.execute(
+            "SELECT id, direction, peer, body, reply_to, created, delivered"
+            " FROM agent_messages WHERE id=?", (mid,)).fetchone()
+        if not row:
+            return None
+        return {"id": row[0], "direction": row[1], "peer": row[2], "body": row[3],
+                "replyTo": row[4], "created": row[5], "delivered": bool(row[6])}
 
     # -- prefs ---------------------------------------------------------------
     def prefs(self) -> dict:
