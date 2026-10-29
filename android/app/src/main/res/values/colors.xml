@@ -18,4 +18,9 @@
     <color name="senderName">#2A5FC0</color>
     <color name="searchHighlight">#66FFB020</color>
     <color name="divider">#DCE1E9</color>
+    <color name="bgElevated">#FFFFFF</color>
+    <color name="chipBg">#EDF1F7</color>
+    <color name="chipText">#47546A</color>
+    <color name="selectedBg">#E7EFFD</color>
+    <color name="iconBg">#EFF2F7</color>
 </resources>
