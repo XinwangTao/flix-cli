@@ -1,0 +1,418 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RelayDesk Android v2E：平板双栏与深浅主题",
+    "locale": "zh-CN",
+    "level": "L1",
+    "status": "已确认",
+    "date": "2026-10-29",
+    "quality_profile": "showcase"
+  },
+  "scope": {
+    "in": [
+      "宽屏（≥600dp）左右分栏：左会话列表、右会话详情，选中高亮",
+      "窄屏保持现有单栏栈，返回键行为不变",
+      "设置页主题行：深色/浅色切换，立即生效并持久化",
+      "颜色资源化，清掉散落的硬编码色值"
+    ],
+    "out": [
+      "跟随系统主题",
+      "桌面端布局（v2F）",
+      "折叠屏多窗口专门适配",
+      "身份合并（v2G）"
+    ]
+  },
+  "canvas": {
+    "width": 1240,
+    "height": 700
+  },
+  "lanes": [
+    {
+      "id": "entry",
+      "label": "启动"
+    },
+    {
+      "id": "shell",
+      "label": "外壳布局"
+    },
+    {
+      "id": "apply",
+      "label": "生效与持久化"
+    },
+    {
+      "id": "exits",
+      "label": "边界"
+    }
+  ],
+  "bands": [
+    {
+      "lane": "entry",
+      "y": 64,
+      "h": 120
+    },
+    {
+      "lane": "shell",
+      "y": 204,
+      "h": 150
+    },
+    {
+      "lane": "apply",
+      "y": 374,
+      "h": 150
+    },
+    {
+      "lane": "exits",
+      "y": 544,
+      "h": 120
+    }
+  ],
+  "mainPath": [
+    "open",
+    "width",
+    "dualpane",
+    "store"
+  ],
+  "nodes": [
+    {
+      "id": "open",
+      "lane": "entry",
+      "type": "process",
+      "status": "unchanged",
+      "x": 60,
+      "y": 96,
+      "w": 240,
+      "h": 78,
+      "label": "启动与旋转",
+      "sublabel": "onCreate · configChanges 已接管"
+    },
+    {
+      "id": "width",
+      "lane": "entry",
+      "type": "process",
+      "status": "new",
+      "x": 350,
+      "y": 96,
+      "w": 260,
+      "h": 78,
+      "label": "屏宽判定",
+      "sublabel": "smallestWidth ≥ 600dp"
+    },
+    {
+      "id": "dualpane",
+      "lane": "shell",
+      "type": "process",
+      "status": "new",
+      "x": 60,
+      "y": 230,
+      "w": 280,
+      "h": 78,
+      "label": "双栏主从",
+      "sublabel": "左 会话列表 · 右 会话详情"
+    },
+    {
+      "id": "single",
+      "lane": "shell",
+      "type": "process",
+      "status": "unchanged",
+      "x": 390,
+      "y": 230,
+      "w": 240,
+      "h": 78,
+      "label": "单栏回退",
+      "sublabel": "列表 ⇄ 会话（现状）"
+    },
+    {
+      "id": "theme",
+      "lane": "shell",
+      "type": "process",
+      "status": "new",
+      "x": 680,
+      "y": 230,
+      "w": 250,
+      "h": 78,
+      "label": "深色 / 浅色",
+      "sublabel": "设置页主题行 · 立即重建"
+    },
+    {
+      "id": "store",
+      "lane": "apply",
+      "type": "process",
+      "status": "changed",
+      "x": 350,
+      "y": 400,
+      "w": 300,
+      "h": 78,
+      "label": "偏好与颜色资源",
+      "sublabel": "prefs.theme · colors 两套"
+    },
+    {
+      "id": "exits",
+      "lane": "exits",
+      "type": "security",
+      "status": "changed",
+      "x": 330,
+      "y": 570,
+      "w": 620,
+      "h": 78,
+      "label": "边界与兜底",
+      "sublabel": "旋转不丢选中 · 切主题保留会话 · 窄屏返回键"
+    }
+  ],
+  "edges": [
+    {
+      "from": "open",
+      "to": "width",
+      "kind": "main",
+      "label": "测量",
+      "labelAt": [
+        305,
+        114
+      ],
+      "points": [
+        [
+          300,
+          135
+        ],
+        [
+          350,
+          135
+        ]
+      ]
+    },
+    {
+      "from": "width",
+      "to": "dualpane",
+      "kind": "main",
+      "label": "宽屏",
+      "labelAt": [
+        206,
+        212
+      ],
+      "points": [
+        [
+          475,
+          174
+        ],
+        [
+          475,
+          196
+        ],
+        [
+          200,
+          196
+        ],
+        [
+          200,
+          230
+        ]
+      ]
+    },
+    {
+      "from": "width",
+      "to": "single",
+      "kind": "aux",
+      "label": "窄屏",
+      "labelAt": [
+        516,
+        212
+      ],
+      "points": [
+        [
+          475,
+          174
+        ],
+        [
+          475,
+          196
+        ],
+        [
+          510,
+          196
+        ],
+        [
+          510,
+          230
+        ]
+      ]
+    },
+    {
+      "from": "dualpane",
+      "to": "store",
+      "kind": "main",
+      "label": "选中会话",
+      "labelAt": [
+        204,
+        370
+      ],
+      "points": [
+        [
+          200,
+          308
+        ],
+        [
+          200,
+          439
+        ],
+        [
+          350,
+          439
+        ]
+      ]
+    },
+    {
+      "from": "theme",
+      "to": "store",
+      "kind": "aux",
+      "label": "写 prefs",
+      "labelAt": [
+        808,
+        370
+      ],
+      "points": [
+        [
+          805,
+          308
+        ],
+        [
+          805,
+          439
+        ],
+        [
+          650,
+          439
+        ]
+      ]
+    },
+    {
+      "from": "theme",
+      "to": "dualpane",
+      "kind": "aux",
+      "label": "重建保持会话",
+      "labelAt": [
+        508,
+        320
+      ],
+      "points": [
+        [
+          700,
+          308
+        ],
+        [
+          700,
+          340
+        ],
+        [
+          340,
+          340
+        ],
+        [
+          340,
+          269
+        ]
+      ]
+    },
+    {
+      "from": "dualpane",
+      "to": "exits",
+      "kind": "diag",
+      "label": "旋转/退出",
+      "labelAt": [
+        152,
+        500
+      ],
+      "points": [
+        [
+          150,
+          308
+        ],
+        [
+          150,
+          609
+        ],
+        [
+          330,
+          609
+        ]
+      ]
+    },
+    {
+      "from": "theme",
+      "to": "exits",
+      "kind": "diag",
+      "label": "切换不丢会话",
+      "labelAt": [
+        860,
+        540
+      ],
+      "points": [
+        [
+          900,
+          308
+        ],
+        [
+          900,
+          609
+        ],
+        [
+          950,
+          609
+        ]
+      ]
+    }
+  ],
+  "changes": [
+    {
+      "node": "width",
+      "level": "新增",
+      "text": "新增屏宽判定：按 smallestWidth ≥600dp 选外壳，旋转/分屏时重排而不是重建。"
+    },
+    {
+      "node": "dualpane",
+      "level": "新增",
+      "text": "宽屏改左右分栏：列表常驻左侧，右侧显示会话；选中行高亮，未选中时右侧显示空态。"
+    },
+    {
+      "node": "single",
+      "level": "不变",
+      "text": "窄屏沿用现有单栏栈与返回键顺序（搜索 → 会话 → 设置 → 退出）。"
+    },
+    {
+      "node": "theme",
+      "level": "新增",
+      "text": "设置页主题行由「深色 · 浅色待做」改为可切换；切换后 recreate 并恢复到原会话。"
+    },
+    {
+      "node": "store",
+      "level": "调整",
+      "text": "颜色全部资源化（values/colors.xml + 浅色一套），清掉 0xFF34C759 / 0xFFFFC857 / Color.WHITE 等散落常量。"
+    }
+  ],
+  "cards": [
+    {
+      "kind": "note",
+      "title": "决策 · 双栏阈值",
+      "body": "≥600dp 双栏；1600×2560 平板约 sw900dp，默认就是双栏；手机保持单栏。"
+    },
+    {
+      "kind": "note",
+      "title": "决策 · 主题两档",
+      "body": "深色/浅色手动切换，默认深色，不跟随系统——避免系统夜间切换打断正在看的会话。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 1 · 旋转与分屏",
+      "body": "configChanges 已接管；宽度变化只重排，不重建列表，避免丢滚动位置和输入框草稿。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 2 · 切主题时正在会话里",
+      "body": "recreate 前记住 currentPeer/currentGroup 与搜索态，重建后恢复；失败时退回列表而不是空白。"
+    },
+    {
+      "kind": "note",
+      "title": "顺手修",
+      "body": "确认框「删除」按钮改危险红；长按菜单、搜索 ✕ 触控区补到 ≥48dp。"
+    }
+  ]
+}

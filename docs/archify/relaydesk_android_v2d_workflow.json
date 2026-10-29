@@ -1,0 +1,605 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RelayDesk Android v2D：设置页、输入法与消息操作",
+    "locale": "zh-CN",
+    "level": "L1",
+    "status": "已确认",
+    "date": "2026-10-29",
+    "quality_profile": "showcase"
+  },
+  "scope": {
+    "in": [
+      "设置页：本机别名/二维码、通道端口、文件保存目录、通知开关、深浅主题、输入法与关于",
+      "输入法闸门：显示当前 IME，硬件键盘连接时给出提示与跳转",
+      "消息长按菜单：复制 / 删除本地 / 失败重发（删除二次确认）",
+      "会话内搜索：文本与文件名过滤、命中高亮、空态",
+      "会话操作：置顶、全部已读、删除会话"
+    ],
+    "out": [
+      "撤回 / 编辑消息、跨会话全局搜索",
+      "消息加密与端到端加密",
+      "PC 端设置页（v2F 桌面批次对齐）",
+      "云端备份与多端历史同步"
+    ]
+  },
+  "canvas": {
+    "width": 1240,
+    "height": 810
+  },
+  "lanes": [
+    {
+      "id": "entry",
+      "label": "入口"
+    },
+    {
+      "id": "set",
+      "label": "设置与生效"
+    },
+    {
+      "id": "ops",
+      "label": "消息与会话操作"
+    },
+    {
+      "id": "apply",
+      "label": "落库与刷新"
+    },
+    {
+      "id": "exits",
+      "label": "失败出口"
+    }
+  ],
+  "bands": [
+    {
+      "lane": "entry",
+      "y": 64,
+      "h": 120
+    },
+    {
+      "lane": "set",
+      "y": 204,
+      "h": 150
+    },
+    {
+      "lane": "ops",
+      "y": 374,
+      "h": 150
+    },
+    {
+      "lane": "apply",
+      "y": 544,
+      "h": 120
+    },
+    {
+      "lane": "exits",
+      "y": 684,
+      "h": 104
+    }
+  ],
+  "mainPath": [
+    "list",
+    "settings",
+    "save",
+    "ime",
+    "gchat",
+    "longpress",
+    "store"
+  ],
+  "nodes": [
+    {
+      "id": "list",
+      "lane": "entry",
+      "type": "process",
+      "status": "changed",
+      "x": 60,
+      "y": 96,
+      "w": 240,
+      "h": 78,
+      "label": "会话列表",
+      "sublabel": "顶栏齿轮 · 长按会话"
+    },
+    {
+      "id": "settings",
+      "lane": "set",
+      "type": "process",
+      "status": "new",
+      "x": 330,
+      "y": 230,
+      "w": 240,
+      "h": 78,
+      "label": "设置页",
+      "sublabel": "本机 · 通道 · 文件 · 通知 · 输入法 · 关于"
+    },
+    {
+      "id": "save",
+      "lane": "set",
+      "type": "process",
+      "status": "new",
+      "x": 620,
+      "y": 230,
+      "w": 220,
+      "h": 78,
+      "label": "保存偏好",
+      "sublabel": "prefs 落盘 · 立即生效"
+    },
+    {
+      "id": "ime",
+      "lane": "set",
+      "type": "security",
+      "status": "new",
+      "x": 890,
+      "y": 230,
+      "w": 290,
+      "h": 78,
+      "label": "输入法闸门",
+      "sublabel": "当前 IME · 硬件键盘时软键盘策略"
+    },
+    {
+      "id": "gchat",
+      "lane": "ops",
+      "type": "process",
+      "status": "existing",
+      "x": 60,
+      "y": 410,
+      "w": 210,
+      "h": 78,
+      "label": "会话页",
+      "sublabel": "消息列表 · 顶栏"
+    },
+    {
+      "id": "longpress",
+      "lane": "ops",
+      "type": "process",
+      "status": "changed",
+      "x": 310,
+      "y": 410,
+      "w": 220,
+      "h": 78,
+      "label": "消息长按",
+      "sublabel": "复制 · 删除本地 · 重发"
+    },
+    {
+      "id": "search",
+      "lane": "ops",
+      "type": "process",
+      "status": "new",
+      "x": 570,
+      "y": 410,
+      "w": 210,
+      "h": 78,
+      "label": "会话内搜索",
+      "sublabel": "文本与文件名过滤"
+    },
+    {
+      "id": "rowops",
+      "lane": "ops",
+      "type": "process",
+      "status": "new",
+      "x": 820,
+      "y": 410,
+      "w": 250,
+      "h": 78,
+      "label": "会话操作",
+      "sublabel": "置顶 · 全部已读 · 删除会话"
+    },
+    {
+      "id": "store",
+      "lane": "apply",
+      "type": "process",
+      "status": "changed",
+      "x": 400,
+      "y": 580,
+      "w": 300,
+      "h": 78,
+      "label": "本地库",
+      "sublabel": "messages 删除 · groups.pinned（DB v5）"
+    },
+    {
+      "id": "exits",
+      "lane": "exits",
+      "type": "security",
+      "status": "new",
+      "x": 330,
+      "y": 714,
+      "w": 600,
+      "h": 78,
+      "label": "失败与兜底",
+      "sublabel": "删错 · 硬件键盘 · 无可用 IME · 搜索空态"
+    }
+  ],
+  "edges": [
+    {
+      "from": "list",
+      "to": "settings",
+      "kind": "main",
+      "label": "齿轮",
+      "labelAt": [
+        250,
+        204
+      ],
+      "points": [
+        [
+          240,
+          174
+        ],
+        [
+          240,
+          269
+        ],
+        [
+          330,
+          269
+        ]
+      ]
+    },
+    {
+      "from": "settings",
+      "to": "save",
+      "kind": "main",
+      "label": "保存",
+      "labelAt": [
+        576,
+        258
+      ],
+      "points": [
+        [
+          570,
+          269
+        ],
+        [
+          620,
+          269
+        ]
+      ]
+    },
+    {
+      "from": "save",
+      "to": "ime",
+      "kind": "main",
+      "label": "生效",
+      "labelAt": [
+        846,
+        258
+      ],
+      "points": [
+        [
+          840,
+          269
+        ],
+        [
+          890,
+          269
+        ]
+      ]
+    },
+    {
+      "from": "ime",
+      "to": "list",
+      "kind": "aux",
+      "label": "返回后重开",
+      "labelAt": [
+        600,
+        186
+      ],
+      "points": [
+        [
+          1035,
+          230
+        ],
+        [
+          1035,
+          196
+        ],
+        [
+          170,
+          196
+        ],
+        [
+          170,
+          174
+        ]
+      ]
+    },
+    {
+      "from": "list",
+      "to": "gchat",
+      "kind": "aux",
+      "label": "点会话",
+      "labelAt": [
+        158,
+        330
+      ],
+      "points": [
+        [
+          150,
+          174
+        ],
+        [
+          150,
+          410
+        ]
+      ]
+    },
+    {
+      "from": "gchat",
+      "to": "longpress",
+      "kind": "aux",
+      "label": "长按",
+      "labelAt": [
+        272,
+        438
+      ],
+      "points": [
+        [
+          270,
+          449
+        ],
+        [
+          310,
+          449
+        ]
+      ]
+    },
+    {
+      "from": "longpress",
+      "to": "store",
+      "kind": "main",
+      "label": "删除 / 重发",
+      "labelAt": [
+        430,
+        530
+      ],
+      "points": [
+        [
+          420,
+          488
+        ],
+        [
+          420,
+          580
+        ]
+      ]
+    },
+    {
+      "from": "gchat",
+      "to": "search",
+      "kind": "aux",
+      "label": "顶栏搜索",
+      "labelAt": [
+        470,
+        344
+      ],
+      "points": [
+        [
+          270,
+          410
+        ],
+        [
+          270,
+          364
+        ],
+        [
+          675,
+          364
+        ],
+        [
+          675,
+          410
+        ]
+      ]
+    },
+    {
+      "from": "search",
+      "to": "store",
+      "kind": "aux",
+      "label": "查询",
+      "labelAt": [
+        686,
+        530
+      ],
+      "points": [
+        [
+          675,
+          488
+        ],
+        [
+          675,
+          580
+        ]
+      ]
+    },
+    {
+      "from": "rowops",
+      "to": "store",
+      "kind": "aux",
+      "label": "置顶 / 已读 / 删除",
+      "labelAt": [
+        726,
+        608
+      ],
+      "points": [
+        [
+          945,
+          488
+        ],
+        [
+          945,
+          620
+        ],
+        [
+          700,
+          620
+        ]
+      ]
+    },
+    {
+      "from": "list",
+      "to": "rowops",
+      "kind": "aux",
+      "label": "长按会话",
+      "labelAt": [
+        900,
+        34
+      ],
+      "points": [
+        [
+          280,
+          96
+        ],
+        [
+          280,
+          44
+        ],
+        [
+          1200,
+          44
+        ],
+        [
+          1200,
+          449
+        ],
+        [
+          1070,
+          449
+        ]
+      ]
+    },
+    {
+      "from": "longpress",
+      "to": "exits",
+      "kind": "diag",
+      "label": "删除二次确认",
+      "labelAt": [
+        560,
+        548
+      ],
+      "points": [
+        [
+          500,
+          488
+        ],
+        [
+          500,
+          560
+        ],
+        [
+          760,
+          560
+        ],
+        [
+          760,
+          714
+        ]
+      ]
+    },
+    {
+      "from": "ime",
+      "to": "exits",
+      "kind": "diag",
+      "label": "无可用输入法",
+      "labelAt": [
+        1080,
+        700
+      ],
+      "points": [
+        [
+          1180,
+          269
+        ],
+        [
+          1180,
+          753
+        ],
+        [
+          930,
+          753
+        ]
+      ]
+    }
+  ],
+  "changes": [
+    {
+      "node": "settings",
+      "level": "新增",
+      "text": "新增设置页：本机别名与设备号、通道端口与后台状态、文件保存目录、通知总开关、输入法入口、关于（版本）。"
+    },
+    {
+      "node": "save",
+      "level": "新增",
+      "text": "改动写 prefs 并立即生效：别名重注册、文件目录重建、通知开关热更新（无需重启）。"
+    },
+    {
+      "node": "ime",
+      "level": "新增",
+      "text": "设置页显示当前输入法与硬件键盘状态；接磁吸键盘且系统压制软键盘时给出说明和一键跳「语言与输入法」。"
+    },
+    {
+      "node": "longpress",
+      "level": "调整",
+      "text": "长按菜单由「只复制」扩为复制全文 / 删除本地 / 失败重发；删除走二次确认对话框，一次一条。"
+    },
+    {
+      "node": "search",
+      "level": "新增",
+      "text": "会话内搜索栏：对文本与文件名做 LIKE 过滤，命中片段高亮，无结果给空态。"
+    },
+    {
+      "node": "rowops",
+      "level": "新增",
+      "text": "会话左滑/长按菜单：置顶、标为已读、删除会话（只删本机消息与未读，不影响对端）。"
+    },
+    {
+      "node": "store",
+      "level": "调整",
+      "text": "messages 支持按 id 删除与按会话删除；groups 加 pinned 列（DB v5，幂等迁移）。"
+    },
+    {
+      "node": "list",
+      "level": "调整",
+      "text": "顶栏加设置齿轮；置顶会话排最前并显示标记；删除后列表与通知同步刷新。"
+    }
+  ],
+  "cards": [
+    {
+      "kind": "fail",
+      "title": "出口 1 · 删错消息",
+      "body": "删除只影响本机，对端不受影响，也没有回收站：对话框写明「不可恢复」，默认按钮为取消。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 2 · 硬件键盘压制软键盘",
+      "body": "接了磁吸键盘且 show_ime_with_hard_keyboard=0 时，点输入框系统不弹软键盘；设置页显示状态并跳系统设置，App 不申请 WRITE_SECURE_SETTINGS。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 3 · 无可用输入法",
+      "body": "当前 IME 被禁用或只剩测试用 IME 时，设置页显示名称并引导切换，输入框旁给一行提示。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 4 · 搜索无结果",
+      "body": "空态文案 + 清空搜索按钮；不跨会话搜索，也不落搜索历史。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 5 · 删除后残留未读",
+      "body": "删除会话时同步清掉该会话通知、重置 lastread 与未读数，避免出现点不开的红点。"
+    },
+    {
+      "kind": "note",
+      "title": "本批不改",
+      "body": "消息多选批量删除、撤回/编辑消息、跨会话全局搜索、消息加密、多端历史同步。"
+    },
+    {
+      "kind": "note",
+      "title": "桌面端对齐",
+      "body": "设置页、消息操作、搜索在 v2F 桌面批次（PySide6）对齐；本图只画 Android。"
+    },
+    {
+      "kind": "note",
+      "title": "决策 · 浅色主题后置",
+      "body": "本批只做深色；设置页主题行显示「深色 · 浅色待做」。浅色需要颜色资源化 + recreate 重建，并入 v2E 与双栏布局同批。"
+    }
+  ]
+}

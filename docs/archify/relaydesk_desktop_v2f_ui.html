@@ -1,0 +1,698 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RelayDesk 桌面 v2F：与安卓端对齐</title>
+<style>
+  :root {
+    --bg: #070b14;
+    --panel: #0d1628;
+    --panel-2: #121d33;
+    --line: #22304a;
+    --line-soft: #1a2740;
+    --text: #e8edf7;
+    --muted: #8ba0c2;
+    --dim: #6f84a8;
+    --green: #21c78a;
+    --blue: #5aa9ff;
+    --red: #ef5b6b;
+    --amber: #f5a524;
+    --violet: #7c5cff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background:
+      radial-gradient(900px 500px at 12% -10%, rgba(124, 92, 255, .16), transparent 60%),
+      radial-gradient(800px 460px at 92% 0%, rgba(33, 199, 138, .10), transparent 55%),
+      var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .page { max-width: 1320px; margin: 0 auto; padding: 34px 34px 46px; }
+  header .eyebrow {
+    font-size: 11px; letter-spacing: 2.6px; text-transform: uppercase;
+    color: var(--violet); font-weight: 600;
+  }
+  header h1 { margin: 8px 0 12px; font-size: 26px; line-height: 1.25; font-weight: 650; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    border: 1px solid var(--line); background: rgba(13, 22, 40, .72);
+    color: var(--muted); font-size: 11.5px; padding: 4px 10px; border-radius: 999px;
+  }
+  .chip b { color: var(--text); font-weight: 600; }
+  .chip.warn { border-color: rgba(245, 165, 36, .5); color: var(--amber); }
+  .chip.ok { border-color: rgba(33, 199, 138, .5); color: var(--green); }
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 18px; align-items: center;
+    margin: 22px 0 14px; font-size: 12px; color: var(--muted);
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .sw { width: 22px; height: 0; border-top: 2.5px solid var(--green); border-radius: 2px; }
+  .sw.aux { border-top: 2px dashed var(--blue); }
+  .sw.diag { border-top: 2px dashed var(--red); }
+  .sw.box { width: 14px; height: 14px; border: 1.5px solid var(--violet); border-radius: 4px; background: rgba(124, 92, 255, .12); }
+  .sw.box.changed { border-color: var(--amber); background: rgba(245, 165, 36, .12); }
+  .sw.box.existing { border-color: #2c3d5c; background: rgba(44, 61, 92, .25); }
+
+  .stage-wrap { overflow: auto; padding-bottom: 6px; }
+  .stage {
+    position: relative;
+    background:
+      radial-gradient(600px 300px at 20% 10%, rgba(90, 169, 255, .08), transparent 60%),
+      linear-gradient(180deg, rgba(13, 22, 40, .92), rgba(9, 15, 27, .96));
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    box-shadow: 0 26px 70px rgba(0, 0, 0, .45), inset 0 1px 0 rgba(255, 255, 255, .04);
+    overflow: hidden;
+  }
+  #lanes, #nodes { position: absolute; inset: 0; }
+  .band {
+    position: absolute; left: 14px; right: 14px;
+    border: 1px dashed var(--line-soft); border-radius: 16px;
+    background: rgba(18, 29, 51, .28); pointer-events: none;
+  }
+  .band-label {
+    position: absolute; top: 10px; left: 16px;
+    font-size: 10.5px; letter-spacing: 2px; text-transform: uppercase;
+    color: var(--dim); font-weight: 600;
+  }
+  #edges { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+  .edge-label {
+    font-size: 11px; fill: #9fb3d1;
+    paint-order: stroke; stroke: #070b14; stroke-width: 4px; stroke-linejoin: round;
+  }
+  .node {
+    position: absolute; z-index: 2;
+    display: flex; flex-direction: column; justify-content: center; gap: 5px;
+    padding: 12px 14px; border-radius: 14px;
+    background: linear-gradient(180deg, var(--panel-2), var(--panel));
+    border: 1px solid #273854;
+    box-shadow: 0 10px 26px rgba(0, 0, 0, .28), inset 0 1px 0 rgba(255, 255, 255, .035);
+  }
+  .node .label { font-size: 14.5px; font-weight: 620; letter-spacing: .2px; }
+  .node .sub { font-size: 11.5px; color: var(--muted); line-height: 1.35; }
+  .node .badge {
+    position: absolute; top: 8px; right: 9px;
+    font-size: 9.5px; letter-spacing: .6px; padding: 2px 6px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--dim); background: rgba(7, 11, 20, .55);
+  }
+  .node.new { border-color: var(--violet); box-shadow: 0 0 0 1px rgba(124, 92, 255, .25), 0 12px 30px rgba(124, 92, 255, .16); }
+  .node.new .badge { color: var(--violet); border-color: rgba(124, 92, 255, .55); }
+  .node.changed { border-color: var(--amber); box-shadow: 0 0 0 1px rgba(245, 165, 36, .22), 0 12px 30px rgba(245, 165, 36, .12); }
+  .node.changed .badge { color: var(--amber); border-color: rgba(245, 165, 36, .55); }
+  .node.start { border-color: rgba(33, 199, 138, .65); }
+  .node.start .badge { color: var(--green); border-color: rgba(33, 199, 138, .45); }
+  .node.bus { background: linear-gradient(180deg, #10233a, #0c1a2c); }
+
+  .section-title {
+    display: flex; align-items: baseline; gap: 10px;
+    margin: 28px 0 12px; font-size: 13px; letter-spacing: 1.4px;
+    text-transform: uppercase; color: var(--dim); font-weight: 600;
+  }
+  .section-title small { text-transform: none; letter-spacing: 0; color: var(--dim); font-weight: 400; }
+  .changes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .change {
+    display: flex; gap: 10px; align-items: flex-start;
+    border: 1px solid var(--line-soft); border-radius: 12px;
+    background: rgba(13, 22, 40, .6); padding: 11px 13px; font-size: 12.5px;
+    color: #c3d1e6; line-height: 1.5;
+  }
+  .change .lv {
+    flex: 0 0 auto; font-size: 10px; padding: 2px 7px; border-radius: 999px;
+    border: 1px solid var(--violet); color: var(--violet); margin-top: 1px;
+  }
+  .change .lv.changed { border-color: var(--amber); color: var(--amber); }
+  .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .card {
+    border: 1px solid var(--line-soft); border-left: 3px solid var(--red);
+    border-radius: 12px; background: rgba(13, 22, 40, .6); padding: 12px 14px;
+  }
+  .card.note { border-left-color: var(--blue); }
+  .card h3 { margin: 0 0 6px; font-size: 12.5px; font-weight: 600; }
+  .card p { margin: 0; font-size: 11.5px; color: var(--muted); line-height: 1.55; }
+  footer { margin-top: 26px; font-size: 11.5px; color: var(--dim); }
+  code { font-family: "JetBrains Mono", Consolas, monospace; font-size: .94em; color: #b9c9e2; }
+  @media (max-width: 1000px) {
+    .page { padding: 24px 18px 36px; }
+    .changes, .cards { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <div class="eyebrow">Archify · L1 Workflow</div>
+    <h1 id="title">RelayDesk 桌面 v2F：与安卓端对齐</h1>
+    <div class="chips">
+      <span class="chip">级别 <b>L1</b></span>
+      <span class="chip" id="status-chip">状态 <b id="status-value">待确认</b></span>
+      <span class="chip">日期 <b id="date-value">2026-10-29</b></span>
+      <span class="chip">主路径 <b id="main-count">8 节点</b></span>
+      <span class="chip">失败/兜底 <b id="fail-count">5 条</b></span>
+    </div>
+  </header>
+
+  <div class="legend">
+    <span><i class="sw"></i>主路径</span>
+    <span><i class="sw aux"></i>辅助 / 既有</span>
+    <span><i class="sw diag"></i>失败 / 降级</span>
+    <span><i class="sw box existing"></i>已上线</span>
+    <span><i class="sw box changed"></i>调整</span>
+    <span><i class="sw box"></i>新增</span>
+  </div>
+
+  <div class="stage-wrap">
+    <div class="stage" id="stage">
+      <div id="lanes"></div>
+      <svg id="edges"></svg>
+      <div id="nodes"></div>
+    </div>
+  </div>
+
+  <div class="section-title">本批改动 <small>确认后才进入实现</small></div>
+  <section class="changes" id="changes"></section>
+
+  <div class="section-title">失败出口与边界 <small>主路径之外必须可走</small></div>
+  <section class="cards" id="cards"></section>
+
+  <footer>
+    旁路 JSON：<code>docs/archify/relaydesk_android_v2c_workflow.json</code> ·
+    Brief：<code>docs/product/relaydesk_android_v2c_brief.md</code> ·
+    本页由同一份 JSON 渲染，节点/边/改动与旁路文件一致。
+  </footer>
+</div>
+
+<script id="diagram-data" type="application/json">{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RelayDesk 桌面 v2F：与安卓端对齐",
+    "locale": "zh-CN",
+    "level": "L1",
+    "status": "已确认",
+    "date": "2026-10-29",
+    "quality_profile": "showcase"
+  },
+  "scope": {
+    "in": [
+      "PySide6 主窗口改双栏：左会话列表（置顶/未读/搜索），右会话页",
+      "会话页：消息搜索、右键菜单（复制/重发/删除本地）、图片缩略图与全屏预览",
+      "发图前压缩、收图落 Downloads/RelayDesk、拖拽发送",
+      "设置页：本机名、通道端口、保存目录、通知开关、深浅主题",
+      "深浅主题用 QSS 变量切换，立即生效并持久化"
+    ],
+    "out": [
+      "与安卓端的加密/云同步",
+      "多账号",
+      "桌面端群管理的完整对齐（先只读+发消息）",
+      "Mac/Linux 打包"
+    ]
+  },
+  "canvas": {
+    "width": 1240,
+    "height": 700
+  },
+  "lanes": [
+    {
+      "id": "entry",
+      "label": "入口"
+    },
+    {
+      "id": "work",
+      "label": "会话与操作"
+    },
+    {
+      "id": "apply",
+      "label": "设置与主题"
+    },
+    {
+      "id": "exits",
+      "label": "边界"
+    }
+  ],
+  "bands": [
+    {
+      "lane": "entry",
+      "y": 64,
+      "h": 120
+    },
+    {
+      "lane": "work",
+      "y": 204,
+      "h": 150
+    },
+    {
+      "lane": "apply",
+      "y": 374,
+      "h": 150
+    },
+    {
+      "lane": "exits",
+      "y": 544,
+      "h": 120
+    }
+  ],
+  "mainPath": [
+    "list",
+    "chat",
+    "ops",
+    "media"
+  ],
+  "nodes": [
+    {
+      "id": "list",
+      "lane": "entry",
+      "type": "process",
+      "status": "unchanged",
+      "x": 60,
+      "y": 96,
+      "w": 280,
+      "h": 78,
+      "label": "会话列表（左栏，已有）",
+      "sublabel": "rail+sidebar+全局搜索已存在 · 本批补置顶/未读"
+    },
+    {
+      "id": "chat",
+      "lane": "work",
+      "type": "process",
+      "status": "changed",
+      "x": 60,
+      "y": 230,
+      "w": 280,
+      "h": 78,
+      "label": "会话页（右栏）",
+      "sublabel": "气泡已有 · 本批补图片缩略图"
+    },
+    {
+      "id": "ops",
+      "lane": "work",
+      "type": "process",
+      "status": "new",
+      "x": 380,
+      "y": 230,
+      "w": 260,
+      "h": 78,
+      "label": "搜索与右键菜单",
+      "sublabel": "右键菜单已有基础项 · 本批补搜索与删除"
+    },
+    {
+      "id": "media",
+      "lane": "work",
+      "type": "process",
+      "status": "new",
+      "x": 680,
+      "y": 230,
+      "w": 260,
+      "h": 78,
+      "label": "图片与文件",
+      "sublabel": "压缩 · 预览 · 另存为 · 打开目录"
+    },
+    {
+      "id": "settings",
+      "lane": "apply",
+      "type": "process",
+      "status": "new",
+      "x": 60,
+      "y": 400,
+      "w": 300,
+      "h": 78,
+      "label": "设置页",
+      "sublabel": "本机名 · 端口 · 目录 · 通知 · 主题"
+    },
+    {
+      "id": "theme",
+      "lane": "apply",
+      "type": "process",
+      "status": "new",
+      "x": 400,
+      "y": 400,
+      "w": 260,
+      "h": 78,
+      "label": "深 / 浅主题",
+      "sublabel": "QSS 变量 · 立即生效 · 记住选择"
+    },
+    {
+      "id": "exits",
+      "lane": "exits",
+      "type": "security",
+      "status": "changed",
+      "x": 330,
+      "y": 570,
+      "w": 620,
+      "h": 78,
+      "label": "边界与兜底",
+      "sublabel": "端口占用 · 对端离线 · 解码失败 · 另存冲突"
+    }
+  ],
+  "edges": [
+    {
+      "from": "list",
+      "to": "chat",
+      "kind": "main",
+      "label": "选中",
+      "labelAt": [
+        196,
+        186
+      ],
+      "points": [
+        [
+          200,
+          174
+        ],
+        [
+          200,
+          230
+        ]
+      ]
+    },
+    {
+      "from": "chat",
+      "to": "ops",
+      "kind": "main",
+      "label": "⌕ / 右键",
+      "labelAt": [
+        344,
+        262
+      ],
+      "points": [
+        [
+          340,
+          269
+        ],
+        [
+          380,
+          269
+        ]
+      ]
+    },
+    {
+      "from": "ops",
+      "to": "media",
+      "kind": "main",
+      "label": "点图/文件",
+      "labelAt": [
+        644,
+        262
+      ],
+      "points": [
+        [
+          640,
+          269
+        ],
+        [
+          680,
+          269
+        ]
+      ]
+    },
+    {
+      "from": "settings",
+      "to": "theme",
+      "kind": "aux",
+      "label": "切换",
+      "labelAt": [
+        368,
+        424
+      ],
+      "points": [
+        [
+          360,
+          439
+        ],
+        [
+          400,
+          439
+        ]
+      ]
+    },
+    {
+      "from": "theme",
+      "to": "list",
+      "kind": "aux",
+      "label": "重绘",
+      "labelAt": [
+        700,
+        366
+      ],
+      "points": [
+        [
+          530,
+          400
+        ],
+        [
+          530,
+          366
+        ],
+        [
+          1000,
+          366
+        ],
+        [
+          1000,
+          135
+        ],
+        [
+          340,
+          135
+        ]
+      ]
+    },
+    {
+      "from": "chat",
+      "to": "exits",
+      "kind": "diag",
+      "label": "发送失败",
+      "labelAt": [
+        212,
+        500
+      ],
+      "points": [
+        [
+          200,
+          308
+        ],
+        [
+          200,
+          600
+        ],
+        [
+          330,
+          600
+        ]
+      ]
+    },
+    {
+      "from": "media",
+      "to": "exits",
+      "kind": "diag",
+      "label": "解码/另存失败",
+      "labelAt": [
+        800,
+        500
+      ],
+      "points": [
+        [
+          810,
+          308
+        ],
+        [
+          810,
+          600
+        ],
+        [
+          950,
+          600
+        ]
+      ]
+    }
+  ],
+  "changes": [
+    {
+      "node": "list",
+      "level": "新增",
+      "text": "主窗口从单列改为 QSplitter 双栏：左列表常驻，置顶与未读角标与安卓端一致。"
+    },
+    {
+      "node": "chat",
+      "level": "调整",
+      "text": "气泡列表支持图片缩略图；拖入文件即发送。"
+    },
+    {
+      "node": "ops",
+      "level": "新增",
+      "text": "会话内搜索与右键菜单（复制、失败重发、删除本地），删除走二次确认。"
+    },
+    {
+      "node": "media",
+      "level": "新增",
+      "text": "发送前压缩（最长边 1920）、双击全屏预览、另存为与打开所在目录。"
+    },
+    {
+      "node": "settings",
+      "level": "新增",
+      "text": "设置页与安卓端同构：本机别名、端口、保存目录、通知开关、主题。"
+    },
+    {
+      "node": "theme",
+      "level": "新增",
+      "text": "深浅主题改为 QSS 变量表切换，不再写死颜色。"
+    }
+  ],
+  "cards": [
+    {
+      "kind": "note",
+      "title": "实机核对 · 已有能力",
+      "body": "gui.py 已是 rail+sidebar+workspace 三栏，带全局搜索框、设置页（只读文本卡）、消息右键菜单。真正缺的是：可交互设置、浅色主题、消息图片缩略图与预览、会话内搜索。"
+    },
+    {
+      "kind": "note",
+      "title": "决策 · 与安卓端功能对齐，不追求像素一致",
+      "body": "同样的能力集合（双栏、搜索、菜单、图片、设置、主题），布局按桌面习惯（等比缩放、键盘可达）。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 1 · 端口占用",
+      "body": "8891 被占时回落 18991，设置页显示实际端口与状态。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 2 · 图片解码失败",
+      "body": "退回文件气泡并提示，不吞错误。"
+    },
+    {
+      "kind": "note",
+      "title": "本批不改",
+      "body": "群管理的完整对齐只做只读+发消息；打包与升级（dist/flixd.exe 重建单独做）。"
+    }
+  ]
+}</script>
+
+<script>
+(function () {
+  const DATA = JSON.parse(document.getElementById('diagram-data').textContent);
+  const statusText = { existing: '已上线', new: '新增', changed: '调整' };
+  const laneLabel = Object.fromEntries(DATA.lanes.map(l => [l.id, l.label]));
+
+  document.getElementById('title').textContent = DATA.meta.title;
+  const statusChip = document.getElementById('status-chip');
+  document.getElementById('status-value').textContent = DATA.meta.status;
+  statusChip.className = 'chip' + (DATA.meta.status === '已确认' ? ' ok' : ' warn');
+  document.getElementById('date-value').textContent = DATA.meta.date;
+  document.getElementById('main-count').textContent = DATA.mainPath.length + ' 节点';
+  document.getElementById('fail-count').textContent =
+    DATA.cards.filter(c => c.kind === 'fail').length + ' 条';
+  const stage = document.getElementById('stage');
+  stage.style.width = DATA.canvas.width + 'px';
+  stage.style.height = DATA.canvas.height + 'px';
+
+  const lanes = document.getElementById('lanes');
+  DATA.bands.forEach(b => {
+    const el = document.createElement('div');
+    el.className = 'band';
+    el.style.top = b.y + 'px';
+    el.style.height = b.h + 'px';
+    const tag = document.createElement('span');
+    tag.className = 'band-label';
+    tag.textContent = laneLabel[b.lane] || b.lane;
+    el.appendChild(tag);
+    lanes.appendChild(el);
+  });
+
+  const svg = document.getElementById('edges');
+  const NS = 'http://www.w3.org/2000/svg';
+  svg.setAttribute('viewBox', `0 0 ${DATA.canvas.width} ${DATA.canvas.height}`);
+  svg.setAttribute('width', DATA.canvas.width);
+  svg.setAttribute('height', DATA.canvas.height);
+  const colors = { main: '#21c78a', aux: '#5aa9ff', diag: '#ef5b6b' };
+  const defs = document.createElementNS(NS, 'defs');
+  Object.entries(colors).forEach(([kind, color]) => {
+    const marker = document.createElementNS(NS, 'marker');
+    marker.setAttribute('id', 'arrow-' + kind);
+    marker.setAttribute('viewBox', '0 0 10 10');
+    marker.setAttribute('refX', '8');
+    marker.setAttribute('refY', '5');
+    marker.setAttribute('markerWidth', '7');
+    marker.setAttribute('markerHeight', '7');
+    marker.setAttribute('orient', 'auto-start-reverse');
+    const path = document.createElementNS(NS, 'path');
+    path.setAttribute('d', 'M 0 0 L 10 5 L 0 10 z');
+    path.setAttribute('fill', color);
+    marker.appendChild(path);
+    defs.appendChild(marker);
+  });
+  svg.appendChild(defs);
+
+  DATA.edges.forEach(e => {
+    const poly = document.createElementNS(NS, 'polyline');
+    poly.setAttribute('points', e.points.map(p => p.join(',')).join(' '));
+    poly.setAttribute('fill', 'none');
+    poly.setAttribute('stroke', colors[e.kind] || colors.main);
+    poly.setAttribute('stroke-width', e.kind === 'main' ? '2.4' : '1.8');
+    poly.setAttribute('stroke-linecap', 'round');
+    poly.setAttribute('stroke-linejoin', 'round');
+    poly.setAttribute('marker-end', `url(#arrow-${e.kind || 'main'})`);
+    if (e.kind !== 'main') poly.setAttribute('stroke-dasharray', '6 6');
+    svg.appendChild(poly);
+    if (e.label) {
+      const at = e.labelAt || e.points[e.points.length - 1];
+      const text = document.createElementNS(NS, 'text');
+      text.setAttribute('x', at[0]);
+      text.setAttribute('y', at[1]);
+      text.setAttribute('class', 'edge-label');
+      text.textContent = e.label;
+      svg.appendChild(text);
+    }
+  });
+
+  const nodes = document.getElementById('nodes');
+  DATA.nodes.forEach(n => {
+    const el = document.createElement('div');
+    el.className = 'node ' + (n.status || 'existing') + ' ' + (n.type || '');
+    el.style.left = n.x + 'px';
+    el.style.top = n.y + 'px';
+    el.style.width = n.w + 'px';
+    el.style.height = n.h + 'px';
+    const badge = document.createElement('span');
+    badge.className = 'badge';
+    badge.textContent = statusText[n.status] || n.status;
+    const label = document.createElement('div');
+    label.className = 'label';
+    label.textContent = n.label;
+    const sub = document.createElement('div');
+    sub.className = 'sub';
+    sub.textContent = n.sublabel || '';
+    el.append(badge, label, sub);
+    nodes.appendChild(el);
+  });
+
+  const changes = document.getElementById('changes');
+  DATA.changes.forEach(c => {
+    const el = document.createElement('div');
+    el.className = 'change';
+    const lv = document.createElement('span');
+    lv.className = 'lv' + (c.level === '调整' ? ' changed' : '');
+    lv.textContent = c.level;
+    const tx = document.createElement('span');
+    tx.textContent = c.text;
+    el.append(lv, tx);
+    changes.appendChild(el);
+  });
+
+  const cards = document.getElementById('cards');
+  DATA.cards.forEach(c => {
+    const el = document.createElement('div');
+    el.className = 'card' + (c.kind === 'note' ? ' note' : '');
+    const h = document.createElement('h3');
+    h.textContent = c.title;
+    const p = document.createElement('p');
+    p.textContent = c.body;
+    el.append(h, p);
+    cards.appendChild(el);
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,337 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RelayDesk Android v2G：身份重建后的历史合并",
+    "locale": "zh-CN",
+    "level": "L1",
+    "status": "已确认",
+    "date": "2026-10-29",
+    "quality_profile": "showcase"
+  },
+  "scope": {
+    "in": [
+      "探测到同一台机器换了 fingerprint 时，把 messages / pairs / group_members / lastread / pinned 迁到新 fp",
+      "迁移成功后删掉旧 fp 的 devices 行，列表只保留一行",
+      "迁移失败整批回滚，旧数据原样保留",
+      "拿不准（新 fp 已有自己的历史）时只提示、不合并"
+    ],
+    "out": [
+      "跨机器的历史合并",
+      "云端同步",
+      "桌面端身份处理（v2F）",
+      "群成员指纹变更的通知语义"
+    ]
+  },
+  "canvas": {
+    "width": 1240,
+    "height": 700
+  },
+  "lanes": [
+    {
+      "id": "entry",
+      "label": "探测与判定"
+    },
+    {
+      "id": "judge",
+      "label": "迁移"
+    },
+    {
+      "id": "apply",
+      "label": "落库与刷新"
+    },
+    {
+      "id": "exits",
+      "label": "边界"
+    }
+  ],
+  "bands": [
+    {
+      "lane": "entry",
+      "y": 64,
+      "h": 120
+    },
+    {
+      "lane": "judge",
+      "y": 204,
+      "h": 150
+    },
+    {
+      "lane": "apply",
+      "y": 374,
+      "h": 150
+    },
+    {
+      "lane": "exits",
+      "y": 544,
+      "h": 120
+    }
+  ],
+  "mainPath": [
+    "probe",
+    "detect",
+    "migrate",
+    "store",
+    "ui"
+  ],
+  "nodes": [
+    {
+      "id": "probe",
+      "lane": "entry",
+      "type": "process",
+      "status": "unchanged",
+      "x": 60,
+      "y": 96,
+      "w": 240,
+      "h": 78,
+      "label": "探活 /ping_v2",
+      "sublabel": "60 秒一轮 · 返回真实 fingerprint"
+    },
+    {
+      "id": "detect",
+      "lane": "entry",
+      "type": "process",
+      "status": "new",
+      "x": 350,
+      "y": 96,
+      "w": 280,
+      "h": 78,
+      "label": "身份变更判定",
+      "sublabel": "alias 相同 · 旧 fp 已不再以旧身份应答"
+    },
+    {
+      "id": "migrate",
+      "lane": "judge",
+      "type": "process",
+      "status": "new",
+      "x": 60,
+      "y": 230,
+      "w": 300,
+      "h": 78,
+      "label": "迁移历史",
+      "sublabel": "messages · pairs · group_members · prefs"
+    },
+    {
+      "id": "store",
+      "lane": "apply",
+      "type": "process",
+      "status": "changed",
+      "x": 60,
+      "y": 400,
+      "w": 300,
+      "h": 78,
+      "label": "删除旧行",
+      "sublabel": "devices 删旧 fp · 单事务提交"
+    },
+    {
+      "id": "ui",
+      "lane": "apply",
+      "type": "process",
+      "status": "changed",
+      "x": 400,
+      "y": 400,
+      "w": 240,
+      "h": 78,
+      "label": "列表刷新",
+      "sublabel": "一行一机器 · 置顶与未读连续"
+    },
+    {
+      "id": "exits",
+      "lane": "exits",
+      "type": "security",
+      "status": "changed",
+      "x": 330,
+      "y": 570,
+      "w": 620,
+      "h": 78,
+      "label": "边界与兜底",
+      "sublabel": "证据不足 · 目标 fp 已有历史 · 迁移失败回滚"
+    }
+  ],
+  "edges": [
+    {
+      "from": "probe",
+      "to": "detect",
+      "kind": "main",
+      "label": "realFp",
+      "labelAt": [
+        305,
+        114
+      ],
+      "points": [
+        [
+          300,
+          135
+        ],
+        [
+          350,
+          135
+        ]
+      ]
+    },
+    {
+      "from": "detect",
+      "to": "migrate",
+      "kind": "main",
+      "label": "同一台机器",
+      "labelAt": [
+        372,
+        208
+      ],
+      "points": [
+        [
+          475,
+          174
+        ],
+        [
+          475,
+          269
+        ],
+        [
+          360,
+          269
+        ]
+      ]
+    },
+    {
+      "from": "migrate",
+      "to": "store",
+      "kind": "main",
+      "label": "提交",
+      "labelAt": [
+        216,
+        356
+      ],
+      "points": [
+        [
+          210,
+          308
+        ],
+        [
+          210,
+          400
+        ]
+      ]
+    },
+    {
+      "from": "store",
+      "to": "ui",
+      "kind": "main",
+      "label": "刷新",
+      "labelAt": [
+        368,
+        424
+      ],
+      "points": [
+        [
+          360,
+          439
+        ],
+        [
+          400,
+          439
+        ]
+      ]
+    },
+    {
+      "from": "detect",
+      "to": "exits",
+      "kind": "diag",
+      "label": "证据不足或已有历史",
+      "labelAt": [
+        1002,
+        400
+      ],
+      "points": [
+        [
+          630,
+          135
+        ],
+        [
+          1000,
+          135
+        ],
+        [
+          1000,
+          609
+        ],
+        [
+          950,
+          609
+        ]
+      ]
+    },
+    {
+      "from": "migrate",
+      "to": "exits",
+      "kind": "diag",
+      "label": "回滚",
+      "labelAt": [
+        396,
+        520
+      ],
+      "points": [
+        [
+          330,
+          269
+        ],
+        [
+          390,
+          269
+        ],
+        [
+          390,
+          600
+        ],
+        [
+          330,
+          600
+        ]
+      ]
+    }
+  ],
+  "changes": [
+    {
+      "node": "detect",
+      "level": "新增",
+      "text": "探活拿到 realFp 后比对：与本地记录的 fp 不同、alias 相同、旧 fp 的 seenAt 已过期 120 秒、且旧 fp 有历史，就认定是同一台机器换了身份。"
+    },
+    {
+      "node": "migrate",
+      "level": "新增",
+      "text": "把 messages 的 from_device/to_device、pairs、group_members 与 lastread_/pinned_ 偏好整体改指新 fp。"
+    },
+    {
+      "node": "store",
+      "level": "调整",
+      "text": "迁移与删除旧 devices 行放在同一个事务里；任一步失败整批回滚，旧行与旧历史原样保留。"
+    },
+    {
+      "node": "ui",
+      "level": "调整",
+      "text": "去重后只剩一行；历史、置顶、未读从旧 fp 接续，不再出现「置顶消失」「历史断在旧身份下」。"
+    }
+  ],
+  "cards": [
+    {
+      "kind": "note",
+      "title": "决策 · 三条同时满足才合并",
+      "body": "alias 相同、旧 fp 已经连续 2 分钟没有以旧身份应答（等价于它已不再在线）、旧 fp 有历史。原稿要求「新 fp 本地无独立记录」，实机验证会让功能永不触发——换身份后的新 fp 往往已经有自己的历史。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 1 · 目标 fp 已有自己的历史",
+      "body": "可能是两台机器共用一个出口 IP：不合并、不删行，设置页显示「发现疑似重复身份」由用户判断。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 2 · 迁移中途失败",
+      "body": "单事务回滚，toast 提示，旧数据不动；下次探活会再试一次。"
+    },
+    {
+      "kind": "note",
+      "title": "本批不改",
+      "body": "群成员列表里旧指纹的显示名（按 alias 查，不受影响）；桌面端与云端；v2D/v2E 已按机器归类的置顶与已读保持不变。"
+    }
+  ]
+}

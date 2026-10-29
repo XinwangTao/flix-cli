@@ -1,0 +1,510 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RelayDesk Android v2E：图片与文件体验",
+    "locale": "zh-CN",
+    "level": "L1",
+    "status": "已确认",
+    "date": "2026-10-29",
+    "quality_profile": "showcase"
+  },
+  "scope": {
+    "in": [
+      "选图后按 MIME 分流：图片走压缩+缩略图，其他文件按原样上传",
+      "图片气泡显示缩略图、文件气泡显示名称/大小/进度/状态",
+      "点图全屏预览（翻页、缩放、保存）",
+      "已接收文件的打开、另存、分享",
+      "失败兜底：超大图、上传失败可重试、无应用可打开"
+    ],
+    "out": [
+      "视频/音频播放与预览",
+      "桌面端收发缩略图（v2F）",
+      "身份合并与历史迁移（v2G）",
+      "图片编辑与相册批量选择"
+    ]
+  },
+  "canvas": {
+    "width": 1240,
+    "height": 810
+  },
+  "lanes": [
+    {
+      "id": "entry",
+      "label": "发送入口"
+    },
+    {
+      "id": "media",
+      "label": "处理与气泡"
+    },
+    {
+      "id": "view",
+      "label": "预览与另存"
+    },
+    {
+      "id": "apply",
+      "label": "落盘"
+    },
+    {
+      "id": "exits",
+      "label": "失败出口"
+    }
+  ],
+  "bands": [
+    {
+      "lane": "entry",
+      "y": 64,
+      "h": 120
+    },
+    {
+      "lane": "media",
+      "y": 204,
+      "h": 150
+    },
+    {
+      "lane": "view",
+      "y": 374,
+      "h": 150
+    },
+    {
+      "lane": "apply",
+      "y": 544,
+      "h": 120
+    },
+    {
+      "lane": "exits",
+      "y": 684,
+      "h": 104
+    }
+  ],
+  "mainPath": [
+    "pick",
+    "classify",
+    "compress",
+    "bubble",
+    "viewer"
+  ],
+  "nodes": [
+    {
+      "id": "pick",
+      "lane": "entry",
+      "type": "process",
+      "status": "changed",
+      "x": 60,
+      "y": 96,
+      "w": 240,
+      "h": 78,
+      "label": "选择图片/文件",
+      "sublabel": "▤ 附件 · OPEN_DOCUMENT"
+    },
+    {
+      "id": "classify",
+      "lane": "entry",
+      "type": "process",
+      "status": "new",
+      "x": 350,
+      "y": 96,
+      "w": 250,
+      "h": 78,
+      "label": "类型判定",
+      "sublabel": "image/* → 压缩；其余按文件"
+    },
+    {
+      "id": "compress",
+      "lane": "media",
+      "type": "process",
+      "status": "new",
+      "x": 60,
+      "y": 230,
+      "w": 250,
+      "h": 78,
+      "label": "压缩与缩略图",
+      "sublabel": "最长边 1920 · JPEG 85 · 私有 cache"
+    },
+    {
+      "id": "bubble",
+      "lane": "media",
+      "type": "process",
+      "status": "changed",
+      "x": 350,
+      "y": 230,
+      "w": 280,
+      "h": 78,
+      "label": "图片/文件气泡",
+      "sublabel": "缩略图 · 文件名 · 进度 · 状态"
+    },
+    {
+      "id": "sendfile",
+      "lane": "media",
+      "type": "process",
+      "status": "unchanged",
+      "x": 670,
+      "y": 230,
+      "w": 250,
+      "h": 78,
+      "label": "上传与回执",
+      "sublabel": "bubble + PUT · 失败可重发"
+    },
+    {
+      "id": "viewer",
+      "lane": "view",
+      "type": "process",
+      "status": "new",
+      "x": 350,
+      "y": 410,
+      "w": 250,
+      "h": 78,
+      "label": "全屏预览",
+      "sublabel": "左右翻页 · 双指缩放 · 保存"
+    },
+    {
+      "id": "saveas",
+      "lane": "view",
+      "type": "process",
+      "status": "new",
+      "x": 670,
+      "y": 410,
+      "w": 250,
+      "h": 78,
+      "label": "打开与另存",
+      "sublabel": "ACTION_VIEW · Download/RelayDesk"
+    },
+    {
+      "id": "store",
+      "lane": "apply",
+      "type": "process",
+      "status": "changed",
+      "x": 180,
+      "y": 580,
+      "w": 320,
+      "h": 78,
+      "label": "本地落盘",
+      "sublabel": "缩略图 + filePath · 表结构不变"
+    },
+    {
+      "id": "exits",
+      "lane": "exits",
+      "type": "security",
+      "status": "changed",
+      "x": 330,
+      "y": 714,
+      "w": 620,
+      "h": 78,
+      "label": "失败与兜底",
+      "sublabel": "超大图 · 压缩失败 · 无应用打开 · 空间不足"
+    }
+  ],
+  "edges": [
+    {
+      "from": "pick",
+      "to": "classify",
+      "kind": "main",
+      "label": "选中",
+      "labelAt": [
+        305,
+        114
+      ],
+      "points": [
+        [
+          300,
+          135
+        ],
+        [
+          350,
+          135
+        ]
+      ]
+    },
+    {
+      "from": "classify",
+      "to": "compress",
+      "kind": "main",
+      "label": "图片",
+      "labelAt": [
+        392,
+        205
+      ],
+      "points": [
+        [
+          475,
+          174
+        ],
+        [
+          475,
+          269
+        ],
+        [
+          310,
+          269
+        ]
+      ]
+    },
+    {
+      "from": "classify",
+      "to": "bubble",
+      "kind": "main",
+      "label": "文件",
+      "labelAt": [
+        566,
+        188
+      ],
+      "points": [
+        [
+          600,
+          135
+        ],
+        [
+          600,
+          196
+        ],
+        [
+          560,
+          196
+        ],
+        [
+          560,
+          230
+        ]
+      ]
+    },
+    {
+      "from": "compress",
+      "to": "bubble",
+      "kind": "main",
+      "label": "缩略图",
+      "labelAt": [
+        312,
+        240
+      ],
+      "points": [
+        [
+          310,
+          269
+        ],
+        [
+          350,
+          269
+        ]
+      ]
+    },
+    {
+      "from": "bubble",
+      "to": "sendfile",
+      "kind": "main",
+      "label": "上传",
+      "labelAt": [
+        634,
+        240
+      ],
+      "points": [
+        [
+          630,
+          269
+        ],
+        [
+          670,
+          269
+        ]
+      ]
+    },
+    {
+      "from": "bubble",
+      "to": "viewer",
+      "kind": "main",
+      "label": "点图",
+      "labelAt": [
+        498,
+        352
+      ],
+      "points": [
+        [
+          490,
+          308
+        ],
+        [
+          490,
+          410
+        ]
+      ]
+    },
+    {
+      "from": "bubble",
+      "to": "saveas",
+      "kind": "aux",
+      "label": "点文件",
+      "labelAt": [
+        706,
+        322
+      ],
+      "points": [
+        [
+          600,
+          308
+        ],
+        [
+          600,
+          340
+        ],
+        [
+          795,
+          340
+        ],
+        [
+          795,
+          410
+        ]
+      ]
+    },
+    {
+      "from": "viewer",
+      "to": "saveas",
+      "kind": "aux",
+      "label": "另存",
+      "labelAt": [
+        608,
+        428
+      ],
+      "points": [
+        [
+          600,
+          449
+        ],
+        [
+          670,
+          449
+        ]
+      ]
+    },
+    {
+      "from": "sendfile",
+      "to": "store",
+      "kind": "main",
+      "label": "落库",
+      "labelAt": [
+        686,
+        600
+      ],
+      "points": [
+        [
+          795,
+          308
+        ],
+        [
+          795,
+          619
+        ],
+        [
+          500,
+          619
+        ]
+      ]
+    },
+    {
+      "from": "compress",
+      "to": "store",
+      "kind": "aux",
+      "label": "缓存缩略图",
+      "labelAt": [
+        58,
+        600
+      ],
+      "points": [
+        [
+          185,
+          308
+        ],
+        [
+          185,
+          580
+        ]
+      ]
+    },
+    {
+      "from": "sendfile",
+      "to": "exits",
+      "kind": "diag",
+      "label": "上传失败",
+      "labelAt": [
+        972,
+        552
+      ],
+      "points": [
+        [
+          920,
+          290
+        ],
+        [
+          968,
+          290
+        ],
+        [
+          968,
+          753
+        ],
+        [
+          950,
+          753
+        ]
+      ]
+    }
+  ],
+  "changes": [
+    {
+      "node": "pick",
+      "level": "调整",
+      "text": "附件入口仍是一个按钮，选择后按 MIME 分流：image/* 进压缩链路，其余直接按文件发送。"
+    },
+    {
+      "node": "compress",
+      "level": "新增",
+      "text": "新增压缩与缩略图：最长边 1920、JPEG 85，缩略图写 App 私有 cache；原图不长期保留。"
+    },
+    {
+      "node": "bubble",
+      "level": "调整",
+      "text": "文件气泡从纯文本改为「缩略图或图标 + 名称 + 进度 + 状态」，失败态点按重发。"
+    },
+    {
+      "node": "viewer",
+      "level": "新增",
+      "text": "新增全屏预览：同会话图片左右翻页、双指缩放、保存到 Download/RelayDesk。"
+    },
+    {
+      "node": "saveas",
+      "level": "新增",
+      "text": "已接收文件支持打开、另存、分享；打开失败时引导另存而不是静默。"
+    },
+    {
+      "node": "store",
+      "level": "调整",
+      "text": "messages 表不新增列：缩略图只是 cache 文件，按消息 id 命名即可。"
+    }
+  ],
+  "cards": [
+    {
+      "kind": "note",
+      "title": "决策 · 默认压缩",
+      "body": "图片默认压缩（最长边 1920 / JPEG 85）。「发送原图」不在本批，需要时再进长按菜单。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 1 · 超大或解不动的图",
+      "body": "解码失败或原图 >20MB：不压缩，直接按文件发送，提示「已按原图发送」，不阻断。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 2 · 上传失败",
+      "body": "气泡显示「发送失败 · 点按重试」；重试复用同一份本地副本，避免 URI 授权过期后失败。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 3 · 无应用可打开",
+      "body": "ACTION_VIEW 无匹配时提示并给「另存到 Download/RelayDesk」，不静默吞掉。"
+    },
+    {
+      "kind": "note",
+      "title": "本批不改",
+      "body": "视频/音频播放、桌面端缩略图、相册批量多选；身份合并与历史迁移放 v2G。"
+    }
+  ]
+}
