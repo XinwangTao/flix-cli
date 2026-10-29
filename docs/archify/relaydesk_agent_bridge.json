@@ -1,0 +1,324 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RelayDesk v2K：两台电脑的 AI 对 AI 通道",
+    "locale": "zh-CN",
+    "level": "L2",
+    "status": "待确认",
+    "date": "2026-10-29",
+    "quality_profile": "showcase",
+    "confirmed_by": ""
+  },
+  "scope": {
+    "in": [
+      "守护进程新增 /agent 入站端点：配对设备发来的 agent 信封落库并推事件",
+      "MCP 工具三个：flix_agent_send / flix_agent_inbox / flix_agent_reply",
+      "本机 outbox：对端离线时保留，重新可达后重投",
+      "收件只作为消息保存，由本机 AI 决定怎么处理"
+    ],
+    "out": [
+      "对端自动执行命令（通道不执行任何东西）",
+      "多跳中转 / 云端中转",
+      "群内多 agent 会话、广播式任务分发"
+    ]
+  },
+  "canvas": {
+    "width": 1240,
+    "height": 640
+  },
+  "lanes": [
+    {
+      "id": "a",
+      "label": "机器 A · AI 与守护进程"
+    },
+    {
+      "id": "b",
+      "label": "机器 B · 守护进程与 AI"
+    },
+    {
+      "id": "exits",
+      "label": "边界"
+    }
+  ],
+  "bands": [
+    {
+      "lane": "a",
+      "y": 64,
+      "h": 140
+    },
+    {
+      "lane": "b",
+      "y": 224,
+      "h": 160
+    },
+    {
+      "lane": "exits",
+      "y": 404,
+      "h": 130
+    }
+  ],
+  "mainPath": [
+    "send",
+    "post",
+    "store",
+    "inbox",
+    "think"
+  ],
+  "nodes": [
+    {
+      "id": "send",
+      "lane": "a",
+      "type": "process",
+      "status": "new",
+      "x": 60,
+      "y": 96,
+      "w": 250,
+      "h": 78,
+      "label": "flix_agent_send(to, text)",
+      "sublabel": "MCP 工具 · 记入 outbox"
+    },
+    {
+      "id": "post",
+      "lane": "a",
+      "type": "process",
+      "status": "new",
+      "x": 370,
+      "y": 96,
+      "w": 260,
+      "h": 78,
+      "label": "POST /intent rdAgent",
+      "sublabel": "沿用 8891 通道 · 5 秒超时"
+    },
+    {
+      "id": "store",
+      "lane": "b",
+      "type": "process",
+      "status": "new",
+      "x": 60,
+      "y": 256,
+      "w": 250,
+      "h": 78,
+      "label": "信任门 + 落库",
+      "sublabel": "is_paired 通过才写 agent_messages"
+    },
+    {
+      "id": "inbox",
+      "lane": "b",
+      "type": "process",
+      "status": "new",
+      "x": 370,
+      "y": 256,
+      "w": 260,
+      "h": 78,
+      "label": "flix_agent_inbox()",
+      "sublabel": "长轮询取未读 · 可等待 120 秒"
+    },
+    {
+      "id": "think",
+      "lane": "b",
+      "type": "process",
+      "status": "new",
+      "x": 690,
+      "y": 256,
+      "w": 260,
+      "h": 78,
+      "label": "B 的 AI 处理",
+      "sublabel": "本地决定做什么，可回信也可不回"
+    },
+    {
+      "id": "exits",
+      "lane": "exits",
+      "type": "security",
+      "status": "new",
+      "x": 60,
+      "y": 434,
+      "w": 890,
+      "h": 76,
+      "label": "边界",
+      "sublabel": "未配对拒收 403 · 对端离线留在 outbox · 超时不等于失败"
+    }
+  ],
+  "edges": [
+    {
+      "from": "send",
+      "to": "post",
+      "kind": "main",
+      "label": "取目标设备",
+      "labelAt": [
+        345,
+        114
+      ],
+      "points": [
+        [
+          310,
+          135
+        ],
+        [
+          370,
+          135
+        ]
+      ]
+    },
+    {
+      "from": "post",
+      "to": "store",
+      "kind": "main",
+      "label": "HTTP :8891",
+      "labelAt": [
+        475,
+        205
+      ],
+      "points": [
+        [
+          500,
+          174
+        ],
+        [
+          500,
+          200
+        ],
+        [
+          185,
+          200
+        ],
+        [
+          185,
+          256
+        ]
+      ]
+    },
+    {
+      "from": "store",
+      "to": "inbox",
+      "kind": "main",
+      "label": "推 agentMessage",
+      "labelAt": [
+        345,
+        274
+      ],
+      "points": [
+        [
+          310,
+          295
+        ],
+        [
+          370,
+          295
+        ]
+      ]
+    },
+    {
+      "from": "inbox",
+      "to": "think",
+      "kind": "main",
+      "label": "取件",
+      "labelAt": [
+        665,
+        274
+      ],
+      "points": [
+        [
+          630,
+          295
+        ],
+        [
+          690,
+          295
+        ]
+      ]
+    },
+    {
+      "from": "think",
+      "to": "send",
+      "kind": "diag",
+      "label": "回复：flix_agent_reply 同路径回 A",
+      "labelAt": [
+        830,
+        150
+      ],
+      "points": [
+        [
+          820,
+          256
+        ],
+        [
+          820,
+          190
+        ],
+        [
+          185,
+          190
+        ],
+        [
+          185,
+          174
+        ]
+      ]
+    },
+    {
+      "from": "store",
+      "to": "exits",
+      "kind": "diag",
+      "label": "未配对 / 离线",
+      "labelAt": [
+        285,
+        380
+      ],
+      "points": [
+        [
+          185,
+          334
+        ],
+        [
+          185,
+          434
+        ]
+      ]
+    }
+  ],
+  "changes": [
+    {
+      "node": "send",
+      "level": "新增",
+      "text": "本机 AI 通过 MCP 工具 flix_agent_send 发出结构化消息：目标设备、正文、可选 replyTo；先落 outbox 再投递，返回投递结果而不是等回信。"
+    },
+    {
+      "node": "post",
+      "level": "新增",
+      "text": "复用现有 8891 通道与配对关系，新增 /intent action=rdAgent 信封；不新开端口、不引入外部服务。"
+    },
+    {
+      "node": "store",
+      "level": "新增",
+      "text": "对端只做两件事：校验 is_paired、把消息写进 agent_messages 并推事件。通道绝不执行任何内容。"
+    },
+    {
+      "node": "inbox",
+      "level": "新增",
+      "text": "flix_agent_inbox 支持长轮询（默认 120 秒），AI 侧不用忙等；已读状态记在本地表里。"
+    },
+    {
+      "node": "think",
+      "level": "新增",
+      "text": "收到消息后是否回信、做什么，完全由 B 的 AI 决定；不回也不算失败，A 侧靠 replyTo 关联。"
+    }
+  ],
+  "cards": [
+    {
+      "kind": "note",
+      "title": "为什么不做「远程执行」",
+      "body": "通道只搬运文字。若允许 A 让 B 执行命令，等于给配对关系开出远程代码执行权限，一次误判就是整机失守。要跑什么，由 B 本地的 AI 自己决定。"
+    },
+    {
+      "kind": "note",
+      "title": "对称",
+      "body": "A 与 B 跑同一套代码：两边都同时具备 send / inbox / reply，谁先发起谁就是 A。图上只画一个方向，反向同构。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 · 对端不可达",
+      "body": "消息留在本机 outbox，守护进程每 30 秒重试；A 侧的工具调用立即返回 queued，不阻塞 AI 回合。"
+    }
+  ]
+}
