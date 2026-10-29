@@ -1032,18 +1032,19 @@ class MainWindow(QMainWindow):
                 sep.setObjectName("daySeparator")
                 sep.setAlignment(Qt.AlignCenter)
                 self.timeline_layout.insertWidget(self.timeline_layout.count() - 1, sep)
-            content = bubble.get("content", "")
-            if isinstance(content, dict):
-                content = (f"▤  {content.get('name', '文件')}\n"
-                           f"{self.format_size(content.get('size', 0))} · "
-                           f"{float(content.get('progress', 0)) * 100:.0f}%")
+            raw = bubble.get("content", "")
             outgoing = bubble.get("from") == self.self_id
             wrap = QWidget(); line = QHBoxLayout(wrap); line.setContentsMargins(4, 0, 4, 0)
-            image = self._image_path(content) if isinstance(content, dict) else ""
+            image = self._image_path(raw) if isinstance(raw, dict) else ""
+            if image:
+                widget = self._image_bubble(image, outgoing, ts)
+            elif isinstance(raw, dict):
+                widget = self._file_bubble(raw, outgoing, ts)
+            else:
+                widget = self._bubble(str(raw), outgoing, ts)
             if outgoing:
                 line.addStretch()
-            line.addWidget(self._image_bubble(image, outgoing, ts) if image
-                           else self._bubble(str(content), outgoing, ts))
+            line.addWidget(widget)
             if not outgoing:
                 line.addStretch()
             self.timeline_layout.insertWidget(self.timeline_layout.count() - 1, wrap)
@@ -1091,6 +1092,36 @@ class MainWindow(QMainWindow):
         stamp.setAlignment(Qt.AlignRight)
         box.addWidget(stamp)
         frame.setMaximumWidth(300)
+        return frame
+
+    def _file_bubble(self, content: dict, outgoing: bool, ts: datetime) -> QFrame:
+        """Non-image attachment: name, size, transfer state, double-click to open."""
+        frame = QFrame()
+        frame.setObjectName("bubbleOut" if outgoing else "bubbleIn")
+        box = QVBoxLayout(frame)
+        box.setContentsMargins(12, 10, 12, 8)
+        box.setSpacing(2)
+        name = QLabel("▤  " + str(content.get("name") or "文件"))
+        name.setObjectName("bubbleText")
+        name.setWordWrap(True)
+        box.addWidget(name)
+        state = content.get("state")
+        detail = self.format_size(content.get("size", 0))
+        if state is not None and int(state) != 2:
+            detail += f" · {float(content.get('progress', 0)) * 100:.0f}%"
+        meta = QLabel(detail)
+        meta.setObjectName("bubbleMeta")
+        box.addWidget(meta)
+        path = content.get("path") or ""
+        if path and Path(path).exists():
+            frame.setToolTip(path + "\n双击打开")
+            frame.setCursor(Qt.PointingHandCursor)
+            frame.mouseDoubleClickEvent = lambda event, target=path: self.open_path(target)
+        stamp = QLabel(ts.strftime("%H:%M"))
+        stamp.setObjectName("bubbleMeta")
+        stamp.setAlignment(Qt.AlignRight)
+        box.addWidget(stamp)
+        frame.setMaximumWidth(320)
         return frame
 
     def open_path(self, path: str):

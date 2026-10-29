@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
+import time
 from typing import Callable
 
 from aiohttp import web
@@ -23,6 +25,23 @@ from .channel import PeerError, post_intent, post_json
 from .media_session import SessionError, SessionManager
 from .model import clipboard_intent
 from .routing import resolve_target
+
+
+def _record_sent_file(store, ident: dict, result: dict, path: str) -> None:
+    """Mirror a successful send into the local store so the sender sees it."""
+    bid = result["id"]
+    name = result["name"]
+    size = int(result.get("size") or 0)
+    store.con.execute(
+        "INSERT OR REPLACE INTO bubble_entities (id, from_device, to_device, type,"
+        " time, group_id) VALUES (?,?,?,3,?,?)",
+        (bid, ident["fingerprint"], result["to"], int(time.time() * 1000), ""))
+    store.con.execute(
+        "INSERT OR REPLACE INTO file_contents (id, group_id, resource_id, name,"
+        " mime_type, name_with_suffix, size, path, state, progress, width, height,"
+        " waiting_for_accept) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (bid, "", bid, name, "", name, size, os.path.abspath(path), 2, 1.0, 0, 0, 0))
+    store.con.commit()
 
 
 def make_desktop_app(store, ident: dict, send_text_fn: Callable,
@@ -152,8 +171,17 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
         if not ip:
             return web.json_response({"ok": False, "error": "no-device"}, status=404)
         from .files import send_file
-        results = [await send_file(ip, str(path), from_fp=ident["fingerprint"],
-                                   to_fp=fp, port=port) for path in body["paths"]]
+        results = []
+        for path in body["paths"]:
+            result = await send_file(ip, str(path), from_fp=ident["fingerprint"],
+                                     to_fp=fp, port=port)
+            if result.get("ok"):
+                # Without a local row the sender's own timeline never shows the
+                # file it just sent.
+                _record_sent_file(store, ident, result, str(path))
+                publish({"type": "bubbleChanged",
+                         "payload": {"bubbleId": result["id"], "type": "file"}})
+            results.append(result)
         ok = bool(results) and all(item.get("ok") for item in results)
         return web.json_response({"ok": ok, "results": results}, status=200 if ok else 400)
 

@@ -209,18 +209,27 @@ class Store:
     def bubbles(self, limit: int = 50) -> list[dict]:
         cur = self.con.execute(
             "SELECT b.id, b.from_device, b.to_device, b.type, b.time, b.group_id,"
-            " t.content, f.name, f.size, f.state, f.progress"
+            " t.content, f.name, f.size, f.state, f.progress, f.path, f.origin_path"
             " FROM bubble_entities b LEFT JOIN text_contents t ON t.id=b.id"
             " LEFT JOIN file_contents f ON f.id=b.id"
             " ORDER BY b.time DESC LIMIT ?", (limit,))
         out = []
-        for (bid, frm, to, typ, ts, gid, text, fname, fsize, fstate, fprog) in cur.fetchall():
+        for (bid, frm, to, typ, ts, gid, text, fname, fsize, fstate, fprog,
+             fpath, forigin) in cur.fetchall():
             item = {"id": bid, "from": frm, "to": to, "type": typ, "time": ts, "groupId": gid}
             if text is not None:
                 item["content"] = text
             elif fname is not None:
-                item["content"] = {"name": fname, "size": fsize, "state": fstate,
-                                   "progress": fprog}
+                content = {"name": fname, "size": fsize, "state": fstate,
+                           "progress": fprog}
+                # The UI needs the landed file to render an image bubble or to
+                # open the attachment; without it a received picture is just a
+                # name string.
+                if fpath:
+                    content["path"] = fpath
+                if forigin:
+                    content["originPath"] = forigin
+                item["content"] = content
             out.append(item)
         return out
 
