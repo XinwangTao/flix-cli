@@ -5,6 +5,8 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+build_new/
+dist_new/
 
 # Reverse-engineering artifacts (large / sensitive: captures, pool dumps, node state)
 reverse/*.json
