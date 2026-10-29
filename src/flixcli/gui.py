@@ -19,12 +19,14 @@ from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QSize, QThread, QTimer, Qt, Signal
+from PySide6.QtCore import (
+    QEasingCurve, QEvent, QPoint, QPropertyAnimation, QSize, QThread, QTimer, Qt, Signal,
+)
 from PySide6.QtGui import QColor, QFont, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QPushButton,
-    QScrollArea, QSizePolicy, QStackedWidget, QStatusBar, QTextEdit,
+    QScrollArea, QSizePolicy, QStackedWidget, QStatusBar, QSystemTrayIcon, QTextEdit,
     QVBoxLayout, QWidget,
 )
 
@@ -34,6 +36,141 @@ from .presence import is_online
 
 class ApiError(RuntimeError):
     pass
+
+
+def pick_notification(bubbles: list[dict], previous_ids, self_id: str, *,
+                      active: bool, enabled: bool) -> dict | None:
+    """Which bubble deserves a toast, or None when we stay quiet.
+
+    `previous_ids is None` means this is the very first poll: seed only.
+    """
+    if previous_ids is None or not enabled or active:
+        return None
+    fresh = [b for b in bubbles
+             if b.get("id") not in previous_ids and b.get("from") != self_id]
+    if not fresh:
+        return None
+    return max(fresh, key=lambda b: b.get("time") or 0)
+
+
+def notification_text(bubble: dict, devices: list[dict]) -> tuple[str, str]:
+    sender = bubble.get("from") or ""
+    alias = next((d.get("alias") for d in devices
+                  if d.get("fingerprint") == sender), "")
+    alias = alias or sender[:8] or "新消息"
+    content = bubble.get("content")
+    if isinstance(content, dict):
+        body = "▤ " + str(content.get("name") or "文件")
+    else:
+        body = str(content or "")
+    body = " ".join(body.split())[:120] or "（空消息）"
+    title = f"{alias} · 群消息" if bubble.get("groupId") else alias
+    return title, body
+
+
+TOAST_W, TOAST_H, TOAST_MARGIN, TOAST_GAP = 340, 86, 18, 10
+
+
+def toast_position(area: tuple[int, int, int, int], index: int, *,
+                   w: int = TOAST_W, h: int = TOAST_H,
+                   margin: int = TOAST_MARGIN, gap: int = TOAST_GAP) -> tuple[int, int]:
+    """Top-left corner of the index-th toast, stacked up from the corner.
+
+    `area` is (x, y, width, height) of a screen's available geometry, so this
+    stays testable without Qt.
+    """
+    ax, ay, aw, ah = area
+    return (ax + aw - w - margin, ay + ah - h - margin - index * (h + gap))
+
+
+class Toast(QWidget):
+    """Bottom-right notification card drawn by the app itself.
+
+    Windows quietly drops Shell_NotifyIcon balloons on plenty of machines (no
+    AppUserModelID, notifications muted at the OS level), and on this box
+    `QSystemTrayIcon.showMessage` produced nothing at all. Drawing the card
+    ourselves makes the toast independent of shell settings.
+    """
+
+    closed = Signal()
+
+    def __init__(self, title: str, body: str, *, dark: bool, on_click=None):
+        super().__init__(None, Qt.Tool | Qt.FramelessWindowHint
+                         | Qt.WindowStaysOnTopHint | Qt.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setFixedSize(TOAST_W, TOAST_H)
+        self._on_click = on_click
+        self._closing = False
+        bg = "rgba(28,31,38,0.97)" if dark else "rgba(255,255,255,0.98)"
+        border = "rgba(255,255,255,0.12)" if dark else "rgba(15,20,30,0.10)"
+        fg = "#f2f4f8" if dark else "#1b1e24"
+        sub = "#9aa4b2" if dark else "#5b6472"
+        accent = "#5b9cf5" if dark else "#2f6fd0"
+
+        card = QFrame(self)
+        card.setObjectName("toastCard")
+        card.setGeometry(0, 0, TOAST_W, TOAST_H)
+        card.setStyleSheet(
+            f"#toastCard {{ background: {bg}; border: 1px solid {border};"
+            " border-radius: 14px; }")
+        inner = QVBoxLayout(card)
+        inner.setContentsMargins(16, 12, 16, 12)
+        inner.setSpacing(4)
+        head = QLabel(title)
+        head.setStyleSheet(f"color: {accent}; font-size: 12px; font-weight: 600;")
+        text = QLabel(body)
+        text.setStyleSheet(f"color: {fg}; font-size: 13px;")
+        text.setWordWrap(True)
+        text.setMaximumHeight(40)
+        hint = QLabel("点击打开 RelayDesk")
+        hint.setStyleSheet(f"color: {sub}; font-size: 11px;")
+        inner.addWidget(head)
+        inner.addWidget(text, 1)
+        inner.addWidget(hint)
+
+        self._slide = QPropertyAnimation(self, b"pos", self)
+        self._slide.setDuration(160)
+        self._slide.setEasingCurve(QEasingCurve.OutCubic)
+
+    def fade_in(self):
+        """Show with a slide-in.
+
+        Deliberately not a `windowOpacity` animation: on Windows that collides
+        with `WA_TranslucentBackground` (SetLayeredWindowAttributes vs Qt's
+        per-pixel alpha path) and the window ends up on screen but unpainted.
+        """
+        target = self.pos()
+        self.move(target.x() + 24, target.y())
+        self.show()
+        self._slide.stop()
+        self._slide.setStartValue(self.pos())
+        self._slide.setEndValue(target)
+        self._slide.start()
+
+    def start_lifetime(self, msecs: int = 5000):
+        QTimer.singleShot(msecs, self.dismiss)
+
+    def dismiss(self):
+        if self._closing:
+            return
+        self._closing = True
+        out = QPropertyAnimation(self, b"pos", self)
+        out.setDuration(140)
+        out.setStartValue(self.pos())
+        out.setEndValue(self.pos() + QPoint(24, 0))
+        out.finished.connect(self.close)
+        self._slide = out
+        out.start()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self._on_click is not None:
+            self._on_click()
+        self.dismiss()
+
+    def closeEvent(self, event):
+        super().closeEvent(event)
+        self.closed.emit()
 
 
 class LocalApi:
@@ -237,6 +374,9 @@ class MainWindow(QMainWindow):
         self.media_seq = 0
         self._drag_pos: QPoint | None = None
         self.offline_mode = False
+        self._seen_bubbles: set[str] | None = None
+        self._tray = None
+        self._toasts: list[Toast] = []
         self.setWindowTitle("RelayDesk")
         self.resize(1280, 840)
         self.setMinimumSize(980, 640)
@@ -789,6 +929,83 @@ class MainWindow(QMainWindow):
     def _toggle_notify(self, on: bool):
         self._save_prefs(notify=bool(on))
 
+    # ---------- notifications ----------
+
+    def ensure_tray(self):
+        if self._tray is not None:
+            return self._tray
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return None
+        tray = QSystemTrayIcon(logo_icon(), self)
+        tray.setToolTip("RelayDesk")
+        menu = QMenu(self)
+        menu.addAction("打开主窗口", self.restore_from_tray)
+        menu.addAction("退出 RelayDesk", self.close)
+        tray.setContextMenu(menu)
+        tray.activated.connect(lambda _reason: self.restore_from_tray())
+        tray.show()
+        self._tray = tray
+        return tray
+
+    def restore_from_tray(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def window_is_attended(self) -> bool:
+        """True only when the user is actually looking at the chat.
+
+        `isActiveWindow()` alone is not enough: a window minimised by the shell
+        can keep reporting itself as the active one, which silently swallowed
+        every toast while the app sat in the taskbar.
+        """
+        return bool(self.isVisible()) and not self.isMinimized() \
+            and self.isActiveWindow()
+
+    def notify_new_bubbles(self, bubbles: list[dict]):
+        """Toast for messages that arrived since the last poll.
+
+        The first poll only seeds the id set: without that a fresh start would
+        fire one toast per message already in the store.
+        """
+        seen = {b.get("id") for b in bubbles if b.get("id")}
+        previous, self._seen_bubbles = self._seen_bubbles, seen
+        chosen = pick_notification(
+            bubbles, previous, self.self_id,
+            active=self.window_is_attended(),
+            enabled=self._load_prefs().get("notify", True) is not False)
+        if chosen is not None:
+            self.show_tray_message(chosen)
+
+    def show_tray_message(self, bubble: dict):
+        """Pop one notification card. The tray icon stays for menu/restore."""
+        self.ensure_tray()
+        title, body = notification_text(bubble, self.payload.get("devices") or [])
+        while len(self._toasts) >= 3:  # never pile up more than three
+            self._toasts[0].dismiss()
+            self._drop_toast(self._toasts[0])
+        toast = Toast(title, body, dark=self.theme == "dark",
+                      on_click=self.restore_from_tray)
+        toast.closed.connect(lambda t=toast: self._drop_toast(t))
+        self._toasts.append(toast)
+        self._place_toasts()
+        toast.fade_in()
+        toast.start_lifetime(5000)
+
+    def _drop_toast(self, toast: Toast):
+        if toast in self._toasts:
+            self._toasts.remove(toast)
+        self._place_toasts()
+
+    def _place_toasts(self):
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return
+        geo = screen.availableGeometry()
+        area = (geo.x(), geo.y(), geo.width(), geo.height())
+        for index, toast in enumerate(self._toasts):
+            toast.move(*toast_position(area, index))
+
     def toggle_theme(self):
         self.apply_theme("dark" if self.theme == "light" else "light")
         self._sync_theme_button()
@@ -880,6 +1097,7 @@ class MainWindow(QMainWindow):
     def apply_overview(self, payload: dict):
         self.payload = payload
         self.self_id = (payload.get("self") or {}).get("id", "")
+        self.notify_new_bubbles(payload.get("bubbles") or [])
         self.connection_dot.setProperty("online", True)
         self.connection_dot.style().unpolish(self.connection_dot)
         self.connection_dot.style().polish(self.connection_dot)

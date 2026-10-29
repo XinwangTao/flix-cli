@@ -100,6 +100,11 @@ class Store:
     def __init__(self, path: Path | None = None):
         ensure_dirs()
         self.path = Path(path) if path else DB_PATH
+        # Prefs sit next to the database. A test that opens a temp database must
+        # not rewrite the real install's prefs — that is how a temp saveDir and
+        # a 32-byte receive cap once leaked into production.
+        self.prefs_path = (PREFS_PATH if path is None
+                           else self.path.with_name("shared_preferences.json"))
         self.con = sqlite3.connect(self.path, timeout=2.0)
         with contextlib.suppress(Exception):
             self.con.execute("PRAGMA journal_mode=WAL")
@@ -316,26 +321,26 @@ class Store:
 
     # -- prefs ---------------------------------------------------------------
     def prefs(self) -> dict:
-        if not PREFS_PATH.exists():
+        if not self.prefs_path.exists():
             return {}
         try:
-            return json.loads(PREFS_PATH.read_text(encoding="utf-8"))
+            return json.loads(self.prefs_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             # Keep the damaged file for inspection instead of overwriting it.
-            bad = PREFS_PATH.with_name(
-                f"{PREFS_PATH.name}.bad-{int(time.time())}")
+            bad = self.prefs_path.with_name(
+                f"{self.prefs_path.name}.bad-{int(time.time())}")
             with contextlib.suppress(OSError):
-                PREFS_PATH.replace(bad)
+                self.prefs_path.replace(bad)
             print(f"[flixcli] prefs unreadable, moved to {bad}", file=sys.stderr)
             return {}
 
     def set_pref(self, key: str, value) -> None:
         p = self.prefs()
         p[key] = value
-        tmp = PREFS_PATH.with_suffix(".json.tmp")
+        tmp = self.prefs_path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(p, ensure_ascii=False, indent=1),
                        encoding="utf-8")
-        os.replace(tmp, PREFS_PATH)
+        os.replace(tmp, self.prefs_path)
 
     def close(self) -> None:
         with contextlib.suppress(Exception):

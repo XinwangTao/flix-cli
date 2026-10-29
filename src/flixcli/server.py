@@ -55,9 +55,14 @@ def _save_dir(store) -> str:
 def _max_file_bytes(store) -> int:
     value = store.prefs().get("max_receive_bytes", DEFAULT_MAX_FILE_BYTES)
     try:
-        return max(1, min(int(value), DEFAULT_MAX_FILE_BYTES))
+        declared = int(value)
     except (TypeError, ValueError):
         return DEFAULT_MAX_FILE_BYTES
+    # 0 (or a negative) must mean "no explicit cap". Clamping it to 1 byte made
+    # every incoming file fail on the receiving side with no visible error.
+    if declared <= 0:
+        return DEFAULT_MAX_FILE_BYTES
+    return min(declared, DEFAULT_MAX_FILE_BYTES)
 
 
 def _safe_destination(store, name: str) -> tuple[str, str] | None:
