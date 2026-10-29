@@ -1,0 +1,314 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RelayDesk v2L：单文件启动与自愈",
+    "locale": "zh-CN",
+    "level": "L1",
+    "status": "已实现（随 v2.2.0 交付）",
+    "date": "2026-10-29",
+    "quality_profile": "showcase",
+    "confirmed_by": "用户「集成为一个软件」（2026-10-29）"
+  },
+  "scope": {
+    "in": [
+      "一个 RelayDesk.exe 同时承担 客户端 / 后台服务 / MCP 三种角色",
+      "无参数开窗口，带参数走 CLI（serve、mcp 及其它命令）",
+      "窗口首次连不上本机服务时自动拉起一次，3.5 秒后重连",
+      "拉起失败才落到离线页，手动按钮保留"
+    ],
+    "out": [
+      "窗口进程内直接跑后台服务（会改变「关掉窗口仍可收消息」的语义）",
+      "自动更新 / 自下载新版本",
+      "把官方 Flix 客户端也合并进来"
+    ]
+  },
+  "canvas": {
+    "width": 1240,
+    "height": 620
+  },
+  "lanes": [
+    {
+      "id": "ui",
+      "label": "桌面窗口"
+    },
+    {
+      "id": "proc",
+      "label": "本机进程"
+    },
+    {
+      "id": "exits",
+      "label": "边界"
+    }
+  ],
+  "bands": [
+    {
+      "lane": "ui",
+      "y": 64,
+      "h": 140
+    },
+    {
+      "lane": "proc",
+      "y": 224,
+      "h": 150
+    },
+    {
+      "lane": "exits",
+      "y": 404,
+      "h": 130
+    }
+  ],
+  "mainPath": [
+    "launch",
+    "discover",
+    "spawn",
+    "ready"
+  ],
+  "nodes": [
+    {
+      "id": "launch",
+      "lane": "ui",
+      "type": "process",
+      "status": "new",
+      "x": 60,
+      "y": 96,
+      "w": 250,
+      "h": 78,
+      "label": "双击 RelayDesk.exe",
+      "sublabel": "同一个文件，按有没有参数分流"
+    },
+    {
+      "id": "discover",
+      "lane": "ui",
+      "type": "process",
+      "status": "unchanged",
+      "x": 370,
+      "y": 96,
+      "w": 260,
+      "h": 78,
+      "label": "探测本机服务",
+      "sublabel": "8898 / 18998 / 19098 …"
+    },
+    {
+      "id": "mcp",
+      "lane": "proc",
+      "type": "process",
+      "status": "new",
+      "x": 60,
+      "y": 256,
+      "w": 250,
+      "h": 78,
+      "label": "RelayDesk.exe mcp",
+      "sublabel": "AI 客户端注册的 stdio 服务"
+    },
+    {
+      "id": "spawn",
+      "lane": "proc",
+      "type": "process",
+      "status": "new",
+      "x": 370,
+      "y": 256,
+      "w": 260,
+      "h": 78,
+      "label": "RelayDesk.exe serve",
+      "sublabel": "窗口派生自己，不再依赖 flixd.exe"
+    },
+    {
+      "id": "ready",
+      "lane": "proc",
+      "type": "process",
+      "status": "new",
+      "x": 690,
+      "y": 256,
+      "w": 260,
+      "h": 78,
+      "label": "服务就绪",
+      "sublabel": "8891/8898 或 18991/18998"
+    },
+    {
+      "id": "offline",
+      "lane": "exits",
+      "type": "security",
+      "status": "unchanged",
+      "x": 60,
+      "y": 434,
+      "w": 330,
+      "h": 76,
+      "label": "离线页",
+      "sublabel": "只自动拉一次；再失败就交回手动按钮"
+    }
+  ],
+  "edges": [
+    {
+      "from": "launch",
+      "to": "discover",
+      "kind": "main",
+      "label": "无参数",
+      "labelAt": [
+        345,
+        114
+      ],
+      "points": [
+        [
+          310,
+          135
+        ],
+        [
+          370,
+          135
+        ]
+      ]
+    },
+    {
+      "from": "launch",
+      "to": "mcp",
+      "kind": "diag",
+      "label": "带参数",
+      "labelAt": [
+        205,
+        210
+      ],
+      "points": [
+        [
+          185,
+          174
+        ],
+        [
+          185,
+          256
+        ]
+      ]
+    },
+    {
+      "from": "discover",
+      "to": "spawn",
+      "kind": "main",
+      "label": "首次连不上",
+      "labelAt": [
+        515,
+        210
+      ],
+      "points": [
+        [
+          500,
+          174
+        ],
+        [
+          500,
+          256
+        ]
+      ]
+    },
+    {
+      "from": "spawn",
+      "to": "ready",
+      "kind": "main",
+      "label": "同一 exe",
+      "labelAt": [
+        665,
+        274
+      ],
+      "points": [
+        [
+          630,
+          295
+        ],
+        [
+          690,
+          295
+        ]
+      ]
+    },
+    {
+      "from": "ready",
+      "to": "discover",
+      "kind": "diag",
+      "label": "3.5 秒后重连",
+      "labelAt": [
+        700,
+        168
+      ],
+      "points": [
+        [
+          820,
+          256
+        ],
+        [
+          820,
+          190
+        ],
+        [
+          560,
+          190
+        ],
+        [
+          560,
+          174
+        ]
+      ]
+    },
+    {
+      "from": "discover",
+      "to": "offline",
+      "kind": "diag",
+      "label": "已试过或拉起失败",
+      "labelAt": [
+        420,
+        400
+      ],
+      "points": [
+        [
+          420,
+          174
+        ],
+        [
+          420,
+          470
+        ],
+        [
+          390,
+          470
+        ]
+      ]
+    }
+  ],
+  "changes": [
+    {
+      "node": "launch",
+      "level": "新增",
+      "text": "一个 exe 三种角色：无参数开窗口，带参数进 CLI。用户侧只有一个文件，不存在「新版客户端配旧版守护进程」。"
+    },
+    {
+      "node": "mcp",
+      "level": "新增",
+      "text": "MCP 注册地址从 flix.exe 改成 RelayDesk.exe mcp；窗口型 exe 的 stdio 实测可用（22 个工具正常返回）。"
+    },
+    {
+      "node": "spawn",
+      "level": "新增",
+      "text": "窗口发现连不上时派生自己（RelayDesk.exe serve），仍用独立进程而不是线程内跑——这样「关掉窗口照样收消息」的语义不变。"
+    },
+    {
+      "node": "offline",
+      "level": "变更",
+      "text": "以前双击后停在离线页等用户点按钮；现在自动拉一次，失败才回到离线页，按钮作为重试入口保留。"
+    }
+  ],
+  "cards": [
+    {
+      "kind": "note",
+      "title": "为什么不在窗口进程里跑服务",
+      "body": "线程内跑最省事，但窗口一关就收不到消息——这是现有用户已经依赖的行为（后台接收、退出界面仍可收消息）。所以保留两个进程，只是让它们来自同一个文件。"
+    },
+    {
+      "kind": "note",
+      "title": "端口不变",
+      "body": "默认仍让开 8891/8898 给官方 Flix，自己用 18991/18998；窗口会自动探测并连上实际端口。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 · 自动拉起失败",
+      "body": "端口被占、exe 被删、权限不足都会走到离线页；日志在 %APPDATA%\\flixcli\\flixd-gui-started.log。"
+    }
+  ]
+}
