@@ -374,6 +374,7 @@ class MainWindow(QMainWindow):
         self.media_seq = 0
         self._drag_pos: QPoint | None = None
         self.offline_mode = False
+        self._auto_start_tried = False
         self._seen_bubbles: set[str] | None = None
         self._tray = None
         self._toasts: list[Toast] = []
@@ -645,13 +646,12 @@ class MainWindow(QMainWindow):
         flags = 0
         if sys.platform == "win32":
             flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
-        # A frozen RelayDesk.exe is windowed and does not implement
-        # "-m flixcli.cli", so re-spawning itself would fail silently with no
-        # console to show why. Use the packaged flixd.exe beside it; only a
-        # source checkout falls back to the module form.
-        sibling = Path(sys.executable).with_name("flixd.exe")
-        if getattr(sys, "frozen", False) and sibling.exists():
-            cmd = [str(sibling)]
+        # One binary does both jobs: a frozen RelayDesk re-spawns *itself* with
+        # `serve` (this is why launch_relaydesk.py routes arguments to the CLI).
+        # Older builds needed a sibling flixd.exe, which is how users ended up
+        # with a mismatched daemon.
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "serve"]
         else:
             cmd = [sys.executable, "-m", "flixcli.cli", "serve"]
         subprocess.Popen(
@@ -1907,6 +1907,13 @@ class MainWindow(QMainWindow):
             self.offline_mode = False
             self.statusBar().showMessage(f"已连接本机服务 :{self.api_port}")
             self.refresh()
+            return
+        if not getattr(self, "_auto_start_tried", False):
+            # One software = double-click and it works. Spawn the background
+            # service once by itself; the offline page stays as the fallback
+            # when that fails, with the manual button still there.
+            self._auto_start_tried = True
+            self.start_local_daemon()
             return
         self.workspace_stack.setCurrentIndex(6)
         self.statusBar().showMessage(
