@@ -14,7 +14,8 @@
     "in": [
       "设备会话的 ⋯ 菜单新增「与这台设备配对」，已配对时置灰",
       "守护进程新增 POST /api/pair，握手与 flix pair 命令行完全一致",
-      "把 301/302 回包翻译成看得懂的中文提示"
+      "把 301/302 回包翻译成看得懂的中文提示",
+      "配对成功后，把该设备所属的群快照重新推一遍（两端都做）"
     ],
     "out": [
       "自动接受配对（对端必须有人点「接受」）",
@@ -22,102 +23,290 @@
       "二维码扫码配对（安卓端已有）"
     ]
   },
-  "canvas": { "width": 1240, "height": 700 },
+  "canvas": {
+    "width": 1240,
+    "height": 700
+  },
   "lanes": [
-    { "id": "ui", "label": "桌面界面" },
-    { "id": "daemon", "label": "本机守护进程" },
-    { "id": "peer", "label": "对端设备" },
-    { "id": "exits", "label": "边界" }
+    {
+      "id": "ui",
+      "label": "桌面界面"
+    },
+    {
+      "id": "daemon",
+      "label": "本机守护进程"
+    },
+    {
+      "id": "peer",
+      "label": "对端设备"
+    },
+    {
+      "id": "exits",
+      "label": "边界"
+    }
   ],
   "bands": [
-    { "lane": "ui", "y": 64, "h": 140 },
-    { "lane": "daemon", "y": 224, "h": 150 },
-    { "lane": "peer", "y": 394, "h": 130 },
-    { "lane": "exits", "y": 544, "h": 130 }
+    {
+      "lane": "ui",
+      "y": 64,
+      "h": 140
+    },
+    {
+      "lane": "daemon",
+      "y": 224,
+      "h": 150
+    },
+    {
+      "lane": "peer",
+      "y": 394,
+      "h": 130
+    },
+    {
+      "lane": "exits",
+      "y": 544,
+      "h": 130
+    }
   ],
-  "mainPath": ["pick", "api", "ask", "prompt", "confirm", "store"],
+  "mainPath": [
+    "pick",
+    "api",
+    "ask",
+    "prompt",
+    "confirm",
+    "store"
+  ],
   "nodes": [
     {
-      "id": "pick", "lane": "ui", "type": "process", "status": "new",
-      "x": 60, "y": 96, "w": 250, "h": 78,
+      "id": "pick",
+      "lane": "ui",
+      "type": "process",
+      "status": "new",
+      "x": 60,
+      "y": 96,
+      "w": 250,
+      "h": 78,
       "label": "⋯ → 与这台设备配对",
       "sublabel": "已配对时按钮置灰"
     },
     {
-      "id": "api", "lane": "daemon", "type": "process", "status": "new",
-      "x": 60, "y": 256, "w": 250, "h": 78,
+      "id": "api",
+      "lane": "daemon",
+      "type": "process",
+      "status": "new",
+      "x": 60,
+      "y": 256,
+      "w": 250,
+      "h": 78,
       "label": "POST /api/pair",
       "sublabel": "{to: 指纹或 ip[:port]}"
     },
     {
-      "id": "ask", "lane": "daemon", "type": "process", "status": "unchanged",
-      "x": 360, "y": 256, "w": 260, "h": 78,
+      "id": "ask",
+      "lane": "daemon",
+      "type": "process",
+      "status": "unchanged",
+      "x": 360,
+      "y": 256,
+      "w": 260,
+      "h": 78,
       "label": "askPairDevice",
       "sublabel": "verifyDevice=对端指纹 · 6 秒"
     },
     {
-      "id": "prompt", "lane": "peer", "type": "process", "status": "unchanged",
-      "x": 360, "y": 424, "w": 260, "h": 78,
+      "id": "prompt",
+      "lane": "peer",
+      "type": "process",
+      "status": "unchanged",
+      "x": 360,
+      "y": 424,
+      "w": 260,
+      "h": 78,
       "label": "对端弹「配对请求」",
       "sublabel": "必须有可见界面，否则默认拒绝"
     },
     {
-      "id": "confirm", "lane": "peer", "type": "process", "status": "unchanged",
-      "x": 680, "y": 424, "w": 250, "h": 78,
+      "id": "confirm",
+      "lane": "peer",
+      "type": "process",
+      "status": "unchanged",
+      "x": 680,
+      "y": 424,
+      "w": 250,
+      "h": 78,
       "label": "点「接受」",
       "sublabel": "回 confirmPairDevice"
     },
     {
-      "id": "store", "lane": "daemon", "type": "process", "status": "new",
-      "x": 680, "y": 256, "w": 250, "h": 78,
+      "id": "store",
+      "lane": "daemon",
+      "type": "process",
+      "status": "new",
+      "x": 680,
+      "y": 256,
+      "w": 250,
+      "h": 78,
       "label": "写 pair_devices",
-      "sublabel": "并推 pairChanged 刷新界面"
+      "sublabel": "并推 pairChanged · 补推所属群的快照"
     },
     {
-      "id": "exits", "lane": "exits", "type": "security", "status": "new",
-      "x": 300, "y": 580, "w": 640, "h": 70,
+      "id": "exits",
+      "lane": "exits",
+      "type": "security",
+      "status": "new",
+      "x": 300,
+      "y": 580,
+      "w": 640,
+      "h": 70,
       "label": "边界",
       "sublabel": "301 无人确认 · 302 指纹不匹配 · 不可达 / 超时"
     }
   ],
   "edges": [
     {
-      "from": "pick", "to": "api", "kind": "main", "label": "点击",
-      "labelAt": [160, 200], "points": [[185, 174], [185, 256]]
+      "from": "pick",
+      "to": "api",
+      "kind": "main",
+      "label": "点击",
+      "labelAt": [
+        160,
+        200
+      ],
+      "points": [
+        [
+          185,
+          174
+        ],
+        [
+          185,
+          256
+        ]
+      ]
     },
     {
-      "from": "api", "to": "ask", "kind": "main", "label": "解析目标",
-      "labelAt": [335, 274], "points": [[310, 295], [360, 295]]
+      "from": "api",
+      "to": "ask",
+      "kind": "main",
+      "label": "解析目标",
+      "labelAt": [
+        335,
+        274
+      ],
+      "points": [
+        [
+          310,
+          295
+        ],
+        [
+          360,
+          295
+        ]
+      ]
     },
     {
-      "from": "ask", "to": "prompt", "kind": "main", "label": "HTTP /intent",
-      "labelAt": [470, 360], "points": [[490, 334], [490, 424]]
+      "from": "ask",
+      "to": "prompt",
+      "kind": "main",
+      "label": "HTTP /intent",
+      "labelAt": [
+        470,
+        360
+      ],
+      "points": [
+        [
+          490,
+          334
+        ],
+        [
+          490,
+          424
+        ]
+      ]
     },
     {
-      "from": "prompt", "to": "confirm", "kind": "main", "label": "接受",
-      "labelAt": [650, 446], "points": [[620, 463], [680, 463]]
+      "from": "prompt",
+      "to": "confirm",
+      "kind": "main",
+      "label": "接受",
+      "labelAt": [
+        650,
+        446
+      ],
+      "points": [
+        [
+          620,
+          463
+        ],
+        [
+          680,
+          463
+        ]
+      ]
     },
     {
-      "from": "confirm", "to": "store", "kind": "main", "label": "确认回包",
-      "labelAt": [760, 360], "points": [[805, 424], [805, 334]]
+      "from": "confirm",
+      "to": "store",
+      "kind": "main",
+      "label": "确认回包",
+      "labelAt": [
+        760,
+        360
+      ],
+      "points": [
+        [
+          805,
+          424
+        ],
+        [
+          805,
+          334
+        ]
+      ]
     },
     {
-      "from": "ask", "to": "exits", "kind": "diag", "label": "301 / 302 / 超时",
-      "labelAt": [610, 540], "points": [[490, 334], [490, 615], [300, 615]]
+      "from": "ask",
+      "to": "exits",
+      "kind": "diag",
+      "label": "301 / 302 / 超时",
+      "labelAt": [
+        610,
+        540
+      ],
+      "points": [
+        [
+          490,
+          334
+        ],
+        [
+          490,
+          615
+        ],
+        [
+          300,
+          615
+        ]
+      ]
     }
   ],
   "changes": [
     {
-      "node": "pick", "level": "新增",
+      "node": "pick",
+      "level": "新增",
       "text": "设备会话的 ⋯ 菜单里加「与这台设备配对」；已配对的设备显示「已配对 · 无需再配」并置灰，避免重复打扰对方。"
     },
     {
-      "node": "api", "level": "新增",
+      "node": "api",
+      "level": "新增",
       "text": "守护进程新增 /api/pair，内部走与 `flix pair` 相同的一次 ping_v2 后 askPairDevice；成功后写 pair_devices 并推 pairChanged。"
     },
     {
-      "node": "store", "level": "新增",
+      "node": "store",
+      "level": "新增",
       "text": "301/302 这类 Dart map 回包翻译成中文提示，不再把 `pair Device Null` 直接丢给用户。"
+    },
+    {
+      "node": "store",
+      "level": "新增",
+      "text": "配对成功后再补推一次「该设备所属的群」快照：此前的快照都被信任门拦掉了，不补的话要等到下一次改名/加人才会同步。安卓端同样处理（resyncGroupsTo）。"
     }
   ],
   "cards": [

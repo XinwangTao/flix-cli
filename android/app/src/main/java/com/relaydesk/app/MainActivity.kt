@@ -1202,6 +1202,20 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    /**
+     * A device that just paired was not trusted when earlier snapshots went
+     * out, so every group it belongs to is silently out of date on its side.
+     * Re-push those snapshots now that the trust gate will let them through.
+     */
+    private fun resyncGroupsTo(peerFp: String) {
+        if (peerFp.isEmpty()) return
+        val gids = store.groups().map { it.optString("id") }
+            .filter { store.groupMembers(it).contains(peerFp) }
+        if (gids.isEmpty()) return
+        gids.forEach { pushGroupSync(it) }
+        toast("已向新配对设备补推 ${gids.size} 个群")
+    }
+
     /** Write the local snapshot (self included) then broadcast it to members. */
     private fun pushGroupSync(gid: String, newName: String? = null) {
         if (store.isGroupLeft(gid)) return
@@ -1513,6 +1527,7 @@ class MainActivity : Activity() {
                         store.addPair(fp, myKey)
                         toast("已配对 $msg")
                         refreshDevices()
+                        resyncGroupsTo(fp)
                         store.devices().firstOrNull { it.optString("fingerprint") == fp }
                             ?.let { openChat(it) }
                     } else toast("配对被拒：$msg")
@@ -2062,6 +2077,7 @@ class MainActivity : Activity() {
                         store.addPair(peer.optString("fingerprint"), myKey)
                         pairButton.visibility = View.GONE
                         toast("已配对 $msg")
+                        resyncGroupsTo(peer.optString("fingerprint"))
                     } else toast("配对被拒：$msg")
                 }
             } catch (e: Exception) {

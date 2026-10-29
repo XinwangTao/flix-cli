@@ -129,6 +129,12 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
         if ok:
             store.add_pair(peer_fp, store.own_pair_key())
             publish({"type": "pairChanged", "payload": {"fingerprint": peer_fp}})
+            # The peer was untrusted when earlier snapshots went out, so any
+            # group it belongs to is stale on its side until someone edits it.
+            from .groupchat import update_group
+            for group in store.groups():
+                if peer_fp in group["members"]:
+                    await update_group(store, ident, group["id"])
         else:
             # Official replies are `{301: pair Device Null}` / `{302: ...}` —
             # useless to a GUI user without a translation.

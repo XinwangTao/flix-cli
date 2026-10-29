@@ -64,6 +64,30 @@ class PairApiTests(unittest.IsolatedAsyncioTestCase):
         resp = await self.client.post("/api/pair", json={"to": "nope-nope"})
         self.assertEqual(resp.status, 404)
 
+    async def test_pair_repushes_groups_the_peer_belongs_to(self):
+        from flixcli import groupchat
+        self.store.create_group("g-1", "研发群")
+        self.store.add_group_member("g-1", "fp-me")
+        self.store.add_group_member("g-1", PEER)
+        sent = []
+
+        async def fake_pair(*args, **kwargs):
+            return 0, "{0: success}"
+
+        async def fake_post(ip, intent, port=8891, timeout=8.0):
+            sent.append((ip, intent))
+            return "{0: success}"
+
+        with mock.patch.object(channel, "pair_device", fake_pair), \
+                mock.patch.object(groupchat, "post_intent", fake_post):
+            resp = await self.client.post("/api/pair", json={"to": PEER})
+            body = await resp.json()
+        self.assertEqual(resp.status, 200, body)
+        syncs = [i for _ip, i in sent if i.get("action") == "rdGroupSync"]
+        self.assertEqual(len(syncs), 1, sent)
+        self.assertEqual(syncs[0]["extra"]["groupId"], "g-1")
+        self.assertIn(PEER, syncs[0]["extra"]["members"])
+
 
 if __name__ == "__main__":
     unittest.main()
