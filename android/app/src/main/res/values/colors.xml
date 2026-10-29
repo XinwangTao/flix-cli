@@ -1,10 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Light palette (v2E). Dark values live in values-night/colors.xml; the
+     Activity forces uiMode from prefs, so this is the user's choice and not the
+     system's. -->
 <resources>
-    <color name="bg">#090C12</color>
-    <color name="bgHeader">#0E1219</color>
-    <color name="bgPanel">#171B22</color>
-    <color name="bgBubbleIn">#252A33</color>
-    <color name="accent">#3478F6</color>
-    <color name="textPrimary">#EDF3FF</color>
-    <color name="textMuted">#8190A8</color>
+    <color name="bg">#F4F6F9</color>
+    <color name="bgHeader">#FFFFFF</color>
+    <color name="bgPanel">#FFFFFF</color>
+    <color name="bgBubbleIn">#E7EBF1</color>
+    <color name="accent">#2F6FED</color>
+    <color name="textPrimary">#12161D</color>
+    <color name="textMuted">#5C6B80</color>
+    <color name="textOnAccent">#FFFFFF</color>
+    <color name="online">#1B9A55</color>
+    <color name="mention">#A96300</color>
+    <color name="danger">#D33A4A</color>
+    <color name="bubbleTextFailed">#A61B2B</color>
+    <color name="senderName">#2A5FC0</color>
+    <color name="searchHighlight">#66FFB020</color>
+    <color name="divider">#DCE1E9</color>
 </resources>

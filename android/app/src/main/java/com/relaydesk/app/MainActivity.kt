@@ -9,21 +9,26 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.text.SpannableString
 import android.text.Spanned
+import android.text.style.BackgroundColorSpan
 import android.text.style.ForegroundColorSpan
 import android.text.style.StyleSpan
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.inputmethod.InputMethodManager
 import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.EditText
@@ -77,6 +82,19 @@ class MainActivity : Activity() {
     private lateinit var attachButton: TextView
     private var currentPeer: JSONObject? = null
     private var currentGroup: JSONObject? = null
+    // dual pane (v2E): wide screens keep the list beside the chat
+    private var dualPane = false
+    private lateinit var paneHint: TextView
+    private lateinit var paneDivider: View
+
+    // settings screen (v2D)
+    private lateinit var settingsScreen: LinearLayout
+    private lateinit var settingsBody: LinearLayout
+    // in-conversation search (v2D)
+    private lateinit var searchRow: LinearLayout
+    private lateinit var searchEdit: EditText
+    private lateinit var searchCount: TextView
+    private var messageQuery = ""
     // Open 群设置 dialog + the group it edits, so a peer snapshot can rebuild it.
     private var groupDialog: AlertDialog? = null
     private var groupDialogGid: String? = null
@@ -91,6 +109,8 @@ class MainActivity : Activity() {
     }
 
     private val ATTACH_REQUEST = 41
+    private val SAVE_AS_REQUEST = 43
+    private var saveAsMessage: JSONObject? = null
 
     private companion object {
         const val ONLINE_TTL_MS = 90_000L
@@ -102,13 +122,63 @@ class MainActivity : Activity() {
             0xFFE0703B.toInt(), 0xFFC94F7C.toInt(), 0xFF3F9AE0.toInt())
     }
 
+    // ---------- theme (v2E) ----------
+
+    /** The user's choice, not the system's: forced into the Resources here. */
+    private fun wantsLightTheme(): Boolean =
+        getSharedPreferences("relaydesk", MODE_PRIVATE)
+            .getString("theme", "dark") == "light"
+
+    override fun attachBaseContext(newBase: Context) {
+        val light = newBase.getSharedPreferences("relaydesk", MODE_PRIVATE)
+            .getString("theme", "dark") == "light"
+        val cfg = Configuration(newBase.resources.configuration)
+        cfg.uiMode = (cfg.uiMode and Configuration.UI_MODE_NIGHT_MASK.inv()) or
+            (if (light) Configuration.UI_MODE_NIGHT_NO else Configuration.UI_MODE_NIGHT_YES)
+        super.attachBaseContext(newBase.createConfigurationContext(cfg))
+    }
+
+    /** A theme switch recreates the Activity: land back in the same chat. */
+    private fun restoreAfterRecreate() {
+        val peer = prefs.getString("restore_peer", "").orEmpty()
+        val group = prefs.getString("restore_group", "").orEmpty()
+        if (peer.isEmpty() && group.isEmpty()) return
+        prefs.edit().remove("restore_peer").remove("restore_group").apply()
+        if (group.isNotEmpty()) {
+            store.group(group)?.let { openGroupChat(it) }
+        } else {
+            store.devices().firstOrNull { it.optString("fingerprint") == peer }
+                ?.let { openChat(it) }
+        }
+    }
+
+    private fun switchTheme(light: Boolean) {
+        prefs.edit()
+            .putString("theme", if (light) "light" else "dark")
+            .putString("restore_peer", currentPeer?.optString("fingerprint").orEmpty())
+            .putString("restore_group", currentGroup?.optString("id").orEmpty())
+            .apply()
+        recreate()
+    }
+
+    /** Destructive confirms read as dangerous, not as a normal primary action. */
+    private fun AlertDialog.danger(): AlertDialog = apply {
+        getButton(AlertDialog.BUTTON_POSITIVE)?.setTextColor(getColor(R.color.danger))
+    }
+
+    private fun dlgTheme(): Int = if (wantsLightTheme())
+        android.R.style.Theme_Material_Light_Dialog_Alert
+    else android.R.style.Theme_Material_Dialog_Alert
+
     override fun onCreate(savedInstanceState: Bundle?) {
+        setTheme(if (wantsLightTheme()) R.style.Theme_RelayDesk_Light else R.style.Theme_RelayDesk)
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("relaydesk", MODE_PRIVATE)
         store = Store(this)
         fingerprint = Identity.fingerprint(this)
         alias = Identity.alias(this)
         buildUi()
+        restoreAfterRecreate()
         RelayService.start(this)
         if (android.os.Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
@@ -166,6 +236,9 @@ class MainActivity : Activity() {
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 
     private fun buildUi() {
+        val wide = resources.configuration.smallestScreenWidthDp >= 600
+        // Wide screens lose room to the chat pane, so the header tightens up.
+        val iconPad = if (wide) dp(8) else dp(13)
         val root = FrameLayout(this).apply { setBackgroundColor(getColor(R.color.bg)) }
 
         // -- device list screen --
@@ -181,29 +254,43 @@ class MainActivity : Activity() {
         }
         val brand = TextView(this).apply {
             text = "RelayDesk"
-            setTextColor(Color.WHITE); textSize = 22f; setTypeface(typeface, Typeface.BOLD)
+            setTextColor(getColor(R.color.textPrimary))
+            textSize = if (wide) 19f else 22f
+            setTypeface(typeface, Typeface.BOLD)
+            maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         val refresh = TextView(this).apply {
             text = "↻"; setTextColor(getColor(R.color.textMuted)); textSize = 20f
-            setPadding(dp(14), dp(6), dp(14), dp(6))
+            setPadding(iconPad, dp(6), iconPad, dp(6))
         }
         refresh.setOnClickListener {
             triggerRefresh()
         }
         val qr = TextView(this).apply {
             text = "▦"; setTextColor(getColor(R.color.textMuted)); textSize = 19f
-            setPadding(dp(12), dp(6), dp(6), dp(6))
+            setPadding(iconPad, dp(6), dp(6), dp(6))
         }
         qr.setOnClickListener { showQrDialog() }
         val add = TextView(this).apply {
             text = "+"; setTextColor(getColor(R.color.textMuted)); textSize = 22f
-            setPadding(dp(12), dp(6), dp(4), dp(6))
+            setPadding(iconPad, dp(6), dp(4), dp(6))
         }
         add.setOnClickListener {
             if (listMode == MODE_GROUPS) createGroupDialog() else manualAddDialog()
         }
-        listHeader.addView(brand); listHeader.addView(qr)
+        val readAll = TextView(this).apply {
+            text = "✓"; setTextColor(getColor(R.color.textMuted)); textSize = 17f
+            setPadding(iconPad, dp(6), iconPad, dp(6))
+        }
+        readAll.setOnClickListener { markAllRead() }
+        val settingsIcon = TextView(this).apply {
+            text = "⚙"; setTextColor(getColor(R.color.textMuted)); textSize = 18f
+            setPadding(iconPad, dp(6), iconPad, dp(6))
+        }
+        settingsIcon.setOnClickListener { openSettings() }
+        listHeader.addView(brand); listHeader.addView(settingsIcon)
+        listHeader.addView(readAll); listHeader.addView(qr)
         listHeader.addView(refresh); listHeader.addView(add)
 
         tabDevices = TextView(this).apply {
@@ -234,6 +321,10 @@ class MainActivity : Activity() {
             } else {
                 devicesAdapter.item(position)?.let { openChat(it) }
             }
+        }
+        deviceList.setOnItemLongClickListener { _, _, position, _ ->
+            showConversationMenu(position)
+            true
         }
         // Pull-to-refresh without an AndroidX dependency: a downward drag at
         // the top of the list re-announces and reloads.
@@ -291,7 +382,7 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
         }
         val back = TextView(this).apply {
-            text = "‹"; setTextColor(Color.WHITE); textSize = 26f
+            text = "‹"; setTextColor(getColor(R.color.textPrimary)); textSize = 26f
             setPadding(dp(8), dp(2), dp(14), dp(2))
         }
         back.setOnClickListener { closeChat() }
@@ -300,7 +391,7 @@ class MainActivity : Activity() {
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         chatTitle = TextView(this).apply {
-            setTextColor(Color.WHITE); textSize = 17f; setTypeface(typeface, Typeface.BOLD)
+            setTextColor(getColor(R.color.textPrimary)); textSize = 17f; setTypeface(typeface, Typeface.BOLD)
         }
         chatSubtitle = TextView(this).apply { setTextColor(getColor(R.color.textMuted)); textSize = 12f }
         titles.addView(chatTitle); titles.addView(chatSubtitle)
@@ -315,7 +406,13 @@ class MainActivity : Activity() {
             setPadding(dp(18), dp(4), dp(18), dp(4))
         }
         pairButton.setOnClickListener { pairCurrent() }
-        chatHeader.addView(back); chatHeader.addView(titles); chatHeader.addView(pairButton)
+        val searchToggle = TextView(this).apply {
+            text = "⌕"; setTextColor(getColor(R.color.textMuted)); textSize = 20f
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+        }
+        searchToggle.setOnClickListener { toggleSearch() }
+        chatHeader.addView(back); chatHeader.addView(titles)
+        chatHeader.addView(searchToggle); chatHeader.addView(pairButton)
 
         transferState = TextView(this).apply {
             setTextColor(getColor(R.color.accent)); textSize = 12f
@@ -347,7 +444,7 @@ class MainActivity : Activity() {
         attach.setOnClickListener { attachFile() }
         inputEdit = EditText(this).apply {
             hint = "输入消息"; setHintTextColor(getColor(R.color.textMuted))
-            setTextColor(Color.WHITE)
+            setTextColor(getColor(R.color.textPrimary))
             background = roundRect(getColor(R.color.bgBubbleIn), dp(10))
             setPadding(dp(12), dp(10), dp(12), dp(10))
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
@@ -368,18 +465,135 @@ class MainActivity : Activity() {
         composer.addView(atButton)
         composer.addView(inputEdit)
         composer.addView(sendButton)
+
+        // -- in-conversation search bar (v2D), hidden until ⌕ is tapped --
+        searchRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(4), dp(10), dp(4))
+            setBackgroundColor(getColor(R.color.bgPanel))
+            visibility = View.GONE
+        }
+        searchEdit = EditText(this).apply {
+            hint = "搜索聊天记录与文件名"
+            setHintTextColor(getColor(R.color.textMuted))
+            setTextColor(getColor(R.color.textPrimary)); setSingleLine(); textSize = 14f
+            background = null
+            setPadding(0, dp(8), dp(8), dp(8))
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        searchEdit.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            override fun afterTextChanged(s: android.text.Editable?) {
+                messageQuery = s?.toString().orEmpty()
+                refreshMessages()
+            }
+        })
+        searchCount = TextView(this).apply {
+            setTextColor(getColor(R.color.textMuted)); textSize = 11f
+            setPadding(dp(4), 0, dp(8), 0)
+        }
+        val searchClose = TextView(this).apply {
+            text = "✕"; setTextColor(getColor(R.color.textMuted)); textSize = 16f
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+        }
+        searchClose.setOnClickListener { toggleSearch() }
+        searchRow.addView(searchEdit)
+        searchRow.addView(searchCount)
+        searchRow.addView(searchClose)
+
         chatScreen.addView(chatHeader)
         chatScreen.addView(transferState)
+        chatScreen.addView(searchRow)
         chatScreen.addView(messageList,
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         chatScreen.addView(composer)
+
+        // -- settings screen (v2D) --
+        settingsScreen = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(getColor(R.color.bg))
+            visibility = View.GONE
+        }
+        val settingsHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(8), dp(12), dp(16), dp(12))
+            setBackgroundColor(getColor(R.color.bgHeader))
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        settingsHeader.addView(TextView(this).apply {
+            text = "‹"; setTextColor(getColor(R.color.textPrimary)); textSize = 26f
+            setPadding(dp(12), dp(2), dp(14), dp(2))
+            setOnClickListener { closeSettings() }
+        })
+        settingsHeader.addView(TextView(this).apply {
+            text = "设置"; setTextColor(getColor(R.color.textPrimary)); textSize = 17f
+            setTypeface(typeface, Typeface.BOLD)
+        })
+        settingsBody = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(2), dp(14), dp(28))
+        }
+        settingsScreen.addView(settingsHeader)
+        settingsScreen.addView(ScrollView(this).apply {
+            isFillViewport = true
+            addView(settingsBody)
+        }, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
         root.addView(listScreen, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         root.addView(chatScreen, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        paneHint = TextView(this).apply {
+            text = "选择一个会话开始"
+            setTextColor(getColor(R.color.textMuted)); textSize = 14f
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+        }
+        root.addView(paneHint, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        paneDivider = View(this).apply { setBackgroundColor(getColor(R.color.divider)) }
+        root.addView(paneDivider, FrameLayout.LayoutParams(
+            dp(1), ViewGroup.LayoutParams.MATCH_PARENT))
+        root.addView(settingsScreen, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         setContentView(root)
         updateTabStyles()
+        applyShell()
+    }
+
+    /**
+     * ≥600dp shows the list and the chat side by side; narrower keeps the
+     * one-screen-at-a-time stack. Margins on a FrameLayout keep both screens
+     * laid out exactly once, so rotation only re-measures (v2E).
+     */
+    private fun applyShell() {
+        val wide = resources.configuration.smallestScreenWidthDp >= 600
+        dualPane = wide
+        val width = resources.displayMetrics.widthPixels
+        // A 360dp list keeps the header on one line; the chat takes the rest.
+        val listWidth = if (wide) minOf(dp(380), (width * 0.46f).toInt()) else 0
+        (listScreen.layoutParams as FrameLayout.LayoutParams).rightMargin =
+            if (wide) width - listWidth else 0
+        (chatScreen.layoutParams as FrameLayout.LayoutParams).leftMargin = listWidth
+        (paneHint.layoutParams as FrameLayout.LayoutParams).leftMargin = listWidth
+        (paneDivider.layoutParams as FrameLayout.LayoutParams).leftMargin = listWidth
+        paneDivider.visibility = if (wide) View.VISIBLE else View.GONE
+        listScreen.visibility = View.VISIBLE
+        val hasChat = hasChatTarget()
+        if (wide) {
+            chatScreen.visibility = if (hasChat) View.VISIBLE else View.GONE
+            paneHint.visibility = if (hasChat) View.GONE else View.VISIBLE
+        } else {
+            paneHint.visibility = View.GONE
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        applyShell()
     }
 
     private fun roundRect(color: Int, radiusPx: Int): android.graphics.drawable.GradientDrawable =
@@ -401,6 +615,7 @@ class MainActivity : Activity() {
     private fun onRuntimeEvent(event: String, payload: Any?) {
         when (event) {
             "devices" -> {
+                remapCurrentPeer()
                 refreshDevices()
                 refreshServiceState()
                 syncChatHeader()
@@ -504,7 +719,7 @@ class MainActivity : Activity() {
     }
 
     private fun updateTabStyles() {
-        val active = Color.WHITE
+        val active = getColor(R.color.textPrimary)
         val idle = getColor(R.color.textMuted)
         tabDevices.text = "设备"
         tabGroups.text = "群聊"
@@ -542,7 +757,29 @@ class MainActivity : Activity() {
             val cur = best[key]
             best[key] = if (cur == null || preferred(dev, cur)) dev else cur
         }
-        return (best.values + loose).sortedBy { it.optString("alias").lowercase() }
+        // A pin belongs to the machine, not to the fingerprint it had when it
+        // was set: after an identity reset the surviving row is the *other*
+        // uuid, and the pin would otherwise vanish from the list (v2D).
+        for (dev in best.values + loose) {
+            val pinned = machineRows(dev, all).any { isPinnedPeer(it.optString("fingerprint")) }
+            dev.put("pinned", if (pinned) 1 else 0)
+        }
+        return (best.values + loose).sortedWith(
+            compareBy<JSONObject> { !(it.optInt("pinned") > 0) }
+                .thenBy { it.optString("alias").lowercase() })
+    }
+
+    /** Same machine, possibly under several fingerprints (alias + IP). */
+    private fun machineRows(dev: JSONObject, all: List<JSONObject>): List<JSONObject> {
+        val ip = dev.optString("ip")
+        val alias = dev.optString("alias").lowercase()
+        val fp = dev.optString("fingerprint")
+        if (ip.isEmpty() || alias.isEmpty())
+            return all.filter { it.optString("fingerprint") == fp }
+        return all.filter {
+            it.optString("fingerprint") == fp ||
+                (it.optString("ip") == ip && it.optString("alias").lowercase() == alias)
+        }
     }
 
     private fun preferred(a: JSONObject, b: JSONObject): Boolean {
@@ -594,6 +831,10 @@ class MainActivity : Activity() {
                 gravity = Gravity.CENTER_VERTICAL
                 layoutParams = AbsParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(4))
             }
+            if (dualPane && currentPeer?.optString("fingerprint") == fp) {
+                (row.background as android.graphics.drawable.GradientDrawable)
+                    .setStroke(dp(2), getColor(R.color.accent))
+            }
             row.addView(TextView(this@MainActivity).apply {
                 text = name.take(1).uppercase()
                 setTextColor(Color.WHITE); textSize = 17f
@@ -611,7 +852,7 @@ class MainActivity : Activity() {
                 orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             }
             titleRow.addView(TextView(this@MainActivity).apply {
-                text = name; setTextColor(Color.WHITE); textSize = 15f
+                text = name; setTextColor(getColor(R.color.textPrimary)); textSize = 15f
                 setTypeface(typeface, Typeface.BOLD)
                 maxWidth = dp(180)
                 ellipsize = android.text.TextUtils.TruncateAt.END
@@ -619,7 +860,7 @@ class MainActivity : Activity() {
             })
             titleRow.addView(TextView(this@MainActivity).apply {
                 text = "●"; textSize = 9f
-                setTextColor(if (isOnline(dev)) 0xFF34C759.toInt()
+                setTextColor(if (isOnline(dev)) getColor(R.color.online)
                              else getColor(R.color.textMuted))
                 setPadding(dp(6), dp(2), 0, 0)
             })
@@ -627,6 +868,15 @@ class MainActivity : Activity() {
                 titleRow.addView(TextView(this@MainActivity).apply {
                     text = "已配对"; textSize = 10f
                     setTextColor(getColor(R.color.textMuted))
+                    setPadding(dp(8), dp(2), 0, 0)
+                })
+            }
+            // `pinned` is stamped by dedupeDevices so a pin survives the peer
+            // re-creating its fingerprint.
+            if (dev.optInt("pinned") > 0) {
+                titleRow.addView(TextView(this@MainActivity).apply {
+                    text = "置顶"; textSize = 10f
+                    setTextColor(getColor(R.color.accent))
                     setPadding(dp(8), dp(2), 0, 0)
                 })
             }
@@ -705,6 +955,10 @@ class MainActivity : Activity() {
                 gravity = Gravity.CENTER_VERTICAL
                 layoutParams = AbsParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(4))
             }
+            if (dualPane && currentGroup?.optString("id") == gid) {
+                (row.background as android.graphics.drawable.GradientDrawable)
+                    .setStroke(dp(2), getColor(R.color.accent))
+            }
             row.addView(TextView(this@MainActivity).apply {
                 text = "群"; setTextColor(Color.WHITE); textSize = 15f
                 setTypeface(typeface, Typeface.BOLD); gravity = Gravity.CENTER
@@ -720,11 +974,18 @@ class MainActivity : Activity() {
                 orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             }
             titleRow.addView(TextView(this@MainActivity).apply {
-                text = name; setTextColor(Color.WHITE); textSize = 15f
+                text = name; setTextColor(getColor(R.color.textPrimary)); textSize = 15f
                 setTypeface(typeface, Typeface.BOLD); maxLines = 1
                 ellipsize = android.text.TextUtils.TruncateAt.END
                 maxWidth = dp(200)
             })
+            if (group.optInt("pinned") > 0) {
+                titleRow.addView(TextView(this@MainActivity).apply {
+                    text = "置顶"; textSize = 10f
+                    setTextColor(getColor(R.color.accent))
+                    setPadding(dp(8), dp(2), 0, 0)
+                })
+            }
             titleRow.addView(TextView(this@MainActivity).apply {
                 text = if (group.optLong("leftAt", 0L) > 0) "已退出"
                        else "${group.optInt("memberCount")} 人"
@@ -808,9 +1069,9 @@ class MainActivity : Activity() {
     private fun manualAddDialog() {
         val input = EditText(this).apply {
             hint = "IP:端口（默认 8891）"
-            setTextColor(Color.WHITE)
+            setTextColor(getColor(R.color.textPrimary))
         }
-        AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+        AlertDialog.Builder(this, dlgTheme())
             .setTitle("手动添加设备")
             .setView(input)
             .setPositiveButton("添加") { _, _ ->
@@ -853,10 +1114,10 @@ class MainActivity : Activity() {
         }
         val nameInput = EditText(this).apply {
             hint = "群聊名称"
-            setTextColor(Color.WHITE); setHintTextColor(getColor(R.color.textMuted))
+            setTextColor(getColor(R.color.textPrimary)); setHintTextColor(getColor(R.color.textMuted))
             setPadding(dp(20), dp(10), dp(20), dp(10))
         }
-        AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+        AlertDialog.Builder(this, dlgTheme())
             .setTitle("新建群聊")
             .setView(nameInput)
             .setPositiveButton("下一步") { _, _ ->
@@ -871,7 +1132,7 @@ class MainActivity : Activity() {
             dev.optString("alias").ifEmpty { dev.optString("fingerprint").take(8) }
         }.toTypedArray()
         val checked = BooleanArray(paired.size)
-        AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+        AlertDialog.Builder(this, dlgTheme())
             .setTitle("选择成员")
             .setMultiChoiceItems(titles, checked) { _, which, isChecked ->
                 checked[which] = isChecked
@@ -963,7 +1224,7 @@ class MainActivity : Activity() {
         column.addView(sectionLabel(if (left) "群名称 · 已退出，只读" else "群名称"))
         val nameInput = EditText(this).apply {
             setText(store.group(gid)?.optString("name") ?: "")
-            setTextColor(Color.WHITE); setHintTextColor(getColor(R.color.textMuted))
+            setTextColor(getColor(R.color.textPrimary)); setHintTextColor(getColor(R.color.textMuted))
             hint = "群聊名称"; isEnabled = !left; setSingleLine()
         }
         column.addView(nameInput)
@@ -1001,7 +1262,7 @@ class MainActivity : Activity() {
             val online = if (dev != null && isOnline(dev)) " · 在线" else ""
             row.addView(TextView(this).apply {
                 text = who + online
-                setTextColor(Color.WHITE); textSize = 14f
+                setTextColor(getColor(R.color.textPrimary)); textSize = 14f
                 layoutParams = LinearLayout.LayoutParams(
                     0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             })
@@ -1034,7 +1295,7 @@ class MainActivity : Activity() {
                     it.optString("alias").ifEmpty { it.optString("fingerprint").take(8) }
                 }.toTypedArray()
                 val checked = BooleanArray(candidates.size)
-                AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                AlertDialog.Builder(this, dlgTheme())
                     .setTitle("添加成员")
                     .setMultiChoiceItems(titles, checked) { _, which, isChecked ->
                         checked[which] = isChecked
@@ -1056,7 +1317,7 @@ class MainActivity : Activity() {
 
             val leave = Button(this).apply {
                 text = "退出群聊"
-                setTextColor(0xFFEF5B6B.toInt())
+                setTextColor(getColor(R.color.danger))
             }
             leave.setOnClickListener {
                 val others = members.filter { it != fingerprint }
@@ -1071,7 +1332,7 @@ class MainActivity : Activity() {
             column.addView(leave)
         }
 
-        val dlg = AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+        val dlg = AlertDialog.Builder(this, dlgTheme())
             .setTitle("群设置")
             .setView(ScrollView(this).apply { addView(column) })
             .setNegativeButton("关闭", null)
@@ -1154,7 +1415,7 @@ class MainActivity : Activity() {
             setTextColor(getColor(R.color.textMuted)); textSize = 12f
             gravity = Gravity.CENTER; setPadding(0, dp(10), 0, dp(4))
         })
-        AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+        AlertDialog.Builder(this, dlgTheme())
             .setTitle("我的配对二维码")
             .setView(column)
             .setPositiveButton("扫码添加设备") { _, _ -> startQrScan() }
@@ -1215,7 +1476,7 @@ class MainActivity : Activity() {
             }
             mainHandler.post {
                 val name = modal?.optString("alias")?.takeIf { it.isNotEmpty() } ?: realFp.take(8)
-                AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                AlertDialog.Builder(this, dlgTheme())
                     .setTitle("发现设备")
                     .setMessage("「$name」（$ip:$port）\n配对码：${code.ifEmpty { "—" }}\n" +
                         "请与对方屏幕核对后确认。")
@@ -1259,13 +1520,15 @@ class MainActivity : Activity() {
     private fun openChat(dev: JSONObject) {
         currentPeer = dev
         currentGroup = null
+        resetSearch()
         Runtime.foregroundPeer = dev.optString("fingerprint")
         Runtime.foregroundGroup = null
         atButton.visibility = View.GONE
         pairButton.visibility = if (store.isPaired(dev.optString("fingerprint")))
             View.GONE else View.VISIBLE
-        listScreen.visibility = View.GONE
+        if (!dualPane) listScreen.visibility = View.GONE
         chatScreen.visibility = View.VISIBLE
+        paneHint.visibility = View.GONE
         markRead(dev.optString("fingerprint"))
         syncChatHeader()
         refreshMessages()
@@ -1275,12 +1538,14 @@ class MainActivity : Activity() {
     private fun openGroupChat(group: JSONObject) {
         currentGroup = group
         currentPeer = null
+        resetSearch()
         Runtime.foregroundGroup = group.optString("id")
         Runtime.foregroundPeer = null
         atButton.visibility = View.VISIBLE
         pairButton.visibility = View.GONE
-        listScreen.visibility = View.GONE
+        if (!dualPane) listScreen.visibility = View.GONE
         chatScreen.visibility = View.VISIBLE
+        paneHint.visibility = View.GONE
         if (!store.isGroupLeft(group.optString("id"))) markGroupRead(group.optString("id"))
         syncChatHeader()
         refreshMessages()
@@ -1294,6 +1559,7 @@ class MainActivity : Activity() {
         Runtime.foregroundGroup = null
         chatScreen.visibility = View.GONE
         listScreen.visibility = View.VISIBLE
+        if (dualPane) paneHint.visibility = View.VISIBLE
         refreshDevices()
         refreshGroups()
         syncEmptyState()
@@ -1326,7 +1592,7 @@ class MainActivity : Activity() {
         chatTitle.text = fresh.optString("alias").ifEmpty { fp.take(8) }
         val online = if (isOnline(fresh)) "在线" else seenText(fresh)
         chatSubtitle.text = "$online · ${fresh.optString("ip")}"
-        chatSubtitle.setTextColor(if (isOnline(fresh)) 0xFF34C759.toInt()
+        chatSubtitle.setTextColor(if (isOnline(fresh)) getColor(R.color.online)
                                   else getColor(R.color.textMuted))
         pairButton.visibility = if (store.isPaired(fp)) View.GONE else View.VISIBLE
         syncComposerState()
@@ -1347,13 +1613,52 @@ class MainActivity : Activity() {
     }
 
     private fun refreshMessages() {
+        val query = messageQuery.trim()
         val group = currentGroup
-        if (group != null) {
-            messagesAdapter.reload(store.groupConversation(group.optString("id")))
-            return
+        val items = if (group != null) {
+            val gid = group.optString("id")
+            if (query.isEmpty()) store.groupConversation(gid)
+            else store.searchGroupConversation(gid, query)
+        } else {
+            val peer = currentPeer ?: return
+            val fp = peer.optString("fingerprint")
+            if (query.isEmpty()) store.conversation(fp)
+            else store.searchConversation(fp, query)
         }
-        val peer = currentPeer ?: return
-        messagesAdapter.reload(store.conversation(peer.optString("fingerprint")))
+        messagesAdapter.reload(items)
+        if (::searchRow.isInitialized && searchRow.visibility == View.VISIBLE) {
+            searchCount.text = when {
+                query.isEmpty() -> ""
+                items.isEmpty() -> "无结果"
+                else -> "${items.size} 条"
+            }
+        }
+    }
+
+    /** ⌕ toggles an inline search bar; closing it restores the full history. */
+    private fun toggleSearch() {
+        val opening = searchRow.visibility != View.VISIBLE
+        searchRow.visibility = if (opening) View.VISIBLE else View.GONE
+        if (opening) {
+            searchEdit.requestFocus()
+            getSystemService(InputMethodManager::class.java)
+                .showSoftInput(searchEdit, InputMethodManager.SHOW_IMPLICIT)
+        } else {
+            searchEdit.setText("")
+            messageQuery = ""
+            getSystemService(InputMethodManager::class.java)
+                .hideSoftInputFromWindow(searchEdit.windowToken, 0)
+            refreshMessages()
+        }
+    }
+
+    /** Switching conversations starts from a clean, unfiltered history. */
+    private fun resetSearch() {
+        messageQuery = ""
+        if (::searchRow.isInitialized) {
+            searchRow.visibility = View.GONE
+            searchEdit.setText("")
+        }
     }
 
     private fun markRead(peer: String) {
@@ -1381,9 +1686,71 @@ class MainActivity : Activity() {
         if (p.optBoolean("done")) transferState.visibility = View.GONE
     }
 
+    /** One decoded thumbnail per message; the list is small, so 24 MB is plenty. */
+    private val thumbs = android.util.LruCache<String, Bitmap>(24 * 1024 * 1024)
+    private val thumbLoading = HashSet<String>()
+
+    private fun bindImageBubble(wrap: FrameLayout, msg: JSONObject, outgoing: Boolean) {
+        val id = msg.optString("id")
+        val holder = FrameLayout(this).apply {
+            background = roundRect(getColor(R.color.bgBubbleIn), dp(10))
+            clipToOutline = true
+            setOnClickListener { openImagePreview(msg) }
+            setOnLongClickListener { showMessageMenu(msg); true }
+        }
+        holder.addView(ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            tag = id
+            layoutParams = FrameLayout.LayoutParams(dp(180), dp(120))
+        })
+        holder.addView(TextView(this).apply {
+            text = timeFormat.format(Date(msg.optLong("time")))
+            setTextColor(0xFFFFFFFF.toInt()); textSize = 10f
+            setPadding(dp(6), dp(2), dp(6), dp(2))
+            background = roundRect(0x66000000, dp(6))
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.END or Gravity.BOTTOM).apply { setMargins(0, 0, dp(4), dp(4)) }
+        })
+        val params = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            if (outgoing) Gravity.END else Gravity.START)
+        params.setMargins(dp(24), dp(3), dp(24), dp(3))
+        wrap.addView(holder, params)
+        val picture = holder.getChildAt(0) as ImageView
+        val cached = thumbs.get(id)
+        if (cached != null) showThumb(picture, cached) else loadThumbnail(msg, picture)
+    }
+
+    /** Thumbnails follow the picture's aspect instead of a square crop. */
+    private fun showThumb(target: ImageView, bmp: Bitmap) {
+        target.setImageBitmap(bmp)
+        val width = dp(180)
+        val height = (width * bmp.height.toFloat() / bmp.width)
+            .toInt().coerceIn(dp(80), dp(260))
+        target.layoutParams = FrameLayout.LayoutParams(width, height)
+    }
+
+    private fun loadThumbnail(msg: JSONObject, target: ImageView) {
+        val id = msg.optString("id")
+        val source = Media.thumbSource(this, msg) ?: return
+        if (!thumbLoading.add(id)) return
+        Thread {
+            val bmp = Media.loadBitmap(this, source, 480)
+            mainHandler.post {
+                thumbLoading.remove(id)
+                if (bmp == null) return@post
+                thumbs.put(id, bmp)
+                if (target.tag == id) showThumb(target, bmp)
+            }
+        }.start()
+    }
+
     private inner class MessageAdapter : BaseAdapter() {
         private var items: List<JSONObject> = emptyList()
         fun reload(list: List<JSONObject>) { items = list; notifyDataSetChanged() }
+        fun snapshot(): List<JSONObject> = items
         override fun getCount() = items.size
         override fun getItem(position: Int) = items[position]
         override fun getItemId(position: Int) = position.toLong()
@@ -1394,9 +1761,15 @@ class MainActivity : Activity() {
             val wrap = convertView as? FrameLayout ?: FrameLayout(this@MainActivity)
             wrap.removeAllViews()
             val failed = msg.optInt("status") == 2
+            if (msg.optInt("type") != Wire.TYPE_TEXT &&
+                Media.isImage(msg.optString("fileName")) &&
+                msg.optString("filePath").isNotEmpty()) {
+                bindImageBubble(wrap, msg, outgoing)
+                return wrap
+            }
             val bubble = TextView(this@MainActivity).apply {
                 textSize = 14f
-                setTextColor(Color.WHITE)
+                setTextColor(if (outgoing) getColor(R.color.textOnAccent) else getColor(R.color.textPrimary))
                 setPadding(dp(12), dp(8), dp(12), dp(8))
                 background = roundRect(
                     if (outgoing) getColor(R.color.accent) else getColor(R.color.bgBubbleIn),
@@ -1404,7 +1777,7 @@ class MainActivity : Activity() {
                 text = bubbleDisplayText(msg, outgoing)
                 maxWidth = dp(280)
             }
-            if (failed) bubble.setTextColor(0xFFFFD7D7.toInt())
+            if (failed) bubble.setTextColor(getColor(R.color.bubbleTextFailed))
             val params = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1421,11 +1794,7 @@ class MainActivity : Activity() {
                 }
             }
             bubble.setOnLongClickListener {
-                if (msg.optInt("type") == Wire.TYPE_TEXT) {
-                    getSystemService(ClipboardManager::class.java)
-                        .setPrimaryClip(ClipData.newPlainText("relaydesk", msg.optString("text")))
-                    toast("已复制")
-                }
+                showMessageMenu(msg)
                 true
             }
             wrap.addView(bubble)
@@ -1439,8 +1808,7 @@ class MainActivity : Activity() {
      */
     private fun bubbleDisplayText(msg: JSONObject, outgoing: Boolean): CharSequence {
         val body = bubbleText(msg, outgoing)
-        if (currentGroup == null) return body
-        val sender = if (outgoing) {
+        val sender = if (currentGroup == null || outgoing) {
             null
         } else {
             val alias = store.device(msg.optString("from"))?.optString("alias")
@@ -1451,19 +1819,34 @@ class MainActivity : Activity() {
         if (!sender.isNullOrEmpty()) {
             spannable.setSpan(StyleSpan(Typeface.BOLD), 0, sender.length,
                 Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-            spannable.setSpan(ForegroundColorSpan(0xFFBFD4FF.toInt()), 0, sender.length,
+            spannable.setSpan(ForegroundColorSpan(getColor(R.color.senderName)), 0, sender.length,
                 Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         }
         if (msg.optInt("type") == Wire.TYPE_TEXT) {
             val mention = Regex("@[\\w\\u4e00-\\u9fa5.\\-]+")
             for (m in mention.findAll(shown)) {
-                spannable.setSpan(ForegroundColorSpan(0xFFFFC857.toInt()),
+                spannable.setSpan(ForegroundColorSpan(getColor(R.color.mention)),
                     m.range.first, m.range.last + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                 spannable.setSpan(StyleSpan(Typeface.BOLD),
                     m.range.first, m.range.last + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
             }
         }
+        highlightMatches(spannable, shown)
         return spannable
+    }
+
+    /** Paints every occurrence of the active search term (v2D). */
+    private fun highlightMatches(spannable: SpannableString, text: String) {
+        val query = messageQuery.trim()
+        if (query.isEmpty()) return
+        var from = 0
+        while (true) {
+            val at = text.indexOf(query, from, ignoreCase = true)
+            if (at < 0) return
+            spannable.setSpan(BackgroundColorSpan(getColor(R.color.searchHighlight)), at, at + query.length,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            from = at + query.length
+        }
     }
 
     private fun bubbleText(msg: JSONObject, outgoing: Boolean): String {
@@ -1491,6 +1874,62 @@ class MainActivity : Activity() {
     }
 
     private fun failed(outgoing: Boolean, status: Int) = outgoing && status == 2
+
+    /** Every image of this conversation, so the viewer can swipe between them. */
+    private fun openImagePreview(tapped: JSONObject) {
+        val images = messagesAdapter.snapshot().filter {
+            it.optInt("type") != Wire.TYPE_TEXT &&
+                Media.isImage(it.optString("fileName")) &&
+                it.optString("filePath").isNotEmpty()
+        }
+        if (images.isEmpty()) return
+        val sources = ArrayList<String>()
+        val names = ArrayList<String>()
+        for (m in images) {
+            sources += m.optString("filePath")
+            names += m.optString("fileName")
+        }
+        val at = images.indexOfFirst { it.optString("id") == tapped.optString("id") }
+            .coerceAtLeast(0)
+        startActivity(Intent(this, ImagePreviewActivity::class.java)
+            .putStringArrayListExtra(ImagePreviewActivity.EXTRA_SOURCES, sources)
+            .putStringArrayListExtra(ImagePreviewActivity.EXTRA_NAMES, names)
+            .putExtra(ImagePreviewActivity.EXTRA_INDEX, at))
+    }
+
+    private fun saveImageToDownloads(msg: JSONObject) {
+        val path = msg.optString("filePath")
+        val name = msg.optString("fileName").ifEmpty { "relaydesk.jpg" }
+        Thread {
+            val saved = Media.saveToDownloads(this, path, name)
+            mainHandler.post {
+                toast(if (saved != null) "已保存到 Download/RelayDesk/$saved" else "保存失败")
+            }
+        }.start()
+    }
+
+    /** SAF "save as": the user picks the destination, we stream the bytes. */
+    private fun saveAsDialog(msg: JSONObject) {
+        saveAsMessage = msg
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = contentResolver.getType(Uri.parse(msg.optString("filePath"))) ?: "*/*"
+            putExtra(Intent.EXTRA_TITLE, msg.optString("fileName").ifEmpty { "file" })
+        }
+        startActivityForResult(intent, SAVE_AS_REQUEST)
+    }
+
+    private fun copyToUri(msg: JSONObject, target: Uri) {
+        val source = msg.optString("filePath")
+        Thread {
+            val ok = runCatching {
+                Media.open(this, source)?.use { input ->
+                    contentResolver.openOutputStream(target)?.use { out -> input.copyTo(out) }
+                } ?: throw IllegalStateException("source unreadable")
+            }.isSuccess
+            mainHandler.post { toast(if (ok) "已另存" else "另存失败") }
+        }.start()
+    }
 
     private fun openFile(path: String) {
         try {
@@ -1559,7 +1998,7 @@ class MainActivity : Activity() {
             return
         }
         val names = members.map { it.first }.toTypedArray()
-        AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+        AlertDialog.Builder(this, dlgTheme())
             .setTitle("选择提醒谁")
             .setItems(names) { _, which ->
                 insertMention(members[which].first)
@@ -1584,7 +2023,7 @@ class MainActivity : Activity() {
             answered = true
             Runtime.answerPair(ok)
         }
-        AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+        AlertDialog.Builder(this, dlgTheme())
             .setTitle("配对请求")
             .setMessage("「$name」请求与这台设备配对。\n验证码：${prompt.code.ifEmpty { "—" }}\n" +
                 "请与对方核对后再接受。")
@@ -1747,6 +2186,370 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    // ---------- message & conversation operations (v2D) ----------
+
+    /** Long-press menu on a bubble: copy / open / resend / delete one. */
+    private fun showMessageMenu(msg: JSONObject) {
+        val outgoing = msg.optString("from") == fingerprint
+        val isText = msg.optInt("type") == Wire.TYPE_TEXT
+        val hasPath = msg.optString("filePath").isNotEmpty()
+        val imageMsg = !isText && Media.isImage(msg.optString("fileName"))
+        val labels = mutableListOf<String>()
+        val actions = mutableListOf<() -> Unit>()
+        if (isText) {
+            labels += "复制文字"
+            actions += { copyText(msg.optString("text")) }
+        } else if (imageMsg && hasPath) {
+            labels += "查看大图"
+            actions += { openImagePreview(msg) }
+            labels += "保存到相册"
+            actions += { saveImageToDownloads(msg) }
+        } else if (hasPath) {
+            labels += "打开文件"
+            actions += { openFile(msg.optString("filePath")) }
+            labels += "另存为…"
+            actions += { saveAsDialog(msg) }
+        }
+        if (outgoing && failed(outgoing, msg.optInt("status"))) {
+            labels += "重新发送"
+            actions += { retryText(msg) }
+        }
+        labels += "删除这条"
+        actions += { confirmDeleteMessage(msg) }
+        AlertDialog.Builder(this, dlgTheme())
+            .setTitle(if (isText) "消息" else msg.optString("fileName"))
+            .setItems(labels.toTypedArray()) { _, which -> actions[which]() }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun confirmDeleteMessage(msg: JSONObject) {
+        AlertDialog.Builder(this, dlgTheme())
+            .setTitle("删除这条消息？")
+            .setMessage("只删除本机记录，对方不会受影响，且不可恢复。")
+            .setPositiveButton("删除") { _, _ ->
+                store.deleteMessage(msg.optString("id"))
+                refreshMessages()
+                refreshDevices()
+                refreshGroups()
+                toast("已删除")
+            }
+            .setNegativeButton("取消", null)
+            .show()
+            .danger()
+    }
+
+    /** Long-press on a conversation row: pin / mark read / delete. */
+    private fun showConversationMenu(position: Int) {
+        if (listMode == MODE_GROUPS) {
+            val group = groupsAdapter.item(position) ?: return
+            val gid = group.optString("id")
+            val pinned = group.optInt("pinned") > 0
+            val labels = arrayOf(if (pinned) "取消置顶" else "置顶", "标为已读", "删除会话")
+            AlertDialog.Builder(this, dlgTheme())
+                .setTitle(group.optString("name").ifEmpty { "群聊" })
+                .setItems(labels) { _, which ->
+                    when (which) {
+                        0 -> {
+                            store.setGroupPinned(gid, !pinned)
+                            refreshGroups()
+                            toast(if (pinned) "已取消置顶" else "已置顶")
+                        }
+                        1 -> {
+                            markGroupRead(gid)
+                            refreshGroups()
+                            toast("已标为已读")
+                        }
+                        else -> confirmDeleteGroup(group)
+                    }
+                }
+                .setNegativeButton("取消", null)
+                .show()
+            return
+        }
+        val dev = devicesAdapter.item(position) ?: return
+        val fp = dev.optString("fingerprint")
+        val pinned = dev.optInt("pinned") > 0
+        val labels = arrayOf(if (pinned) "取消置顶" else "置顶", "标为已读", "删除聊天记录")
+        AlertDialog.Builder(this, dlgTheme())
+            .setTitle(dev.optString("alias").ifEmpty { fp.take(8) })
+            .setItems(labels) { _, which ->
+                when (which) {
+                    0 -> {
+                        setPinnedForMachine(dev, !pinned)
+                        refreshDevices()
+                        toast(if (pinned) "已取消置顶" else "已置顶")
+                    }
+                    1 -> {
+                        markRead(fp)
+                        refreshDevices()
+                        toast("已标为已读")
+                    }
+                    else -> confirmDeletePeer(dev)
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun confirmDeletePeer(dev: JSONObject) {
+        val fp = dev.optString("fingerprint")
+        // One machine may hold history under several fingerprints; drop them all
+        // so the conversation cannot reappear under a stale identity.
+        val machines = machineRows(dev, store.devices()).map { it.optString("fingerprint") }
+        AlertDialog.Builder(this, dlgTheme())
+            .setTitle("删除聊天记录？")
+            .setMessage("只删除本机记录，对端不受影响，且不可恢复。")
+            .setPositiveButton("删除") { _, _ ->
+                val edit = prefs.edit()
+                for (peer in machines.ifEmpty { listOf(fp) }) {
+                    store.deleteConversation(peer)
+                    edit.remove("lastread_$peer")
+                }
+                edit.apply()
+                refreshDevices()
+                syncEmptyState()
+                toast("已删除")
+            }
+            .setNegativeButton("取消", null)
+            .show()
+            .danger()
+    }
+
+    private fun confirmDeleteGroup(group: JSONObject) {
+        val gid = group.optString("id")
+        AlertDialog.Builder(this, dlgTheme())
+            .setTitle("删除群会话？")
+            .setMessage("本机记录会全部删除，并从本机移除这个群；其他成员不受影响。")
+            .setPositiveButton("删除") { _, _ ->
+                store.deleteGroup(gid)
+                prefs.edit().remove("lastread_group_$gid").apply()
+                if (currentGroup?.optString("id") == gid) closeChat()
+                refreshGroups()
+                syncEmptyState()
+                toast("已删除")
+            }
+            .setNegativeButton("取消", null)
+            .show()
+            .danger()
+    }
+
+    /** After an identity merge the open chat has to follow the new fingerprint. */
+    private fun remapCurrentPeer() {
+        val peer = currentPeer ?: return
+        val fp = peer.optString("fingerprint")
+        val all = store.devices()
+        if (all.any { it.optString("fingerprint") == fp }) return
+        val moved = all.firstOrNull {
+            it.optString("alias") == peer.optString("alias") &&
+                it.optString("ip") == peer.optString("ip")
+        } ?: return
+        currentPeer = moved
+        Runtime.foregroundPeer = moved.optString("fingerprint")
+        refreshMessages()
+    }
+
+    /** ✓ in the list header: every conversation becomes read at once. */
+    private fun markAllRead() {
+        val all = store.devices()
+        // Old fingerprints of a re-created identity carry history too.
+        val rows = dedupeDevices(all).flatMap { machineRows(it, all) }
+            .map { it.optString("fingerprint") }.toSet()
+        for (fp in rows) markRead(fp)
+        for (g in store.groups()) markGroupRead(g.optString("id"))
+        refreshDevices()
+        refreshGroups()
+        toast("已全部标为已读")
+    }
+
+    private fun isPinnedPeer(fp: String): Boolean = prefs.getBoolean("pinned_$fp", false)
+
+    /** Pin/unpin every fingerprint row of the same machine (alias + IP). */
+    private fun setPinnedForMachine(dev: JSONObject, pinned: Boolean) {
+        val edit = prefs.edit()
+        for (member in machineRows(dev, store.devices())) {
+            edit.putBoolean("pinned_${member.optString("fingerprint")}", pinned)
+        }
+        edit.apply()
+    }
+
+    private fun copyText(text: String) {
+        getSystemService(ClipboardManager::class.java)
+            .setPrimaryClip(ClipData.newPlainText("relaydesk", text))
+        toast("已复制")
+    }
+
+    // ---------- settings (v2D) ----------
+
+    private fun openSettings() {
+        refreshSettings()
+        settingsScreen.visibility = View.VISIBLE
+        listScreen.visibility = View.GONE
+    }
+
+    private fun closeSettings() {
+        settingsScreen.visibility = View.GONE
+        listScreen.visibility = View.VISIBLE
+        refreshServiceState()
+    }
+
+    private fun addSection(title: String) {
+        settingsBody.addView(TextView(this).apply {
+            text = title
+            setTextColor(getColor(R.color.textMuted)); textSize = 11f
+            setPadding(dp(6), dp(16), dp(6), dp(6))
+        })
+    }
+
+    private fun addRow(title: String, value: String, enabled: Boolean = true,
+                       valueColor: Int = getColor(R.color.textMuted),
+                       onClick: (() -> Unit)? = null) {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = roundRect(getColor(R.color.bgPanel), dp(12))
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                .apply { bottomMargin = dp(8) }
+        }
+        row.addView(TextView(this).apply {
+            text = title
+            setTextColor(if (enabled) getColor(R.color.textPrimary) else getColor(R.color.textMuted))
+            textSize = 14f
+            layoutParams = LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        row.addView(TextView(this).apply {
+            text = value
+            setTextColor(if (enabled) valueColor else getColor(R.color.textMuted))
+            textSize = 12f; gravity = Gravity.END
+            maxWidth = dp(200); maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        })
+        if (onClick != null && enabled) {
+            row.isClickable = true
+            row.setOnClickListener { onClick() }
+        }
+        settingsBody.addView(row)
+    }
+
+    /** Rebuilt on every open so port / IME / alias are never stale. */
+    private fun refreshSettings() {
+        settingsBody.removeAllViews()
+
+        addSection("本机")
+        addRow("名称", alias) { editAliasDialog() }
+        addRow("设备号", fingerprint.take(8)) { copyText(fingerprint) }
+        addRow("配对二维码", "查看 ›") { showQrDialog() }
+
+        addSection("通道")
+        addRow("后台接收", if (Runtime.serviceRunning) "运行中" else "未运行")
+        addRow("监听端口", if (Runtime.servicePort > 0) Runtime.servicePort.toString() else "—")
+        addRow("本机地址", localIpv4().ifEmpty { "未连接 Wi-Fi" })
+
+        addSection("文件")
+        addRow("保存目录", "Download/RelayDesk") { copyText(fileSaveDir().absolutePath) }
+
+        addSection("提醒")
+        val notifyOn = prefs.getBoolean("notify_enabled", true)
+        addRow("消息通知", if (notifyOn) "已开启" else "已关闭",
+            valueColor = if (notifyOn) getColor(R.color.accent)
+                         else getColor(R.color.textMuted)) {
+            prefs.edit().putBoolean("notify_enabled", !notifyOn).apply()
+            refreshSettings()
+            toast(if (notifyOn) "通知已关闭" else "通知已开启")
+        }
+
+        addSection("输入法与显示")
+        addRow("当前输入法", imeLabel())
+        addRow("实体键盘", if (hasHardwareKeyboard()) "已连接" else "未连接")
+        addRow("切换输入法", "系统设置 ›") { openImeSettings() }
+        val lightTheme = wantsLightTheme()
+        addRow("主题", if (lightTheme) "浅色" else "深色") { switchTheme(!lightTheme) }
+
+        addSection("关于")
+        addRow("版本", versionName())
+        addRow("连接方式", "局域网直连 · 无需账号")
+    }
+
+    private fun editAliasDialog() {
+        val input = EditText(this).apply {
+            setText(alias); setSingleLine()
+            setTextColor(getColor(R.color.textPrimary)); setHintTextColor(getColor(R.color.textMuted))
+            hint = "本机名称"
+            setPadding(dp(20), dp(10), dp(20), dp(10))
+        }
+        AlertDialog.Builder(this, dlgTheme())
+            .setTitle("修改本机名称")
+            .setView(input)
+            .setPositiveButton("保存") { _, _ ->
+                val name = input.text.toString().trim()
+                if (name.isEmpty()) {
+                    toast("名称不能为空")
+                } else {
+                    Identity.setAlias(this, name)
+                    alias = name
+                    Runtime.service?.announceNow()
+                    refreshSettings()
+                    refreshServiceState()
+                    toast("已更新，对端重新发现后显示新名称")
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun fileSaveDir(): java.io.File = java.io.File(
+        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+        "RelayDesk")
+
+    private fun versionName(): String = try {
+        packageManager.getPackageInfo(packageName, 0).versionName ?: "—"
+    } catch (_: Exception) {
+        "—"
+    }
+
+    private fun imeLabel(): String {
+        val id = Settings.Secure.getString(contentResolver,
+            Settings.Secure.DEFAULT_INPUT_METHOD).orEmpty()
+        if (id.isEmpty()) return "—"
+        // The system's own list is authoritative and needs no <queries>.
+        val fromSystem = getSystemService(InputMethodManager::class.java)
+            ?.enabledInputMethodList?.firstOrNull { it.id == id }
+        val label = runCatching { fromSystem?.loadLabel(packageManager)?.toString() }
+            .getOrNull()
+        if (!label.isNullOrEmpty()) return label
+        return runCatching {
+            packageManager.getApplicationLabel(
+                packageManager.getApplicationInfo(id.substringBefore('/'), 0)).toString()
+        }.getOrNull() ?: id.substringBefore('/')
+    }
+
+    /** The magnetic keyboard reports as a hardware keyboard — worth showing. */
+    private fun hasHardwareKeyboard(): Boolean =
+        resources.configuration.keyboard != Configuration.KEYBOARD_NOKEYS
+
+    private fun openImeSettings() {
+        val opened = runCatching {
+            startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS))
+            true
+        }.getOrDefault(false)
+        if (!opened) {
+            runCatching { startActivity(Intent(Settings.ACTION_SETTINGS)) }
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        when {
+            ::settingsScreen.isInitialized && settingsScreen.visibility == View.VISIBLE ->
+                closeSettings()
+            chatScreen.visibility == View.VISIBLE -> closeChat()
+            else -> super.onBackPressed()
+        }
+    }
+
     private fun attachFile() {
         if (!hasChatTarget()) return
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
@@ -1762,6 +2565,13 @@ class MainActivity : Activity() {
         if (requestCode == QR_SCAN_REQUEST) {
             val payload = data?.getStringExtra(QrScanActivity.EXTRA_RESULT)
             if (resultCode == RESULT_OK && !payload.isNullOrEmpty()) handleScannedCode(payload)
+            return
+        }
+        if (requestCode == SAVE_AS_REQUEST) {
+            val target = data?.data
+            val msg = saveAsMessage
+            saveAsMessage = null
+            if (resultCode == RESULT_OK && target != null && msg != null) copyToUri(msg, target)
             return
         }
         if (requestCode != ATTACH_REQUEST || resultCode != RESULT_OK ||
@@ -1797,23 +2607,36 @@ class MainActivity : Activity() {
                 val newRid = Wire.newId()
                 rid = newRid
                 val mime = contentResolver.getType(uri) ?: "application/octet-stream"
+                // v2E: photos are compressed and thumbnailed before upload, and
+                // every outgoing file gets a cache copy so a retry does not depend
+                // on how long the picker's URI grant lasts.
+                val prepared = if (mime.startsWith("image/"))
+                    Media.prepareImage(this@MainActivity, uri, newRid, name, size) else null
+                val localFile = prepared?.file
+                    ?: Media.copyToCache(this@MainActivity, uri, newRid, name)
+                val sendName = prepared?.name ?: name
+                val sendSize = localFile.length()
+                if (sendSize <= 0) throw IllegalStateException("文件为空")
                 if (group != null) {
                     val gid = group.optString("id")
                     store.addMessage(newRid, fingerprint, "", Wire.TYPE_FILE,
-                        System.currentTimeMillis(), gid, fileName = name, fileSize = size,
-                        status = 1)
+                        System.currentTimeMillis(), gid, fileName = sendName,
+                        fileSize = sendSize, status = 1,
+                        filePath = localFile.absolutePath)
                     mainHandler.post { refreshMessages() }
                     val targets = groupTargets(gid)
                     var delivered = 0
                     for ((fp, ip, port) in targets) {
                         try {
                             ChannelClient.postBubble(ip, port,
-                                Wire.fileBubble(fingerprint, fp, newRid, name, mime, size, gid))
-                            contentResolver.openInputStream(uri)!!.use { input ->
-                                ChannelClient.uploadFile(ip, port, newRid, name, size, input) { sent ->
+                                Wire.fileBubble(fingerprint, fp, newRid, sendName, mime,
+                                    sendSize, gid))
+                            java.io.FileInputStream(localFile).use { input ->
+                                ChannelClient.uploadFile(ip, port, newRid, sendName,
+                                    sendSize, input) { sent ->
                                     live[newRid] = JSONObject().put("rid", newRid)
-                                        .put("got", sent).put("total", size)
-                                        .put("done", sent >= size)
+                                        .put("got", sent).put("total", sendSize)
+                                        .put("done", sent >= sendSize)
                                     mainHandler.post { refreshMessages() }
                                 }
                             }
@@ -1832,17 +2655,18 @@ class MainActivity : Activity() {
                 }
                 val target = resolve(peer!!) ?: throw IllegalStateException("对端无地址")
                 val fp = peer.optString("fingerprint")
-                val bubble = Wire.fileBubble(fingerprint, fp, newRid, name, mime, size)
+                val bubble = Wire.fileBubble(fingerprint, fp, newRid, sendName, mime, sendSize)
                 store.addMessage(newRid, fingerprint, fp, Wire.TYPE_FILE,
-                    bubble.optLong("time"), "", fileName = name, fileSize = size, status = 1)
+                    bubble.optLong("time"), "", fileName = sendName, fileSize = sendSize,
+                    filePath = localFile.absolutePath, status = 1)
                 mainHandler.post { refreshMessages() }
                 ChannelClient.postBubble(target.first, target.second, bubble)
-                contentResolver.openInputStream(uri)!!.use { input ->
-                    ChannelClient.uploadFile(target.first, target.second, newRid, name,
-                        size, input) { sent ->
+                java.io.FileInputStream(localFile).use { input ->
+                    ChannelClient.uploadFile(target.first, target.second, newRid, sendName,
+                        sendSize, input) { sent ->
                         live[newRid] = JSONObject().put("rid", newRid)
-                            .put("got", sent).put("total", size)
-                            .put("done", sent >= size)
+                            .put("got", sent).put("total", sendSize)
+                            .put("done", sent >= sendSize)
                         mainHandler.post { refreshMessages() }
                     }
                 }
@@ -1851,6 +2675,7 @@ class MainActivity : Activity() {
                     refreshMessages(); refreshDevices(); toast("文件已发送")
                 }
             } catch (e: Exception) {
+                android.util.Log.e("RD", "file send failed", e)
                 rid?.let { store.setMessageStatus(it, 2) }
                 mainHandler.post {
                     refreshMessages()

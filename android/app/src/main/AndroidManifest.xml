@@ -12,6 +12,14 @@
 
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
+    <!-- Settings shows the active keyboard's display name; without this the
+         package is hidden by Android 11+ visibility filtering. -->
+    <queries>
+        <intent>
+            <action android:name="android.view.InputMethod" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="false"
         android:usesCleartextTraffic="true"
@@ -30,6 +38,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".ImagePreviewActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout"
+            android:theme="@style/Theme.RelayDesk" />
 
         <activity
             android:name=".QrScanActivity"

@@ -285,6 +285,13 @@ class ChannelServer(
         }
         val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
             ?: return text(Response.Status.INTERNAL_ERROR, "cannot create file")
+        // Images get a private copy as well: the chat reads them back for the
+        // bubble thumbnail and the viewer, and a MediaStore download row is not
+        // reliably readable in-process (scoped storage / MIUI). Other files keep
+        // the content URI so nothing is stored twice.
+        val localCopy = if (Media.isImage(cleanName))
+            java.io.File(context.filesDir, "media").apply { mkdirs() }
+                .let { java.io.File(it, "$rid-$cleanName") } else null
         var got = 0L
         var lastTick = 0L
         try {
@@ -292,9 +299,17 @@ class ChannelServer(
                 .put("name", cleanName).put("got", 0L)
                 .put("total", declared).put("done", false))
             resolver.openOutputStream(uri)?.use { out ->
+                val local = localCopy?.let { java.io.FileOutputStream(it) }
                 // NO .use on the session stream: closing it closes the whole
                 // socket before NanoHTTPD can deliver the response.
-                val input = session.inputStream
+                // aiohttp sends length-unknown bodies chunked and NanoHTTPD hands
+                // us the raw socket stream: strip the framing or the file keeps
+                // its chunk header glued to the first byte and never decodes.
+                val rawInput = java.io.BufferedInputStream(session.inputStream, 256 * 1024)
+                val chunked = session.headers["transfer-encoding"]
+                    .orEmpty().contains("chunked", ignoreCase = true)
+                val input: java.io.InputStream =
+                    if (chunked) ChunkedBody(rawInput) else rawInput
                 val buf = ByteArray(256 * 1024)
                 // Read EXACTLY the declared length; a socket stream has no
                 // EOF between keep-alive requests, so "read until -1" would
@@ -308,6 +323,7 @@ class ChannelServer(
                         throw IllegalStateException("payload exceeds declared size")
                     }
                     out.write(buf, 0, n)
+                    local?.write(buf, 0, n)
                     if (got - lastTick >= 1_048_576 || got == declared) {
                         lastTick = got
                         onProgress(JSONObject().put("from", sender).put("rid", rid)
@@ -316,6 +332,8 @@ class ChannelServer(
                     }
                 }
                 out.flush()
+                local?.flush()
+                local?.close()
             } ?: throw IllegalStateException("no output stream")
             if (got != declared) {
                 throw IllegalStateException("size mismatch: $got != $declared")
@@ -329,7 +347,8 @@ class ChannelServer(
             store.commitIncoming(rid, uri.toString())
             store.addMessage(rec.optString("bubbleId"), sender, ownFp, Wire.TYPE_FILE,
                 System.currentTimeMillis(), rec.optString("groupId"),
-                fileName = cleanName, fileSize = got, filePath = uri.toString())
+                fileName = cleanName, fileSize = got,
+                filePath = localCopy?.absolutePath ?: uri.toString())
             android.util.Log.e("RD", "file committed got=$got uri=$uri")
             onProgress(JSONObject().put("from", sender).put("rid", rid)
                 .put("name", cleanName).put("got", got)
@@ -340,8 +359,47 @@ class ChannelServer(
             return text(Response.Status.OK, "ok")
         } catch (e: Exception) {
             android.util.Log.e("RD", "file FAILED got=$got", e)
+            runCatching { localCopy?.delete() }
             runCatching { resolver.delete(uri, null, null) }
             return text(Response.Status.BAD_REQUEST, e.message ?: "transfer failed")
+        }
+    }
+
+    /** Minimal Transfer-Encoding: chunked decoder for the file body. */
+    private class ChunkedBody(private val raw: java.io.InputStream) : java.io.InputStream() {
+        private var remaining = 0L
+        private var started = false
+
+        private fun readLine(): String {
+            val sb = StringBuilder()
+            while (true) {
+                val c = raw.read()
+                if (c < 0) return sb.toString()
+                if (c == '\n'.code) return sb.toString().trimEnd('\r')
+                sb.append(c.toChar())
+            }
+        }
+
+        private fun nextChunk(): Boolean {
+            if (started) readLine() // CRLF that closes the previous chunk
+            started = true
+            val size = readLine().substringBefore(';').trim().toLongOrNull(16) ?: return false
+            remaining = size
+            return size > 0
+        }
+
+        override fun read(): Int {
+            val one = ByteArray(1)
+            return if (read(one, 0, 1) <= 0) -1 else one[0].toInt() and 0xFF
+        }
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            if (remaining == 0L && !nextChunk()) return -1
+            val want = minOf(len.toLong(), remaining).toInt()
+            val n = raw.read(b, off, want)
+            if (n <= 0) return -1
+            remaining -= n
+            return n
         }
     }
 

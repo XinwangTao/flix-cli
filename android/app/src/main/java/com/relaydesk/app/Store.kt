@@ -8,7 +8,7 @@ import org.json.JSONObject
 
 /** Local state: devices, pairing trust, groups and chat history. */
 class Store(context: Context) :
-    SQLiteOpenHelper(context, "relaydesk.db", null, 4) {
+    SQLiteOpenHelper(context, "relaydesk.db", null, 5) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("""CREATE TABLE devices(
@@ -27,7 +27,8 @@ class Store(context: Context) :
             group_id TEXT DEFAULT '')""")
         db.execSQL("""CREATE TABLE groups(
             id TEXT PRIMARY KEY, name TEXT, created_at INTEGER,
-            rev INTEGER NOT NULL DEFAULT 0, left_at INTEGER NOT NULL DEFAULT 0)""")
+            rev INTEGER NOT NULL DEFAULT 0, left_at INTEGER NOT NULL DEFAULT 0,
+            pinned INTEGER NOT NULL DEFAULT 0)""")
         db.execSQL("""CREATE TABLE group_members(
             group_id TEXT, fingerprint TEXT, PRIMARY KEY(group_id, fingerprint))""")
     }
@@ -49,6 +50,10 @@ class Store(context: Context) :
             // a group we were removed from (history stays readable).
             db.execSQL("ALTER TABLE groups ADD COLUMN rev INTEGER NOT NULL DEFAULT 0")
             db.execSQL("ALTER TABLE groups ADD COLUMN left_at INTEGER NOT NULL DEFAULT 0")
+        }
+        if (oldVersion < 5) {
+            // Conversation pinning (v2D). Additive, so a re-run is harmless.
+            db.execSQL("ALTER TABLE groups ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
         }
     }
 
@@ -85,6 +90,44 @@ class Store(context: Context) :
 
     fun deviceIp(fp: String): String? =
         device(fp)?.optString("ip")?.takeIf { it.isNotEmpty() }
+
+    fun hasRecord(fp: String): Boolean =
+        readableDatabase.rawQuery("SELECT 1 FROM devices WHERE fingerprint=?",
+            arrayOf(fp)).use { it.moveToFirst() }
+
+    fun hasHistory(fp: String): Boolean =
+        readableDatabase.rawQuery(
+            "SELECT 1 FROM messages WHERE from_device=? OR to_device=? LIMIT 1",
+            arrayOf(fp, fp)).use { it.moveToFirst() }
+
+    /**
+     * The same machine re-created its identity (v2G): carry history, trust,
+     * group membership onto the new fingerprint and drop the stale device row.
+     * One transaction — a failure leaves the old identity untouched.
+     */
+    fun mergeIdentity(oldFp: String, newFp: String) {
+        if (oldFp.isEmpty() || newFp.isEmpty() || oldFp == newFp) return
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.execSQL("UPDATE messages SET from_device=? WHERE from_device=?",
+                arrayOf(newFp, oldFp))
+            db.execSQL("UPDATE messages SET to_device=? WHERE to_device=?",
+                arrayOf(newFp, oldFp))
+            db.execSQL("INSERT OR IGNORE INTO pairs(fingerprint, code, paired_at)" +
+                " SELECT ?, code, paired_at FROM pairs WHERE fingerprint=?",
+                arrayOf(newFp, oldFp))
+            db.execSQL("DELETE FROM pairs WHERE fingerprint=?", arrayOf(oldFp))
+            db.execSQL("INSERT OR IGNORE INTO group_members(group_id, fingerprint)" +
+                " SELECT group_id, ? FROM group_members WHERE fingerprint=?",
+                arrayOf(newFp, oldFp))
+            db.execSQL("DELETE FROM group_members WHERE fingerprint=?", arrayOf(oldFp))
+            db.delete("devices", "fingerprint=?", arrayOf(oldFp))
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
 
     fun isPaired(fp: String): Boolean =
         readableDatabase.rawQuery(
@@ -123,14 +166,43 @@ class Store(context: Context) :
             arrayOf(status, id))
     }
 
-    /** Latest messages for a peer conversation (either direction), newest last. */
-    fun conversation(peer: String, limit: Int = 200): List<JSONObject> {
+    /** Local-only delete: the peer keeps their copy (v2D). */
+    fun deleteMessage(id: String) {
+        writableDatabase.delete("messages", "id=?", arrayOf(id))
+    }
+
+    fun deleteConversation(peer: String) {
+        writableDatabase.delete("messages", "from_device=? OR to_device=?",
+            arrayOf(peer, peer))
+    }
+
+    /** Dropping a group chat also drops the group, so it cannot come back empty. */
+    fun deleteGroup(groupId: String) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.delete("messages", "group_id=?", arrayOf(groupId))
+            db.delete("group_members", "group_id=?", arrayOf(groupId))
+            db.delete("groups", "id=?", arrayOf(groupId))
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    private companion object {
+        const val MESSAGE_COLUMNS = "id, from_device, to_device, type, time," +
+            " text_content, file_name, file_size, file_path, status"
+
+        /** LIKE wildcards in user input must match literally. */
+        fun escapeLike(q: String): String =
+            q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    }
+
+    /** Newest last, matching what the bubble list expects. */
+    private fun messageRows(sql: String, args: Array<String>): List<JSONObject> {
         val out = mutableListOf<JSONObject>()
-        readableDatabase.rawQuery(
-            "SELECT id, from_device, to_device, type, time, text_content," +
-            " file_name, file_size, file_path, status FROM messages" +
-            " WHERE from_device=? OR to_device=? ORDER BY time DESC LIMIT ?",
-            arrayOf(peer, peer, limit.toString())).use { c ->
+        readableDatabase.rawQuery(sql, args).use { c ->
             while (c.moveToNext()) {
                 out.add(JSONObject().apply {
                     put("id", c.getString(0)); put("from", c.getString(1))
@@ -145,6 +217,23 @@ class Store(context: Context) :
             }
         }
         return out.reversed()
+    }
+
+    /** Latest messages for a peer conversation (either direction), newest last. */
+    fun conversation(peer: String, limit: Int = 200): List<JSONObject> =
+        messageRows(
+            "SELECT $MESSAGE_COLUMNS FROM messages WHERE from_device=? OR to_device=?" +
+            " ORDER BY time DESC LIMIT ?",
+            arrayOf(peer, peer, limit.toString()))
+
+    /** In-conversation search over text and file names (v2D), newest last. */
+    fun searchConversation(peer: String, query: String, limit: Int = 200): List<JSONObject> {
+        val like = "%${escapeLike(query)}%"
+        return messageRows(
+            "SELECT $MESSAGE_COLUMNS FROM messages WHERE (from_device=? OR to_device=?)" +
+            " AND (text_content LIKE ? ESCAPE '\\' OR file_name LIKE ? ESCAPE '\\')" +
+            " ORDER BY time DESC LIMIT ?",
+            arrayOf(peer, peer, like, like, limit.toString()))
     }
 
     fun armIncoming(resourceId: String, bubbleId: String, sender: String,
@@ -231,18 +320,24 @@ class Store(context: Context) :
     fun groups(): List<JSONObject> {
         val out = mutableListOf<JSONObject>()
         readableDatabase.rawQuery(
-            "SELECT g.id, g.name, g.created_at, g.rev, g.left_at," +
+            "SELECT g.id, g.name, g.created_at, g.rev, g.left_at, g.pinned," +
             " (SELECT COUNT(*) FROM group_members m WHERE m.group_id=g.id)" +
-            " FROM groups g ORDER BY g.created_at DESC", null).use { c ->
+            " FROM groups g ORDER BY g.pinned DESC, g.created_at DESC", null).use { c ->
             while (c.moveToNext()) {
                 out.add(JSONObject().apply {
                     put("id", c.getString(0)); put("name", c.getString(1))
                     put("createdAt", c.getLong(2)); put("rev", c.getLong(3))
-                    put("leftAt", c.getLong(4)); put("memberCount", c.getInt(5))
+                    put("leftAt", c.getLong(4)); put("pinned", c.getInt(5))
+                    put("memberCount", c.getInt(6))
                 })
             }
         }
         return out
+    }
+
+    fun setGroupPinned(id: String, pinned: Boolean) {
+        writableDatabase.execSQL("UPDATE groups SET pinned=? WHERE id=?",
+            arrayOf<Any?>(if (pinned) 1 else 0, id))
     }
 
     fun group(id: String): JSONObject? =
@@ -305,27 +400,19 @@ class Store(context: Context) :
         readableDatabase.rawQuery("SELECT left_at FROM groups WHERE id=?",
             arrayOf(groupId)).use { it.moveToFirst() && it.getLong(0) > 0 }
 
-    fun groupConversation(groupId: String, limit: Int = 200): List<JSONObject> {
-        val out = mutableListOf<JSONObject>()
-        readableDatabase.rawQuery(
-            "SELECT id, from_device, to_device, type, time, text_content," +
-            " file_name, file_size, file_path, status FROM messages" +
-            " WHERE group_id=? ORDER BY time DESC LIMIT ?",
-            arrayOf(groupId, limit.toString())).use { c ->
-            while (c.moveToNext()) {
-                out.add(JSONObject().apply {
-                    put("id", c.getString(0)); put("from", c.getString(1))
-                    put("to", c.getString(2)); put("type", c.getInt(3))
-                    put("time", c.getLong(4))
-                    if (!c.isNull(5)) put("text", c.getString(5))
-                    if (!c.isNull(6)) put("fileName", c.getString(6))
-                    put("fileSize", c.getLong(7))
-                    if (!c.isNull(8)) put("filePath", c.getString(8))
-                    put("status", c.getInt(9))
-                })
-            }
-        }
-        return out.reversed()
+    fun groupConversation(groupId: String, limit: Int = 200): List<JSONObject> =
+        messageRows(
+            "SELECT $MESSAGE_COLUMNS FROM messages WHERE group_id=? ORDER BY time DESC LIMIT ?",
+            arrayOf(groupId, limit.toString()))
+
+    fun searchGroupConversation(groupId: String, query: String,
+                                limit: Int = 200): List<JSONObject> {
+        val like = "%${escapeLike(query)}%"
+        return messageRows(
+            "SELECT $MESSAGE_COLUMNS FROM messages WHERE group_id=?" +
+            " AND (text_content LIKE ? ESCAPE '\\' OR file_name LIKE ? ESCAPE '\\')" +
+            " ORDER BY time DESC LIMIT ?",
+            arrayOf(groupId, like, like, limit.toString()))
     }
 
     fun groupLastMessage(groupId: String): JSONObject? =

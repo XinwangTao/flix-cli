@@ -31,6 +31,8 @@ class RelayService : Service() {
         private const val NOTIF_SERVICE = 1
         private const val NOTIF_SUMMARY = 1000
         private const val FALLBACK_PORT = 18991
+        /** An identity that has not refreshed its row for this long is gone. */
+        private const val STALE_MS = 120_000L
 
         fun start(context: Context) {
             val intent = Intent(context, RelayService::class.java)
@@ -158,6 +160,7 @@ class RelayService : Service() {
                 // The peer may have re-created its identity behind this address;
                 // record the fingerprint that actually answered, never the stale one.
                 val realFp = modal.optString("fingerprint").ifEmpty { fp }
+                if (realFp != fp) adoptIdentity(dev, realFp, modal)
                 store.upsertDevice(realFp,
                     modal.optString("alias", dev.optString("alias")),
                     modal.optString("deviceModel", dev.optString("deviceModel")),
@@ -167,6 +170,45 @@ class RelayService : Service() {
             }
         }
         Runtime.emit("devices")
+    }
+
+    /**
+     * Same alias, same address, new fingerprint, and nothing else claims it:
+     * that is one machine that reset its identity, so its history moves over
+     * (v2G). Anything uncertain is left alone and only logged.
+     */
+    private fun adoptIdentity(dev: JSONObject, newFp: String, modal: JSONObject) {
+        val oldFp = dev.optString("fingerprint")
+        val sameAlias = dev.optString("alias") == modal.optString("alias")
+        // The old row has stopped answering as itself; that is what makes it
+        // stale rather than a second live machine behind the same address.
+        val stale = System.currentTimeMillis() - dev.optLong("seenAt") > STALE_MS
+        if (!sameAlias || !stale || !store.hasHistory(oldFp)) {
+            android.util.Log.e("RD", "identity $oldFp -> $newFp kept apart" +
+                " alias=$sameAlias stale=$stale")
+            return
+        }
+        store.mergeIdentity(oldFp, newFp)
+        migratePrefs(oldFp, newFp)
+        android.util.Log.e("RD", "identity merged $oldFp -> $newFp")
+    }
+
+    /** Read markers and pins follow the machine, not the old uuid. */
+    private fun migratePrefs(oldFp: String, newFp: String) {
+        val prefs = getSharedPreferences("relaydesk", MODE_PRIVATE)
+        val edit = prefs.edit()
+        val oldRead = prefs.getLong("lastread_$oldFp", 0L)
+        if (oldRead > 0L) {
+            val newRead = prefs.getLong("lastread_$newFp", 0L)
+            edit.putLong("lastread_$newFp", maxOf(oldRead, newRead))
+        }
+        edit.remove("lastread_$oldFp")
+        if (prefs.getBoolean("pinned_$oldFp", false) ||
+            prefs.getBoolean("pinned_$newFp", false)) {
+            edit.putBoolean("pinned_$newFp", true)
+        }
+        edit.remove("pinned_$oldFp")
+        edit.apply()
     }
 
     // ---------- server events ----------
@@ -247,6 +289,7 @@ class RelayService : Service() {
 
     private fun notifyPeer(peer: String, preview: String, kind: String) {
         if (peer.isEmpty() || Runtime.foregroundPeer == peer) return
+        if (!notificationsAllowed()) return
         val nm = getSystemService(NotificationManager::class.java)
         if (!nm.areNotificationsEnabled()) return
         val name = store.device(peer)?.optString("alias")
@@ -288,6 +331,7 @@ class RelayService : Service() {
 
     private fun notifyGroup(gid: String, from: String, preview: String, kind: String) {
         if (gid.isEmpty() || Runtime.foregroundGroup == gid) return
+        if (!notificationsAllowed()) return
         val nm = getSystemService(NotificationManager::class.java)
         if (!nm.areNotificationsEnabled()) return
         val group = store.group(gid)
@@ -321,6 +365,11 @@ class RelayService : Service() {
             .build()
         nm.notify(NOTIF_SUMMARY, summary)
     }
+
+    /** Settings toggle (v2D): the master switch lives in prefs, read live. */
+    private fun notificationsAllowed(): Boolean =
+        getSharedPreferences("relaydesk", MODE_PRIVATE)
+            .getBoolean("notify_enabled", true)
 
     private fun hasUnreadAnywhere(): Boolean {
         val prefs = getSharedPreferences("relaydesk", MODE_PRIVATE)

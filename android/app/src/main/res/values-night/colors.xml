@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Dark palette: the app's default look. Selected at runtime by forcing
+     uiMode in MainActivity.attachBaseContext from prefs.theme. -->
+<resources>
+    <color name="bg">#090C12</color>
+    <color name="bgHeader">#0E1219</color>
+    <color name="bgPanel">#171B22</color>
+    <color name="bgBubbleIn">#252A33</color>
+    <color name="accent">#3478F6</color>
+    <color name="textPrimary">#EDF3FF</color>
+    <color name="textMuted">#8190A8</color>
+    <color name="textOnAccent">#FFFFFF</color>
+    <color name="online">#34C759</color>
+    <color name="mention">#FFC857</color>
+    <color name="danger">#EF5B6B</color>
+    <color name="bubbleTextFailed">#FFD7D7</color>
+    <color name="senderName">#BFD4FF</color>
+    <color name="searchHighlight">#66FFC857</color>
+    <color name="divider">#1E242E</color>
+</resources>

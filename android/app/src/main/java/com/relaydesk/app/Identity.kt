@@ -19,4 +19,10 @@ object Identity {
             prefs.edit().putString("alias", it).apply()
         }
     }
+
+    /** Renaming is a prefs write; peers pick it up on the next /ping_v2. */
+    fun setAlias(context: Context, alias: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putString("alias", alias).apply()
+    }
 }

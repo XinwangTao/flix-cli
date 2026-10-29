@@ -5,5 +5,15 @@
         <item name="android:statusBarColor">@color/bgHeader</item>
         <item name="android:navigationBarColor">@color/bg</item>
         <item name="android:colorAccent">@color/accent</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+
+    <!-- Applied in onCreate when prefs.theme == light (v2E). -->
+    <style name="Theme.RelayDesk.Light" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:statusBarColor">@color/bgHeader</item>
+        <item name="android:navigationBarColor">@color/bg</item>
+        <item name="android:colorAccent">@color/accent</item>
+        <item name="android:windowLightStatusBar">true</item>
     </style>
 </resources>
