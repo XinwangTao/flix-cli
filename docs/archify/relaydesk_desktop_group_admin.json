@@ -1,0 +1,181 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RelayDesk v2I：桌面端群管理（改名 / 加人 / 移人）",
+    "locale": "zh-CN",
+    "level": "L1",
+    "status": "已确认",
+    "date": "2026-10-29",
+    "quality_profile": "showcase",
+    "confirmed_by": "用户「不要让我总是确认，你自己做就行」（2026-10-29）"
+  },
+  "scope": {
+    "in": [
+      "群组会话的 ⋯ 菜单新增「群设置…」：改群名、添加已配对设备、移出成员",
+      "守护进程新增 POST /api/groups/update，复用 rdGroupSync 广播给所有成员",
+      "本地快照先落库，单个成员失败不阻断，结果按成员返回"
+    ],
+    "out": [
+      "桌面端新建群组（仍走 flix group create）",
+      "群二维码 / 群号加入",
+      "成员在线的实时状态推送（沿用列表刷新）",
+      "安卓端群管理界面的改动"
+    ]
+  },
+  "canvas": { "width": 1240, "height": 700 },
+  "lanes": [
+    { "id": "ui", "label": "桌面界面" },
+    { "id": "api", "label": "守护进程" },
+    { "id": "wire", "label": "对端" },
+    { "id": "exits", "label": "边界" }
+  ],
+  "bands": [
+    { "lane": "ui", "y": 64, "h": 130 },
+    { "lane": "api", "y": 214, "h": 150 },
+    { "lane": "wire", "y": 384, "h": 120 },
+    { "lane": "exits", "y": 524, "h": 140 }
+  ],
+  "mainPath": ["open", "edit", "post", "local", "fanout"],
+  "nodes": [
+    {
+      "id": "open",
+      "lane": "ui",
+      "type": "process",
+      "status": "new",
+      "x": 60, "y": 96, "w": 240, "h": 78,
+      "label": "⋯ → 群设置…",
+      "sublabel": "仅群组会话出现"
+    },
+    {
+      "id": "edit",
+      "lane": "ui",
+      "type": "process",
+      "status": "new",
+      "x": 340, "y": 96, "w": 280, "h": 78,
+      "label": "改名 / 加人 / 移人",
+      "sublabel": "成员列表带别名与 IP"
+    },
+    {
+      "id": "post",
+      "lane": "api",
+      "type": "process",
+      "status": "new",
+      "x": 340, "y": 246, "w": 280, "h": 78,
+      "label": "POST /api/groups/update",
+      "sublabel": "{group, name, add[], remove[]}"
+    },
+    {
+      "id": "local",
+      "lane": "api",
+      "type": "process",
+      "status": "new",
+      "x": 340, "y": 414, "w": 280, "h": 78,
+      "label": "本地先在库",
+      "sublabel": "merge_group_sync(rev = now)"
+    },
+    {
+      "id": "fanout",
+      "lane": "wire",
+      "type": "process",
+      "status": "unchanged",
+      "x": 660, "y": 414, "w": 270, "h": 78,
+      "label": "逐成员 rdGroupSync",
+      "sublabel": "5 秒超时 · 逐台记结果"
+    },
+    {
+      "id": "report",
+      "lane": "api",
+      "type": "process",
+      "status": "new",
+      "x": 660, "y": 246, "w": 270, "h": 78,
+      "label": "结果回到界面",
+      "sublabel": "delivered / total + 每台明细"
+    },
+    {
+      "id": "exits",
+      "lane": "exits",
+      "type": "security",
+      "status": "new",
+      "x": 180, "y": 560, "w": 760, "h": 78,
+      "label": "边界",
+      "sublabel": "移出自己拒收 · 未知群 404 · 对端离线只计数不回滚"
+    }
+  ],
+  "edges": [
+    {
+      "from": "open", "to": "edit", "kind": "main", "label": "打开",
+      "labelAt": [305, 112],
+      "points": [[300, 135], [340, 135]]
+    },
+    {
+      "from": "edit", "to": "post", "kind": "main", "label": "保存",
+      "labelAt": [440, 208],
+      "points": [[480, 174], [480, 246]]
+    },
+    {
+      "from": "post", "to": "local", "kind": "main", "label": "校验后",
+      "labelAt": [440, 376],
+      "points": [[480, 324], [480, 414]]
+    },
+    {
+      "from": "local", "to": "fanout", "kind": "main", "label": "快照",
+      "labelAt": [630, 436],
+      "points": [[620, 453], [660, 453]]
+    },
+    {
+      "from": "fanout", "to": "report", "kind": "aux", "label": "逐台结果",
+      "labelAt": [800, 372],
+      "points": [[795, 414], [795, 324]]
+    },
+    {
+      "from": "local", "to": "exits", "kind": "diag", "label": "移出自己",
+      "labelAt": [420, 520],
+      "points": [[420, 492], [420, 599]]
+    }
+  ],
+  "changes": [
+    {
+      "node": "open", "level": "新增",
+      "text": "群组会话的 ⋯ 菜单第一项是「群设置…」，设备会话不出现——避免误点到不存在的群操作。"
+    },
+    {
+      "node": "edit", "level": "新增",
+      "text": "对话框里改群名、从已配对设备里挑人添加、按行移出；成员行显示别名与 IP，离线也看得见是谁。"
+    },
+    {
+      "node": "post", "level": "新增",
+      "text": "守护进程新增 /api/groups/update，一个接口覆盖改名/加人/移人三种意图。"
+    },
+    {
+      "node": "local", "level": "新增",
+      "text": "先 merge_group_sync 写本地（rev=now），再广播；本地成功即视为用户操作生效，不因对端失败回滚。"
+    },
+    {
+      "node": "report", "level": "新增",
+      "text": "返回 delivered/total 与每台明细，界面在状态栏提示结果。"
+    }
+  ],
+  "cards": [
+    {
+      "kind": "note",
+      "title": "与安卓端同一套语义",
+      "body": "两端都是「本地先写、再逐台推、失败只计数」。桌面端多出来的只是入口和成员选择器。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 1 · 把自己移出",
+      "body": "守护进程直接拒绝并返回 self-removed，不写库；退出群组是另一个动作，本批不做。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 2 · 对端离线或旧版本",
+      "body": "该成员记 ok=false（no-device / rejected），本地改动保留，下次编辑带更大 rev 重推。"
+    },
+    {
+      "kind": "note",
+      "title": "本批不做",
+      "body": "桌面新建群、群号/二维码加入、成员在线状态实时推送。"
+    }
+  ]
+}

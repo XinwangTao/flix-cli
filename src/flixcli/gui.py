@@ -22,7 +22,7 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, QPoint, QSize, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
+    QApplication, QCheckBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QPushButton,
     QScrollArea, QSizePolicy, QStackedWidget, QStatusBar, QTextEdit,
     QVBoxLayout, QWidget,
@@ -1149,10 +1149,132 @@ class MainWindow(QMainWindow):
 
     def show_more(self):
         menu = QMenu(self)
+        if (self.current or {}).get("kind") == "group":
+            menu.addAction("群设置…", self.group_settings_dialog)
+            menu.addSeparator()
         menu.addAction("刷新会话", self.refresh)
         menu.addAction("查看传输任务", lambda: self.set_mode("transfers"))
         menu.addAction("设置与状态", lambda: self.set_mode("settings"))
         menu.exec(self.cursor().pos())
+
+    # ---------- group management ----------
+
+    def _member_label(self, fingerprint: str) -> str:
+        for device in self.payload.get("devices") or []:
+            if device.get("fingerprint") == fingerprint:
+                return f"{device.get('alias') or fingerprint[:8]} · {device.get('ip') or '离线'}"
+        return fingerprint[:8] + "（未知设备）"
+
+    def group_settings_dialog(self):
+        group_id = (self.current or {}).get("key")
+        group = next((g for g in self.payload.get("groups") or []
+                      if g.get("id") == group_id), None)
+        if group is None:
+            self.statusBar().showMessage("先选一个群组", 3000)
+            return
+        dialog = QDialog(self)
+        dialog.setObjectName("groupDialog")
+        dialog.setWindowTitle("群设置")
+        dialog.setFixedWidth(460)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(10)
+
+        caption = QLabel("群名称")
+        caption.setObjectName("muted")
+        layout.addWidget(caption)
+        name_edit = QLineEdit(group.get("name") or "")
+        name_edit.setPlaceholderText("群聊名称")
+        layout.addWidget(name_edit)
+
+        caption = QLabel("成员")
+        caption.setObjectName("muted")
+        layout.addWidget(caption)
+        member_list = QListWidget()
+        member_list.setObjectName("memberList")
+        member_list.setMinimumHeight(140)
+        layout.addWidget(member_list, 1)
+
+        removed: set[str] = set()
+        added: set[str] = set()
+
+        def refresh_members():
+            member_list.clear()
+            for fingerprint in list(group.get("members") or []) + list(added):
+                if fingerprint in removed or fingerprint in added:
+                    continue
+                item = QListWidgetItem(self._member_label(fingerprint))
+                item.setData(Qt.UserRole, fingerprint)
+                member_list.addItem(item)
+            for fingerprint in added:
+                item = QListWidgetItem(self._member_label(fingerprint) + " · 待添加")
+                item.setData(Qt.UserRole, fingerprint)
+                member_list.addItem(item)
+
+        refresh_members()
+
+        row = QHBoxLayout()
+        add_button = QPushButton("添加成员…")
+        remove_button = QPushButton("移出所选")
+
+        def add_member():
+            mine = set(group.get("members") or []) | added
+            candidates = [(d.get("fingerprint"), d.get("alias") or d.get("fingerprint", "")[:8])
+                          for d in self.payload.get("devices") or []
+                          if d.get("fingerprint") and d["fingerprint"] not in mine
+                          and d.get("fingerprint") in set(self.payload.get("paired") or [])]
+            if not candidates:
+                self.statusBar().showMessage("没有可添加的已配对设备", 4000)
+                return
+            from PySide6.QtWidgets import QInputDialog
+            labels = [f"{alias}" for _fp, alias in candidates]
+            choice, ok = QInputDialog.getItem(self, "添加成员", "选择已配对设备", labels, 0, False)
+            if ok and choice:
+                fingerprint = candidates[labels.index(choice)][0]
+                added.add(fingerprint)
+                refresh_members()
+
+        def remove_selected():
+            item = member_list.currentItem()
+            if item is None:
+                return
+            fingerprint = item.data(Qt.UserRole)
+            added.discard(fingerprint)
+            removed.add(fingerprint)
+            refresh_members()
+
+        add_button.clicked.connect(add_member)
+        remove_button.clicked.connect(remove_selected)
+        row.addWidget(add_button)
+        row.addWidget(remove_button)
+        row.addStretch()
+        layout.addLayout(row)
+
+        actions = QHBoxLayout()
+        hint = QLabel("改动会推送给所有在线成员")
+        hint.setObjectName("muted")
+        actions.addWidget(hint)
+        actions.addStretch()
+        cancel = QPushButton("取消")
+        save = QPushButton("保存")
+        save.setObjectName("primary")
+        cancel.clicked.connect(dialog.reject)
+        save.clicked.connect(dialog.accept)
+        actions.addWidget(cancel)
+        actions.addWidget(save)
+        layout.addLayout(actions)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+        payload = {
+            "group": group_id,
+            "name": name_edit.text().strip(),
+            "add": sorted(added),
+            "remove": sorted(removed),
+        }
+        if not payload["name"] and not payload["add"] and not payload["remove"]:
+            return
+        self.run_action(lambda: self.api.post("/api/groups/update", payload))
 
     def manual_add_dialog(self):
         from PySide6.QtWidgets import QDialog, QDialogButtonBox
