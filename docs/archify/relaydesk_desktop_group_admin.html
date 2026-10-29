@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>RelayDesk v2I：桌面端群管理（改名 / 加人 / 移人）</title>
+<title>RelayDesk v2I：桌面端群管理（新建 / 改名 / 加人 / 移人）</title>
 <style>
   :root {
     --bg: #070b14;
@@ -189,7 +189,7 @@
   "schema_version": 2,
   "diagram_type": "workflow",
   "meta": {
-    "title": "RelayDesk v2I：桌面端群管理（改名 / 加人 / 移人）",
+    "title": "RelayDesk v2I：桌面端群管理（新建 / 改名 / 加人 / 移人）",
     "locale": "zh-CN",
     "level": "L1",
     "status": "已确认",
@@ -199,12 +199,12 @@
   },
   "scope": {
     "in": [
+      "侧栏 ＋ 新建群组：填名称、勾选已配对成员，创建后立刻广播快照",
       "群组会话的 ⋯ 菜单新增「群设置…」：改群名、添加已配对设备、移出成员",
       "守护进程新增 POST /api/groups/update，复用 rdGroupSync 广播给所有成员",
       "本地快照先落库，单个成员失败不阻断，结果按成员返回"
     ],
     "out": [
-      "桌面端新建群组（仍走 flix group create）",
       "群二维码 / 群号加入",
       "成员在线的实时状态推送（沿用列表刷新）",
       "安卓端群管理界面的改动"
@@ -494,6 +494,11 @@
       "node": "report",
       "level": "新增",
       "text": "返回 delivered/total 与每台明细，界面在状态栏提示结果。"
+    },
+    {
+      "node": "post",
+      "level": "新增",
+      "text": "同一套接口拆出 /api/groups/create：先建本地群（自动把自己加入），再走一次完整的快照广播；成员一个都没选也能建成单人群。"
     }
   ],
   "cards": [
@@ -515,7 +520,7 @@
     {
       "kind": "note",
       "title": "本批不做",
-      "body": "桌面新建群、群号/二维码加入、成员在线状态实时推送。"
+      "body": "群号/二维码加入、成员在线状态实时推送、群消息的端到端加密。"
     }
   ]
 }</script>

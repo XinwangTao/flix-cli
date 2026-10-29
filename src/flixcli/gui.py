@@ -403,10 +403,10 @@ class MainWindow(QMainWindow):
         refresh.clicked.connect(lambda: (self.refresh(), toast_hint(self, "已刷新")))
         add = QPushButton("＋")
         add.setObjectName("roundBtn")
-        add.setToolTip("手动添加设备")
+        add.setToolTip("新建群组 / 添加设备")
         add.setFixedSize(36, 36)
         add.setCursor(Qt.PointingHandCursor)
-        add.clicked.connect(self.manual_add_dialog)
+        add.clicked.connect(self.show_add_menu)
         title_row.addWidget(refresh)
         title_row.addWidget(add)
         box.addLayout(title_row)
@@ -1306,6 +1306,72 @@ class MainWindow(QMainWindow):
         if not payload["name"] and not payload["add"] and not payload["remove"]:
             return
         self.run_action(lambda: self.api.post("/api/groups/update", payload))
+
+    def show_add_menu(self):
+        menu = QMenu(self)
+        menu.addAction("新建群组…", self.create_group_dialog)
+        menu.addAction("手动添加设备…", self.manual_add_dialog)
+        menu.exec(self.cursor().pos())
+
+    def create_group_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("新建群组")
+        dialog.setFixedWidth(460)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(10)
+        caption = QLabel("群名称")
+        caption.setObjectName("muted")
+        layout.addWidget(caption)
+        name_edit = QLineEdit()
+        name_edit.setPlaceholderText("例如：研发群")
+        layout.addWidget(name_edit)
+        caption = QLabel("勾选成员（只列已配对设备）")
+        caption.setObjectName("muted")
+        layout.addWidget(caption)
+        member_list = QListWidget()
+        member_list.setObjectName("memberList")
+        member_list.setMinimumHeight(150)
+        paired = set(self.payload.get("paired") or [])
+        for device in self.payload.get("devices") or []:
+            fingerprint = device.get("fingerprint")
+            if fingerprint not in paired:
+                continue
+            item = QListWidgetItem(f"{device.get('alias') or fingerprint[:8]} · "
+                                   f"{device.get('ip') or '离线'}")
+            item.setData(Qt.UserRole, fingerprint)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked)
+            member_list.addItem(item)
+        if member_list.count() == 0:
+            empty = QLabel("还没有已配对设备。先到设备页完成配对，群才能在两端同步。")
+            empty.setObjectName("muted")
+            empty.setWordWrap(True)
+            layout.addWidget(empty)
+        layout.addWidget(member_list, 1)
+        actions = QHBoxLayout()
+        actions.addStretch()
+        cancel = QPushButton("取消")
+        create = QPushButton("创建")
+        create.setObjectName("primary")
+        cancel.clicked.connect(dialog.reject)
+        create.clicked.connect(dialog.accept)
+        actions.addWidget(cancel)
+        actions.addWidget(create)
+        layout.addLayout(actions)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+        name = name_edit.text().strip()
+        if not name:
+            self.statusBar().showMessage("群名称不能为空", 4000)
+            return
+        members = [member_list.item(i).data(Qt.UserRole)
+                   for i in range(member_list.count())
+                   if member_list.item(i).checkState() == Qt.Checked]
+        self.run_action(
+            lambda: self.api.post("/api/groups/create", {"name": name, "members": members}),
+            lambda _result: self.set_mode("groups"))
 
     def manual_add_dialog(self):
         from PySide6.QtWidgets import QDialog, QDialogButtonBox

@@ -101,6 +101,31 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
                                        str(body["group"]), body["text"])
         return web.json_response(result, status=200 if result.get("ok") else 400)
 
+    async def group_create_post(request: web.Request) -> web.Response:
+        """Create a group locally, then announce it to every listed member."""
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "bad-json"}, status=400)
+        if not isinstance(body, dict):
+            return web.json_response({"ok": False, "error": "bad-params"}, status=400)
+        name = body.get("name")
+        members = body.get("members") or []
+        if not isinstance(name, str) or not name.strip() or not isinstance(members, list):
+            return web.json_response({"ok": False, "error": "bad-params"}, status=400)
+        from .config import load_or_create_identity
+        from .groupchat import new_group, update_group
+        created = new_group(store, name.strip(), [str(m) for m in members if str(m)])
+        ident_local = load_or_create_identity(store)
+        sync = await update_group(store, ident_local, created["id"])
+        publish({"type": "groupsChanged", "payload": {"groupId": created["id"]}})
+        return web.json_response({"ok": True, "group": created["id"],
+                                  "name": name.strip(),
+                                  "members": created["members"],
+                                  "delivered": sync.get("delivered", 0),
+                                  "total": sync.get("total", 0),
+                                  "results": sync.get("results", [])})
+
     async def group_update_post(request: web.Request) -> web.Response:
         """Rename / add / remove members, then push the snapshot to the peers."""
         try:
@@ -445,6 +470,7 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
     app.router.add_get("/api/groups/{group}/history", group_history_get)
     app.router.add_post("/api/groups/send", group_send_post)
     app.router.add_post("/api/groups/update", group_update_post)
+    app.router.add_post("/api/groups/create", group_create_post)
     app.router.add_get("/api/events", events_get)
     app.router.add_get("/api/adb/devices", adb_devices_get)
     app.router.add_post("/api/adb/transfer", adb_transfer_post)

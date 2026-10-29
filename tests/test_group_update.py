@@ -84,6 +84,19 @@ class UpdateGroupTests(unittest.TestCase):
             self.store, {"fingerprint": ME}, "nope", name="x"))
         self.assertEqual(result["error"], "no-group")
 
+    def test_create_group_then_announce(self):
+        from flixcli.config import load_or_create_identity
+        real = load_or_create_identity(self.store)["fingerprint"]
+        created = groupchat.new_group(self.store, "新群", ["fp-a"])
+        self.assertIn(real, created["members"])
+        sync = run(groupchat.update_group(
+            self.store, {"fingerprint": real}, created["id"]))
+        self.assertTrue(sync["ok"])
+        self.assertEqual(sync["name"], "新群")
+        self.assertEqual(sync["delivered"], 1)
+        self.assertEqual([r["to"] for r in sync["results"]], ["fp-a"])
+        self.assertGreater(self.store.group_rev(created["id"]), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
