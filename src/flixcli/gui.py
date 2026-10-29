@@ -6,9 +6,11 @@ All state comes from flixd's loopback API; functional behavior is unchanged.
 """
 from __future__ import annotations
 
+import colorsys
 import ctypes
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -18,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QSize, QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
+from PySide6.QtGui import QColor, QFont, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QPushButton,
@@ -550,6 +552,13 @@ class MainWindow(QMainWindow):
         labels.addWidget(self.session_subtitle)
         row.addLayout(labels)
         row.addStretch()
+        self.session_search = QLineEdit()
+        self.session_search.setObjectName("sessionSearch")
+        self.session_search.setPlaceholderText("在会话中搜索")
+        self.session_search.setClearButtonEnabled(True)
+        self.session_search.setFixedWidth(200)
+        self.session_search.textChanged.connect(lambda _t: self.render_timeline())
+        row.addWidget(self.session_search)
         self.header_actions = QHBoxLayout()
         self.header_actions.setSpacing(8)
         row.addLayout(self.header_actions)
@@ -736,15 +745,41 @@ class MainWindow(QMainWindow):
     def apply_theme(self, theme: str):
         self.theme = "light" if theme == "light" else "dark"
         self.setStyleSheet(styles_for(self.theme))
+        # Widgets the sheet does not reach (menus, scroll viewports, dialogs)
+        # follow the palette, so flip it too or they keep the old theme.
+        app = QApplication.instance()
+        if app is not None:
+            app.setPalette(palette_for(self.theme))
+        # Stylesheet changes do not always repaint already-shown pages: the
+        # stacked workspace keeps its old background until something touches it.
+        for widget in self.findChildren(QWidget):
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
+            # QListWidget/QListView override update(index); call the base one.
+            QWidget.update(widget)
+        self.update()
+        self.repaint()
         self._save_prefs(theme=self.theme)
 
     def copy_settings_info(self):
         QApplication.clipboard().setText(self.settings_text.text())
 
+    @staticmethod
+    def default_save_dir() -> str:
+        """Path.home() is a shim on this machine, so ask Windows first."""
+        profile = os.environ.get("USERPROFILE") or str(Path.home())
+        downloads = Path(profile) / "Downloads"
+        if downloads.is_dir():
+            return str(downloads)
+        return profile if Path(profile).is_dir() else ""
+
     def open_save_dir(self):
-        target = getattr(self, "save_dir", "")
-        if not target:
-            self.statusBar().showMessage("守护进程还没给出下载目录", 4000)
+        # The daemon only reports a saveDir when it was configured with one;
+        # fall back to the OS Downloads folder the app writes to by default.
+        configured = getattr(self, "save_dir", "")
+        target = configured if configured and Path(configured).is_dir() else self.default_save_dir()
+        if not target or not Path(target).is_dir():
+            self.statusBar().showMessage(f"目录不存在：{target or '—'}", 5000)
             return
         try:
             os.startfile(target)
@@ -977,8 +1012,15 @@ class MainWindow(QMainWindow):
             if kind == "group" and bubble.get("groupId") != key:
                 continue
             messages.append(bubble)
+        query = getattr(self, "session_search", None)
+        query = query.text().strip() if query is not None else ""
+        if query:
+            needle = query.lower()
+            messages = [b for b in messages
+                        if needle in self._search_text(b).lower()]
         if not messages:
-            empty = QLabel("还没有消息。发送一条文本或文件开始会话。")
+            empty = QLabel("没有匹配的消息" if query
+                           else "还没有消息。发送一条文本或文件开始会话。")
             empty.setObjectName("muted"); empty.setAlignment(Qt.AlignCenter)
             self.timeline_layout.insertWidget(0, empty)
         last_day = None
@@ -997,14 +1039,65 @@ class MainWindow(QMainWindow):
                            f"{float(content.get('progress', 0)) * 100:.0f}%")
             outgoing = bubble.get("from") == self.self_id
             wrap = QWidget(); line = QHBoxLayout(wrap); line.setContentsMargins(4, 0, 4, 0)
+            image = self._image_path(content) if isinstance(content, dict) else ""
             if outgoing:
                 line.addStretch()
-            line.addWidget(self._bubble(str(content), outgoing, ts))
+            line.addWidget(self._image_bubble(image, outgoing, ts) if image
+                           else self._bubble(str(content), outgoing, ts))
             if not outgoing:
                 line.addStretch()
             self.timeline_layout.insertWidget(self.timeline_layout.count() - 1, wrap)
         QTimer.singleShot(0, lambda: self.timeline.verticalScrollBar().setValue(
             self.timeline.verticalScrollBar().maximum()))
+
+    IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".heic"}
+
+    @staticmethod
+    def _search_text(bubble: dict) -> str:
+        content = bubble.get("content", "")
+        if isinstance(content, dict):
+            return str(content.get("name", ""))
+        return str(content)
+
+    def _image_path(self, content: dict) -> str:
+        """A received image keeps its local path in the bubble payload."""
+        for key in ("path", "savePath", "filePath", "local", "downloadPath"):
+            value = content.get(key)
+            if isinstance(value, str) and value:
+                file = Path(value)
+                if file.suffix.lower() in self.IMAGE_SUFFIXES and file.is_file():
+                    return str(file)
+        return ""
+
+    def _image_bubble(self, path: str, outgoing: bool, ts: datetime) -> QFrame:
+        frame = QFrame()
+        frame.setObjectName("bubbleOut" if outgoing else "bubbleIn")
+        box = QVBoxLayout(frame)
+        box.setContentsMargins(6, 6, 6, 6)
+        picture = QLabel()
+        pixmap = QPixmap(path)
+        if pixmap.isNull():
+            picture.setText("图片无法解码")
+            picture.setObjectName("bubbleText")
+        else:
+            picture.setPixmap(pixmap.scaled(260, 260, Qt.KeepAspectRatio,
+                                            Qt.SmoothTransformation))
+        picture.setToolTip(path)
+        picture.setCursor(Qt.PointingHandCursor)
+        picture.mouseDoubleClickEvent = lambda event, target=path: self.open_path(target)
+        box.addWidget(picture)
+        stamp = QLabel(ts.strftime("%H:%M"))
+        stamp.setObjectName("bubbleMeta")
+        stamp.setAlignment(Qt.AlignRight)
+        box.addWidget(stamp)
+        frame.setMaximumWidth(300)
+        return frame
+
+    def open_path(self, path: str):
+        try:
+            os.startfile(path)
+        except OSError as exc:
+            self.statusBar().showMessage(f"打不开：{exc}", 4000)
 
     def _bubble(self, content: str, outgoing: bool, ts: datetime) -> QFrame:
         frame = QFrame()
@@ -1334,14 +1427,100 @@ def main(argv: list[str] | None = None, *, api_port: int = 8898) -> int:
 PREFS_FILE = Path.home() / ".relaydesk_gui.json"
 
 
+def palette_for(theme: str) -> QPalette:
+    """Dark/light base palette for the parts QSS does not cover."""
+    light = theme == "light"
+    text = QColor("#12161d") if light else QColor("#eef3fc")
+    base = QColor("#ffffff") if light else QColor("#0d1119")
+    window = QColor("#f4f6fa") if light else QColor("#080b10")
+    muted = QColor("#5c6b80") if light else QColor("#9fb0c8")
+    pal = QPalette()
+    pal.setColor(QPalette.Window, window)
+    pal.setColor(QPalette.WindowText, text)
+    pal.setColor(QPalette.Base, base)
+    pal.setColor(QPalette.AlternateBase, window)
+    pal.setColor(QPalette.Text, text)
+    pal.setColor(QPalette.Button, window)
+    pal.setColor(QPalette.ButtonText, text)
+    pal.setColor(QPalette.ToolTipBase, base)
+    pal.setColor(QPalette.ToolTipText, text)
+    pal.setColor(QPalette.PlaceholderText, muted)
+    pal.setColor(QPalette.Highlight, QColor("#3b82f6"))
+    pal.setColor(QPalette.HighlightedText, QColor("#ffffff"))
+    return pal
+
+
+# Brand colours keep their hue in both themes; neutrals are inverted.
+LIGHT_KEEP = {"#3b82f6", "#2563eb", "#8b5cf6", "#4f46e5", "#21c78a",
+              "#ef5350", "#e81123", "#ffffff", "#000000"}
+
+HEX_RE = re.compile(r"#[0-9a-fA-F]{6}")
+
+
+RGBA_RE = re.compile(r"rgba\((\d{1,3}),\s*(\d{1,3}),\s*(\d{1,3}),\s*([0-9.]+)\)")
+
+
+def _flip_rgb(r: int, g: int, b: int):
+    """Mirror a colour's lightness so the whole sheet follows the theme.
+
+    Foreground colours (the light ones) are pushed deep into the dark range
+    rather than merely mirrored: a mid-grey on a near-white background reads
+    worse than the original pair did, so light text lands around L=0.12-0.30.
+    """
+    hue, light, sat = colorsys.rgb_to_hls(r / 255, g / 255, b / 255)
+    if light >= 0.5:
+        light = 0.12 + (1.0 - light) * 0.30
+    else:
+        light = min(1.0 - light, 0.93)
+    return tuple(round(c * 255) for c in colorsys.hls_to_rgb(hue, light, sat))
+
+
+def _flip_hex(value: str) -> str:
+    r, g, b = (int(value[i:i + 2], 16) for i in (1, 3, 5))
+    return "#%02x%02x%02x" % _flip_rgb(r, g, b)
+
+
+def _flip_rgba(match) -> str:
+    r, g, b = _flip_rgb(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    return "rgba(%d,%d,%d,%s)" % (r, g, b, match.group(4))
+
+
+# The flip turns `QLabel#bubbleText` dark, which is right for incoming bubbles
+# but wrong on the blue outgoing bubble: pin white there explicitly.
+LIGHT_OVERRIDES = """
+QFrame#bubbleOut QLabel#bubbleText { color: #ffffff; }
+QFrame#bubbleOut QLabel#bubbleMeta { color: rgba(255,255,255,0.80); }
+QFrame#bubbleIn { background: #ffffff; }
+QLabel#bubbleMeta { color: #5c6b80; }
+"""
+
+
+BRAND_RE = re.compile(r"#(3b82f6|2563eb|8b5cf6|4f46e5|21c78a|ef5350|e81123)", re.I)
+
+
+def _flip_named(block: str) -> str:
+    """`color: white` is not a hex, so it survived every flip: on a light
+    background that is white-on-white. Rules that carry a brand colour keep
+    their white text (accent buttons, badges)."""
+    if BRAND_RE.search(block):
+        return block
+    return block.replace("color: white", "color: #12161d")
+
+
 def styles_for(theme: str) -> str:
     """Dark is the authored sheet; light is the same sheet with flipped neutrals."""
     if theme != "light":
         return STYLES
-    out = STYLES
-    for dark, light in LIGHT_SWAP.items():
-        out = out.replace(dark, light)
-    return out
+    out = HEX_RE.sub(
+        lambda m: m.group(0) if m.group(0).lower() in LIGHT_KEEP else _flip_hex(m.group(0)),
+        STYLES)
+    # rgba() carries the translucent headers and overlays; hex-only flipping
+    # left those dark (the session header was the visible offender).
+    out = RGBA_RE.sub(_flip_rgba, out)
+    # Named colours go last, otherwise the dark text they produce is flipped
+    # straight back to light by the hex pass above.
+    out = "".join(_flip_named(b) for b in re.split(r"(?<=\})", out))
+    return out + LIGHT_OVERRIDES
 
 
 LIGHT_SWAP = {
