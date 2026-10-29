@@ -1,0 +1,240 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RelayDesk v2H：群同步失败不再静默",
+    "locale": "zh-CN",
+    "level": "L1",
+    "status": "已确认",
+    "date": "2026-10-29",
+    "quality_profile": "showcase",
+    "confirmed_by": "用户「不要让我总是确认，你自己做就行」（2026-10-29）；信任门放宽因涉及安全控制未获授权，本批不做"
+  },
+  "scope": {
+    "in": [
+      "发送端收集每台目标的发送结果，有失败时在界面提示一次（本地改动仍然生效）",
+      "失败文案把「对端未配对 / 离线 / 不支持」统一成「N 台设备未同步」，不暴露内部原因"
+    ],
+    "out": [
+      "放宽接收端信任门（会让未配对设备也能写群快照，需用户明确授权）",
+      "离线设备的延迟重投队列",
+      "对官方客户端的兼容",
+      "桌面端群管理界面（另做）"
+    ]
+  },
+  "canvas": {
+    "width": 1240,
+    "height": 700
+  },
+  "lanes": [
+    { "id": "send", "label": "发送端（安卓）" },
+    { "id": "trust", "label": "接收端信任门" },
+    { "id": "apply", "label": "落库与反馈" },
+    { "id": "exits", "label": "边界" }
+  ],
+  "bands": [
+    { "lane": "send", "y": 64, "h": 150 },
+    { "lane": "trust", "y": 234, "h": 150 },
+    { "lane": "apply", "y": 404, "h": 150 },
+    { "lane": "exits", "y": 574, "h": 110 }
+  ],
+  "mainPath": ["save", "fanout", "post", "gate", "merge", "publish"],
+  "nodes": [
+    {
+      "id": "save",
+      "lane": "send",
+      "type": "process",
+      "status": "unchanged",
+      "x": 60,
+      "y": 96,
+      "w": 250,
+      "h": 78,
+      "label": "保存群快照",
+      "sublabel": "writeGroup(rev=now) · 先落本地"
+    },
+    {
+      "id": "fanout",
+      "lane": "send",
+      "type": "process",
+      "status": "unchanged",
+      "x": 350,
+      "y": 96,
+      "w": 250,
+      "h": 78,
+      "label": "按成员寻址",
+      "sublabel": "store.device(fp) → ip / port"
+    },
+    {
+      "id": "post",
+      "lane": "send",
+      "type": "process",
+      "status": "changed",
+      "x": 640,
+      "y": 96,
+      "w": 270,
+      "h": 78,
+      "label": "逐台 POST rdGroupSync",
+      "sublabel": "5 秒超时 · 逐台计成功/失败"
+    },
+    {
+      "id": "gate",
+      "lane": "trust",
+      "type": "security",
+      "status": "unchanged",
+      "x": 350,
+      "y": 266,
+      "w": 340,
+      "h": 78,
+      "label": "信任门（维持原样）",
+      "sublabel": "已配对 ∨ 已是成员 · 其余 400"
+    },
+    {
+      "id": "merge",
+      "lane": "apply",
+      "type": "process",
+      "status": "unchanged",
+      "x": 350,
+      "y": 436,
+      "w": 250,
+      "h": 78,
+      "label": "rev 合并",
+      "sublabel": "rev 大者胜 · 成员去重"
+    },
+    {
+      "id": "publish",
+      "lane": "apply",
+      "type": "process",
+      "status": "unchanged",
+      "x": 640,
+      "y": 436,
+      "w": 250,
+      "h": 78,
+      "label": "groupsChanged",
+      "sublabel": "两侧列表实时刷新"
+    },
+    {
+      "id": "report",
+      "lane": "apply",
+      "type": "process",
+      "status": "new",
+      "x": 60,
+      "y": 436,
+      "w": 250,
+      "h": 78,
+      "label": "发送结果提示",
+      "sublabel": "失败 N 台 → 一次性 toast"
+    },
+    {
+      "id": "exits",
+      "lane": "exits",
+      "type": "security",
+      "status": "unchanged",
+      "x": 300,
+      "y": 600,
+      "w": 640,
+      "h": 70,
+      "label": "边界与兜底",
+      "sublabel": "未知设备仍拒收 · 全离线仍保留本地改动 · 官方端 500 计入失败"
+    }
+  ],
+  "edges": [
+    {
+      "from": "save",
+      "to": "fanout",
+      "kind": "main",
+      "label": "快照",
+      "labelAt": [320, 112],
+      "points": [[310, 135], [350, 135]]
+    },
+    {
+      "from": "fanout",
+      "to": "post",
+      "kind": "main",
+      "label": "目标表",
+      "labelAt": [612, 112],
+      "points": [[600, 135], [640, 135]]
+    },
+    {
+      "from": "post",
+      "to": "gate",
+      "kind": "main",
+      "label": "HTTP",
+      "labelAt": [706, 210],
+      "points": [[775, 174], [775, 305], [690, 305]]
+    },
+    {
+      "from": "gate",
+      "to": "merge",
+      "kind": "main",
+      "label": "放行",
+      "labelAt": [512, 392],
+      "points": [[520, 344], [520, 436]]
+    },
+    {
+      "from": "merge",
+      "to": "publish",
+      "kind": "main",
+      "label": "变更",
+      "labelAt": [622, 452],
+      "points": [[600, 475], [640, 475]]
+    },
+    {
+      "from": "post",
+      "to": "report",
+      "kind": "aux",
+      "label": "失败计数",
+      "labelAt": [300, 250],
+      "points": [[700, 174], [700, 214], [185, 214], [185, 436]]
+    },
+    {
+      "from": "gate",
+      "to": "exits",
+      "kind": "diag",
+      "label": "未配对 / 未知设备",
+      "labelAt": [812, 470],
+      "points": [[690, 305], [800, 305], [800, 635], [940, 635]]
+    },
+    {
+      "from": "report",
+      "to": "exits",
+      "kind": "diag",
+      "label": "不阻断",
+      "labelAt": [232, 560],
+      "points": [[185, 514], [185, 635], [300, 635]]
+    }
+  ],
+  "changes": [
+    {
+      "node": "post",
+      "level": "调整",
+      "text": "发送端不再 catch 之后什么也不做：逐台收集结果并统计失败台数。原先的静默会让界面照样报「群名已更新」，而实际上一条都没送达。"
+    },
+    {
+      "node": "report",
+      "level": "新增",
+      "text": "有失败时弹一次 toast：「群设置已保存 · N 台设备未同步」。本地改动不受影响，下次任何一次群改动都会带着更大 rev 重推。"
+    }
+  ],
+  "cards": [
+    {
+      "kind": "fail",
+      "title": "信任门维持原样（本批不动）",
+      "body": "放宽到「已知设备 + 成员含我」会让未配对设备也能写群快照，属于削弱安全控制，需要用户明确授权后才能改。因此新群第一次同步仍会被对端 400 拒绝——现在至少会提示「N 台设备未同步」，不再假装成功。"
+    },
+    {
+      "kind": "note",
+      "title": "真实的修复顺序",
+      "body": "先让两侧完成配对（设备页「配对」），再建群/改群，同步就能通。配对是一次性的，之后所有群同步都走已配对这条路径。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 · 所有目标都失败",
+      "body": "本地快照保留（用户的操作不能白做），只提示 N 台未同步；下次改动自动重推更大 rev。"
+    },
+    {
+      "kind": "note",
+      "title": "本批不改",
+      "body": "离线重投队列、桌面端群管理界面（改名/加人/移人）、官方客户端兼容。"
+    }
+  ]
+}

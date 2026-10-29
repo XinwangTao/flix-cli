@@ -1184,12 +1184,20 @@ class MainActivity : Activity() {
         if (targets.isEmpty()) return
         val intent = Wire.groupSyncIntent(fingerprint, gid, name, members, rev)
         Thread {
+            var failed = 0
             for ((_, ip, port) in targets) {
                 try {
                     ChannelClient.postIntent(ip, port, intent, timeoutMs = 5000)
                 } catch (_: Exception) {
-                    // offline or unsupported: nothing to queue, rev retries later
+                    // Offline, unpaired (400) or an official client answering
+                    // 500. The local snapshot stands and the next change ships
+                    // a bigger rev, but the user must not be left believing the
+                    // change reached everyone.
+                    failed++
                 }
+            }
+            if (failed > 0) mainHandler.post {
+                toast("群设置已保存 · $failed 台设备未同步")
             }
         }.start()
     }

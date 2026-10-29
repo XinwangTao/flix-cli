@@ -7,6 +7,7 @@ build/
 dist/
 build_new/
 dist_new/
+build_newflixd/
 
 # Reverse-engineering artifacts (large / sensitive: captures, pool dumps, node state)
 reverse/*.json
