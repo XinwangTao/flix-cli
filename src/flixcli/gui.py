@@ -22,7 +22,7 @@ from pathlib import Path
 from PySide6.QtCore import (
     QEasingCurve, QEvent, QPoint, QPropertyAnimation, QSize, QThread, QTimer, Qt, Signal,
 )
-from PySide6.QtGui import QColor, QFont, QPainter, QPalette, QPixmap
+from PySide6.QtGui import QAction, QColor, QFont, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QPushButton,
@@ -377,6 +377,9 @@ class MainWindow(QMainWindow):
         self._seen_bubbles: set[str] | None = None
         self._tray = None
         self._toasts: list[Toast] = []
+        # Rebuilding the transcript every poll destroys any text selection, so
+        # the renderer remembers what it last drew and skips identical frames.
+        self._timeline_signature = None
         self.setWindowTitle("RelayDesk")
         self.resize(1280, 840)
         self.setMinimumSize(980, 640)
@@ -761,6 +764,17 @@ class MainWindow(QMainWindow):
         self.timeline_layout.setSpacing(8)
         self.timeline_layout.addStretch()
         self.timeline.setWidget(self.timeline_widget)
+        # Right-clicking the empty space of the transcript still offers copy:
+        # the bubbles cover most of it, but the gaps between them do not.
+        self.timeline_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.timeline_widget.customContextMenuRequested.connect(self._canvas_menu)
+        # Ctrl+A/Ctrl+C are useless if the transcript keeps rebuilding under the
+        # cursor, so the renderer skips unchanged frames and defers while a
+        # selection is live. This is the safety net when nothing has focus.
+        copy_all = QAction("复制整个会话", self)
+        copy_all.setShortcut("Ctrl+Shift+C")
+        copy_all.triggered.connect(self.copy_all_messages)
+        self.addAction(copy_all)
         box.addWidget(self.timeline, 1)
         composer = QFrame()
         composer.setObjectName("composer")
@@ -1216,26 +1230,40 @@ class MainWindow(QMainWindow):
         self.render_timeline()
 
     def render_timeline(self):
+        if not self.current:
+            self._timeline_signature = None
+        kind, key = (self.current["kind"], self.current["key"]) if self.current else ("", "")
+        query = getattr(self, "session_search", None)
+        query = query.text().strip() if query is not None else ""
+        messages = []
+        if self.current:
+            for bubble in reversed(self.payload.get("bubbles") or []):
+                if kind == "device" and key not in (bubble.get("from"), bubble.get("to")):
+                    continue
+                if kind == "group" and bubble.get("groupId") != key:
+                    continue
+                messages.append(bubble)
+            if query:
+                needle = query.lower()
+                messages = [b for b in messages
+                            if needle in self._search_text(b).lower()]
+        signature = (kind, key, query, tuple(
+            (b.get("id"), b.get("status"), b.get("time"), self._search_text(b))
+            for b in messages))
+        if signature == self._timeline_signature:
+            return
+        # Keep the user's selection alive: a poll that lands mid-drag would
+        # otherwise wipe the highlight (and the copy with it). The next poll
+        # after the selection is released redraws normally.
+        if self._timeline_signature is not None and self.timeline_selection():
+            return
+        self._timeline_signature = signature
         while self.timeline_layout.count() > 1:
             item = self.timeline_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         if not self.current:
             return
-        kind, key = self.current["kind"], self.current["key"]
-        messages = []
-        for bubble in reversed(self.payload.get("bubbles") or []):
-            if kind == "device" and key not in (bubble.get("from"), bubble.get("to")):
-                continue
-            if kind == "group" and bubble.get("groupId") != key:
-                continue
-            messages.append(bubble)
-        query = getattr(self, "session_search", None)
-        query = query.text().strip() if query is not None else ""
-        if query:
-            needle = query.lower()
-            messages = [b for b in messages
-                        if needle in self._search_text(b).lower()]
         if not messages:
             empty = QLabel("没有匹配的消息" if query
                            else "还没有消息。发送一条文本或文件开始会话。")
@@ -1270,6 +1298,81 @@ class MainWindow(QMainWindow):
             self.timeline.verticalScrollBar().maximum()))
 
     IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".heic"}
+
+    # ---------- copying ----------
+
+    def timeline_selection(self) -> str:
+        """Whatever the user has highlighted across the bubbles of the chat."""
+        selected = []
+        for label in self.timeline_widget.findChildren(QLabel):
+            if label.textInteractionFlags() & (
+                    Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard):
+                text = (label.selectedText()
+                        .replace(chr(0x2028), chr(10))
+                        .replace(chr(0x2029), chr(10)).strip())
+                if text:
+                    selected.append(text)
+        return "\n".join(selected)
+
+    def copy_selection(self):
+        text = self.timeline_selection()
+        if text:
+            QApplication.clipboard().setText(text)
+            self.statusBar().showMessage(f"已复制 {len(text)} 个字符", 2500)
+
+    def copy_all_messages(self):
+        """Everything in the open conversation, oldest first, sender prefixed."""
+        if not self.current:
+            return
+        kind, key = self.current["kind"], self.current["key"]
+        lines = []
+        for bubble in reversed(self.payload.get("bubbles") or []):
+            if kind == "device" and key not in (bubble.get("from"), bubble.get("to")):
+                continue
+            if kind == "group" and bubble.get("groupId") != key:
+                continue
+            stamp = datetime.fromtimestamp((bubble.get("time") or 0) / 1000)
+            who = "我" if bubble.get("from") == self.self_id else self._peer_label()
+            content = bubble.get("content")
+            body = ("[文件] " + str(content.get("name", ""))) if isinstance(content, dict) \
+                else str(content or "")
+            lines.append(f"{stamp.strftime('%m-%d %H:%M')} {who}：{body}")
+        if not lines:
+            self.statusBar().showMessage("这个会话还没有消息", 2500)
+            return
+        QApplication.clipboard().setText("\n".join(lines))
+        self.statusBar().showMessage(f"已复制 {len(lines)} 条消息", 3000)
+
+    def _peer_label(self) -> str:
+        key = self.current["key"] if self.current else ""
+        for device in self.payload.get("devices") or []:
+            if device.get("fingerprint") == key:
+                return device.get("alias") or key[:8]
+        return key[:8]
+
+    def _canvas_menu(self, pos):
+        menu = QMenu(self.timeline_widget)
+        if self.timeline_selection():
+            menu.addAction("复制所选", self.copy_selection)
+        menu.addAction("全选会话文本", self.select_all_bubbles)
+        menu.addAction("复制整个会话", self.copy_all_messages)
+        menu.exec(self.timeline_widget.mapToGlobal(pos))
+
+    def select_all_bubbles(self):
+        for label in self.timeline_widget.findChildren(QLabel):
+            if label.textInteractionFlags() & (
+                    Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard):
+                label.selectAll()
+
+    def _bubble_menu(self, label: QLabel, menu_anchor: QWidget) -> None:
+        menu = QMenu(menu_anchor)
+        selected = self.timeline_selection()
+        if selected:
+            menu.addAction("复制所选", self.copy_selection)
+        menu.addAction("复制这条消息",
+                       lambda: QApplication.clipboard().setText(label.text()))
+        menu.addAction("复制整个会话", self.copy_all_messages)
+        menu.exec(menu_anchor.mapToGlobal(menu_anchor.rect().bottomLeft()))
 
     @staticmethod
     def _search_text(bubble: dict) -> str:
@@ -1355,7 +1458,12 @@ class MainWindow(QMainWindow):
         box.setContentsMargins(14, 9, 14, 7)
         text = QLabel(content)
         text.setWordWrap(True)
-        text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        text.setTextInteractionFlags(
+            Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        text.setFocusPolicy(Qt.ClickFocus)
+        text.setContextMenuPolicy(Qt.CustomContextMenu)
+        text.customContextMenuRequested.connect(
+            lambda _pos, label=text: self._bubble_menu(label, label))
         text.setObjectName("bubbleText")
         box.addWidget(text)
         stamp = QLabel(ts.strftime("%H:%M"))
