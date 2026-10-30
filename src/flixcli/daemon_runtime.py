@@ -4,8 +4,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import subprocess
 import sys
 from pathlib import Path
+
+# The daemon runs inside the windowed exe (no console). Windows gives every
+# console child (clip.exe) a brand-new visible terminal unless suppressed;
+# 0 on non-Windows keeps Popen happy there.
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 from . import DEVICE_PORT, local_ip, model
 from .adb import AdbClient
@@ -23,7 +29,8 @@ async def set_clipboard_text(text: str) -> None:
         return
     proc = await asyncio.create_subprocess_exec(
         "clip", stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        creationflags=NO_WINDOW)
     data = text.encode("utf-16-le")
     with contextlib.suppress(Exception):
         await proc.communicate(b"\xff\xfe" + data)
@@ -34,9 +41,18 @@ def read_clipboard() -> str | None:
     if not sys.platform.startswith("win"):
         return None
     import ctypes
+    from ctypes import wintypes
     u32 = ctypes.windll.user32
     k32 = ctypes.windll.kernel32
     CF_UNICODETEXT = 13
+    # Handles/pointers come back as 64-bit values; without explicit restypes
+    # ctypes truncates them to 32-bit c_int and reads garbage -- observed as
+    # random access violations in wstring_at (0x7F591B90-style addresses).
+    u32.GetClipboardData.argtypes = [wintypes.UINT]
+    u32.GetClipboardData.restype = wintypes.HANDLE
+    k32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+    k32.GlobalLock.restype = wintypes.LPVOID
+    k32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
     if not u32.OpenClipboard(0):
         return None
     try:

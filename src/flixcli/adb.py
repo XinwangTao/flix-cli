@@ -10,9 +10,14 @@ import asyncio
 import json
 import os
 import shutil
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+# adb.exe is a console app; without CREATE_NO_WINDOW every ADB call flashes a
+# terminal when issued from the windowed daemon. 0 keeps POSIX Popen happy.
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 class AdbError(RuntimeError):
@@ -76,7 +81,8 @@ class AdbClient:
                        "MSYS2_ARG_CONV_EXCL": "*"}
             proc = await asyncio.create_subprocess_exec(
                 self.adb_path, *args, stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE, env=env)
+                stderr=asyncio.subprocess.PIPE, env=env,
+                creationflags=NO_WINDOW)
             out, err = await asyncio.wait_for(
                 proc.communicate(), timeout=timeout or self.timeout)
         except asyncio.TimeoutError as exc:
