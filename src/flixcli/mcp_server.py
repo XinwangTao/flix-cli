@@ -204,7 +204,7 @@ async def _tool_call(name: str, args: dict) -> dict:
     if name == "flix_devices":
         store = Store()
         try:
-            return {"devices": store.devices()}
+            return {"devices": store.visible_devices()}
         finally:
             store.close()
     if name == "flix_probe":

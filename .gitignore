@@ -50,7 +50,7 @@ build_new_rd/
 build_new_flix/
 build_new_flixd/
 
-# 打包变体与临时产物（build_vNNN/、dist_vNNN/ 等版本化目录）
-build_v*/
-dist_v*/
+# 打包变体与临时产物（build_vNNN/、dist_rd_new/ 等一次性构建目录）
+build_*/
+dist_*/
 .pytest_cache/

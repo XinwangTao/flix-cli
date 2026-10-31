@@ -71,7 +71,7 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
         })
 
     async def devices_get(request: web.Request) -> web.Response:
-        return web.json_response(store.devices())
+        return web.json_response(store.visible_devices())
 
     async def settings_get(request: web.Request) -> web.Response:
         p = store.prefs()
@@ -287,7 +287,8 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
             "self": {"id": ident["fingerprint"], "alias": ident["alias"],
                      "deviceModel": ident.get("deviceModel", "Windows"),
                      "ip": local_ip(), "port": channel_port, "online": True},
-            "devices": store.devices(), "bubbles": store.bubbles(100),
+            "devices": store.visible_devices(own=ident["fingerprint"]),
+            "bubbles": store.bubbles(100),
             "groups": store.groups(), "media": media, "adb": adb,
             "paired": [row[0] for row in store.con.execute(
                 "SELECT fingerprint FROM pair_devices")],

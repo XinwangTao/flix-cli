@@ -311,7 +311,7 @@ def make_web_app(store, ident: dict, on_web_text: Callable[[str], None],
         return web.json_response({"devices": [
             {"fingerprint": d["fingerprint"],
              "alias": d.get("alias") or d["fingerprint"][:8]}
-            for d in store.devices() if d["fingerprint"] != ident["fingerprint"]]})
+            for d in store.visible_devices(own=ident["fingerprint"])]})
 
     async def send_post(request: web.Request) -> web.Response:
         try:

@@ -376,7 +376,7 @@ def cmd_self(args) -> int:
 def cmd_devices(args) -> int:
     store = Store()
     try:
-        emit(store.devices(), args.json)
+        emit(store.visible_devices(), args.json)
     finally:
         store.close()
     return 0

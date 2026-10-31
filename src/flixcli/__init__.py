@@ -64,6 +64,32 @@ def _routed_ip() -> str:
     return ""
 
 
+def local_ipv4s() -> list[str]:
+    """Every non-loopback IPv4 address of this host (best effort).
+
+    Used to keep our own machine out of device lists: an older install can
+    announce itself under a different fingerprint, so matching on fingerprint
+    alone is not enough.
+    """
+    raw: list[str] = [ip for ip, _mask in _win_ipv4_table()]
+    if not raw:
+        try:
+            raw = [info[4][0] for info in
+                   socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)]
+        except OSError:
+            raw = []
+    routed = _routed_ip()
+    if routed:
+        raw.append(routed)
+    seen: set[str] = set()
+    out: list[str] = []
+    for ip in raw:
+        if ip and ip != "0.0.0.0" and not ip.startswith("127.") and ip not in seen:
+            seen.add(ip)
+            out.append(ip)
+    return out
+
+
 def _usable(ip: str, mask: str | None) -> bool:
     if not ip or ip.startswith(("0.", "127.", "169.254.")):
         return False

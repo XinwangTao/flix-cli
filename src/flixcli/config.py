@@ -14,7 +14,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import DEVICE_PORT
+from . import DEVICE_PORT, local_ipv4s
 
 APP_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "flixcli"
 # APPDATA occasionally points at the state dir itself (tests, shell exports);
@@ -149,6 +149,40 @@ class Store:
             " insert_or_update_time FROM persistence_devices ORDER BY alias")
         cols = ["fingerprint", "alias", "deviceModel", "port", "version", "ip", "os", "seenAt"]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def visible_devices(self, *, own: str | None = None,
+                        local_ips: list[str] | None = None) -> list[dict]:
+        """Device list for humans and agents: one row per physical machine.
+
+        One host can be recorded several times — the official app on 8891 and
+        RelayDesk on 18991 use different fingerprints, and an older install of
+        this very machine can announce itself as a peer. Group by IP, keep the
+        freshest announcement, and drop our own addresses.
+
+        Routing and presence keep using the raw ``devices()``: they target
+        fingerprints, so collapsing rows there would lose reachable peers.
+        """
+        if own is None:
+            own = (self.prefs().get("identity") or {}).get("fingerprint") or ""
+        if local_ips is None:
+            local_ips = local_ipv4s()
+        mine = {ip for ip in local_ips if ip}
+        by_ip: dict[str, dict] = {}
+        without_ip: list[dict] = []
+        for row in self.devices():
+            if own and row["fingerprint"] == own:
+                continue
+            ip = (row.get("ip") or "").strip()
+            if ip and ip in mine:
+                continue
+            if not ip:
+                without_ip.append(row)
+                continue
+            current = by_ip.get(ip)
+            if current is None or _fresher(row, current):
+                by_ip[ip] = row
+        return sorted([*by_ip.values(), *without_ip],
+                      key=lambda r: (r.get("alias") or "").lower())
 
     def is_paired(self, fingerprint: str) -> bool:
         return self.con.execute(
@@ -505,3 +539,9 @@ def load_or_create_identity(store: Store) -> dict:
     }
     store.set_pref("identity", ident)
     return ident
+
+
+def _fresher(row: dict, current: dict) -> bool:
+    """True when ``row`` is the freshest announcement of the same host."""
+    return ((row.get("seenAt") or 0), (row.get("version") or 0), (row.get("port") or 0)) > (
+        (current.get("seenAt") or 0), (current.get("version") or 0), (current.get("port") or 0))
