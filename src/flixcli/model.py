@@ -165,6 +165,9 @@ ACTION_GROUP_SYNC = "rdGroupSync"
 # Agent-to-agent envelope (v2K). Same `rd` rationale: an older peer answers 500
 # and the sender degrades to "queued" instead of pretending it was delivered.
 ACTION_AGENT = "rdAgent"
+# Remote command execution (L2). Same `rd` rationale: an older peer answers 500
+# and the caller reports peer-too-old instead of pretending the command ran.
+ACTION_SHELL = "rdShell"
 
 
 def agent_intent(from_fp: str, to_fp: str, mid: str, body: str,
@@ -174,6 +177,18 @@ def agent_intent(from_fp: str, to_fp: str, mid: str, body: str,
         "deviceId": from_fp,
         "extra": {"to": to_fp, "id": mid, "body": body,
                   "replyTo": reply_to, "created": created},
+    }
+
+
+def shell_intent(from_fp: str, to_fp: str, sid: str, command: str,
+                 timeout: float = 30.0) -> dict:
+    """Remote exec envelope. The reply is a JSON body, not `{0: success}`."""
+    return {
+        "action": ACTION_SHELL,
+        "deviceId": from_fp,
+        "bubbleId": "",
+        "extra": {"to": to_fp, "id": sid, "command": command,
+                  "timeout": float(timeout)},
     }
 
 

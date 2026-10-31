@@ -150,6 +150,18 @@ TOOLS = [
                                     "text": {"type": "string"},
                                     "reply_to": {"type": "string"}},
                      "required": ["to", "text", "reply_to"]}},
+    {"name": "flix_shell",
+     "description": "Run one command on a paired LAN device (exec only, no PTY). "
+                    "Returns exit/stdout/stderr; output is capped at 256KB and the "
+                    "process tree is killed when the timeout expires.",
+     "inputSchema": {"type": "object",
+                     "properties": {
+                         "to": {"type": "string",
+                                "description": "peer fingerprint/prefix or ip[:port]"},
+                         "command": {"type": "string"},
+                         "timeout": {"type": "number",
+                                     "description": "seconds (default 30, max 300)"}},
+                     "required": ["to", "command"]}},
 ]
 
 
@@ -394,6 +406,39 @@ async def _tool_call(name: str, args: dict) -> dict:
                 return {"ok": False, "error": "reply_to-required"}
             return await send_agent_message(store, ident, str(args.get("to", "")),
                                             str(args.get("text", "")), reply_to)
+        finally:
+            store.close()
+    if name == "flix_shell":
+        import uuid
+
+        from .channel import post_json
+        from .model import shell_intent
+        from .remoteshell import DEFAULT_TIMEOUT_S
+        from .routing import resolve_target
+        store = Store()
+        try:
+            ident = load_or_create_identity(store)
+            ip, port, fp = resolve_target(store, str(args.get("to", "")))
+            if not ip:
+                return {"ok": False, "error": "no-device"}
+            if not store.is_paired(fp):
+                return {"ok": False, "error": "not-paired", "detail": fp}
+            command = str(args.get("command") or "").strip()
+            if not command:
+                return {"ok": False, "error": "empty-command"}
+            try:
+                timeout = float(args.get("timeout") or DEFAULT_TIMEOUT_S)
+            except (TypeError, ValueError):
+                timeout = DEFAULT_TIMEOUT_S
+            intent = shell_intent(ident["fingerprint"], fp, uuid.uuid4().hex,
+                                  command, timeout)
+            try:
+                result = await post_json(ip, "/intent", intent,
+                                         port=port or 8891,
+                                         timeout=timeout + 15)
+            except PeerError as e:
+                return {"ok": False, "error": e.kind, "detail": e.detail}
+            return {"ok": True, "to": fp, **result}
         finally:
             store.close()
     return {"error": f"unknown tool {name}"}

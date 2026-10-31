@@ -11,13 +11,14 @@ import json
 import sys
 import urllib.error
 import urllib.request
+import uuid
 
 from . import DEVICE_PORT, __version__, local_ip
 from .adb import AdbClient, AdbError
-from .channel import PeerError, post_bubble, post_intent
+from .channel import PeerError, post_bubble, post_intent, post_json
 from .config import APP_DIR, Store, load_or_create_identity
 from .discovery import Discovery
-from .model import clipboard_intent, text_bubble
+from .model import clipboard_intent, shell_intent, text_bubble
 from .routing import resolve_target
 
 
@@ -110,6 +111,60 @@ async def cmd_send_text(args) -> int:
                            "text", args.text, args.port)
     finally:
         store.close()
+
+
+async def cmd_shell(args) -> int:
+    """Run one command on a paired peer (exec only, no PTY, no streaming).
+
+    Exit code is the remote command's exit code (like ssh); transport and
+    trust failures keep the CLI's own codes: 3 network, 4 refused.
+    """
+    parts = list(args.command)
+    if parts and parts[0] == "--":
+        parts = parts[1:]
+    command = " ".join(parts).strip()
+    if not command:
+        emit({"error": "usage",
+              "detail": "nothing to run; use: flix shell <device> -- <command>"}, True)
+        return 2
+    store = Store()
+    try:
+        ident = load_or_create_identity(store)
+        ip, port, fp = resolve_target(store, args.to)
+        if not ip:
+            emit({"error": "no-device", "detail": f"unknown target {args.to!r}"}, True)
+            return 3
+        if not store.is_paired(fp):
+            emit({"error": "not-paired",
+                  "detail": f"{fp} is not paired; run 'flix pair' first"}, True)
+            return 4
+        intent = shell_intent(ident["fingerprint"], fp, uuid.uuid4().hex,
+                              command, args.timeout)
+        try:
+            result = await post_json(ip, "/intent", intent,
+                                     port=port or args.port,
+                                     timeout=args.timeout + 15)
+        except PeerError as e:
+            code = {"timeout": 3, "unreachable": 3, "rejected": 4}.get(e.kind, 3)
+            emit({"error": e.kind, "detail": e.detail, "to": fp, "ip": ip}, True)
+            return code
+    finally:
+        store.close()
+    if args.json:
+        emit({"ok": True, "to": fp, "ip": ip, **result}, True)
+    else:
+        out = result.get("stdout") or ""
+        err = result.get("stderr") or ""
+        if out:
+            sys.stdout.write(out if out.endswith("\n") else out + "\n")
+        if err:
+            sys.stderr.write(err if err.endswith("\n") else err + "\n")
+        if result.get("truncated"):
+            print("[flix] output truncated at 256KB", file=sys.stderr)
+        if result.get("timeout"):
+            print(f"[flix] timed out after {args.timeout:g}s; process tree killed",
+                  file=sys.stderr)
+    return int(result.get("exit") or 0)
 
 
 async def cmd_clipboard(args) -> int:
@@ -658,6 +713,28 @@ async def cmd_serve(args) -> int:
         store.close()
 
 
+def _normalize_shell_argv(argv: list[str]) -> list[str]:
+    """Let `flix shell <to> --timeout 5 -- cmd` parse like argparse expects.
+
+    `shell` uses REMAINDER for the command, which would otherwise swallow any
+    option placed between the target and the `--` separator. Move those
+    options in front of the target so both orders work.
+    """
+    try:
+        i = argv.index("shell")
+    except ValueError:
+        return argv
+    head, rest = argv[:i + 1], argv[i + 1:]
+    if not rest or rest[0].startswith("--"):
+        return argv
+    tail = rest[1:]
+    if "--" not in tail:
+        return argv
+    j = tail.index("--")
+    flags, command = tail[:j], tail[j:]
+    return [*head, *flags, rest[0], *command]
+
+
 def main(argv: list[str] | None = None) -> int:
     # Windows consoles default to a legacy codepage (cp936 here); Chinese
     # payloads would raise UnicodeEncodeError. Keep bytes UTF-8 for pipes and
@@ -691,6 +768,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("to")
     p.add_argument("text")
     p.add_argument("--port", type=int, default=DEVICE_PORT)
+
+    p = add("shell", "run one command on a paired device (exec only, no PTY)",
+            cmd_shell)
+    p.add_argument("to", help="fingerprint (prefix ok) or ip[:port]")
+    p.add_argument("--timeout", type=float, default=30.0,
+                   help="seconds before the process tree is killed (default 30)")
+    p.add_argument("--port", type=int, default=DEVICE_PORT)
+    p.add_argument("command", nargs=argparse.REMAINDER,
+                   help="command to run; put '--' before it")
 
     p = add("send", "send file(s) to a device (bubble + POST /file)", cmd_send_files)
     p.add_argument("to")
@@ -860,7 +946,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="interface IP for discovery multicast (default: auto)")
     p.set_defaults(fn=cmd_serve)
 
-    args = ap.parse_args(argv)
+    args = ap.parse_args(_normalize_shell_argv(
+        list(sys.argv[1:] if argv is None else argv)))
     try:
         result = args.fn(args)
         if asyncio.iscoroutine(result):

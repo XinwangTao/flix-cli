@@ -65,6 +65,7 @@ announce，因此 flixd 每 60s 对库内设备做一次 `/ping_v2` 探活并刷
 | 群组（本地群表 + bubble+groupId 逐发） | `flix group create/add/join/leave/list/send/history` | flix_group_* | ✅ 官方可收 |
 | 配对二维码 | `flix qrcode [--decode]`（flix2:// payload） | — | flixcli 间 |
 | 自动应答（轮询收件 → `--cmd` → 回发，带防自激护栏） | `flix agent --cmd "…"` | — | — |
+| 远程执行（rdShell，exec-only，配对即可执行） | `flix shell <设备> -- <命令>` | flix_shell | flixcli 间 |
 | Web 界面（PIN 登录 → 发送页 + **群聊实时视图**：历史+3s 轮询） | `flixd --web-port 18992`（`flix serve` 同） | — | 群视图为 flixcli 附加 |
 | WebRTC 信令面（offer/answer/ice/hangup） | REST `/webrtc/signal`、`/api/webrtc/*` | — | flixcli 间 [compat] |
 | Desktop API（self/devices/settings/events SSE/send-text） | `http://127.0.0.1:8898` | flix_status | 形状对齐 |
@@ -81,7 +82,7 @@ announce，因此 flixd 每 60s 对库内设备做一次 `/ping_v2` 探活并刷
                             "args": ["mcp"] } } }
 ```
 
-工具（19）：原有设备/消息/群组工具，加上 `flix_adb_devices`、`flix_adb_report`、
+工具（20）：原有设备/消息/群组工具，加上 `flix_adb_devices`、`flix_adb_report`、
 `flix_adb_push`、`flix_adb_pull`。ADB 工具要求明确的 `serial`（多设备时不猜目标），
 只执行文件传输和只读报告；shell 不通过 MCP 暴露。
 
@@ -153,6 +154,25 @@ flix agent --cmd "F:\my-ai\reply.bat" --prefix "[A-AI]"
 
 流程真源：`docs/archify/flix_agent_workflow.html`（旁路 `.json`）。
 
+## 远程执行（flix shell）
+
+两台**已配对**设备之间跑一条命令并取回结果，相当于局域网里的 `ssh <host> <cmd>` 最小面。
+一期只做 exec：不分配 PTY，所以 `vim`/`top` 这类全屏程序不支持。
+
+```bash
+flix shell 4c4ca286 -- "ipconfig /all"        # 指纹前缀即可
+flix shell 192.168.237.200:18991 -- "whoami"
+flix shell <设备> --timeout 120 -- "ping -n 5 127.0.0.1"
+```
+
+- **返回**：`stdout` / `stderr` / `exit` / `truncated` / `durationMs`；CLI 的退出码就是远端命令的退出码。
+- **上限**：输出超过 256 KB 截断并置 `truncated`；超时默认 30 s、最大 300 s，到点杀整个进程树。
+- **授权**：配对即授权（两端都查 `pair_devices`），未配对一律 403，不执行、不落库。
+- **审计**：目标端 `shell_audit` 表记录发起方、命令摘要、退出码、耗时；`stdout` 不回写数据库。
+- **MCP**：`flix_shell{to, command, timeout?}` 与 CLI 共用同一实现。
+
+流程真源：`docs/archify/flix_shell_workflow.html`（旁路 `.json`）。
+
 ## 回归测试
 
 ```
@@ -161,6 +181,9 @@ python tests/e2e.py         # 双节点 11 项：ping/pair/text/file/group/web/
 ```
 
 ## 退出码约定
+
+`flix shell` 例外：成功连上并执行后，退出码就是远端命令的退出码（与 ssh 一致），
+网络/拒绝/本地问题仍用下表。
 
 | 码 | 含义 |
 |---|---|

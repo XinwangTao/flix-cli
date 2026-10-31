@@ -57,6 +57,16 @@ CREATE TABLE IF NOT EXISTS agent_messages (
   attempts INTEGER NOT NULL DEFAULT 0,
   read_at INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS shell_audit (
+  id TEXT NOT NULL PRIMARY KEY,
+  from_device TEXT NOT NULL,
+  command TEXT NOT NULL,
+  exit_code INTEGER,
+  duration_ms INTEGER,
+  truncated INTEGER NOT NULL DEFAULT 0,
+  timed_out INTEGER NOT NULL DEFAULT 0,
+  created INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS bubble_entities (
   id TEXT NOT NULL PRIMARY KEY,
   from_device TEXT NOT NULL,
@@ -383,6 +393,28 @@ class Store:
         rows = self.con.execute(sql, (limit,)).fetchall()
         return [{"id": r[0], "from": r[1], "body": r[2], "replyTo": r[3],
                  "created": r[4], "read": bool(r[5])} for r in rows]
+
+    # -- remote shell audit --------------------------------------------------
+    def add_shell_audit(self, sid: str, sender: str, command: str,
+                        result: dict) -> None:
+        """Record who ran what and how it ended. Output is never stored."""
+        self.con.execute(
+            "INSERT OR REPLACE INTO shell_audit"
+            " (id, from_device, command, exit_code, duration_ms, truncated,"
+            " timed_out, created) VALUES (?,?,?,?,?,?,?,?)",
+            (sid, sender, command[:2000], result.get("exit"),
+             result.get("durationMs"), 1 if result.get("truncated") else 0,
+             1 if result.get("timeout") else 0, int(time.time() * 1000)))
+        self.con.commit()
+
+    def shell_audit(self, limit: int = 50) -> list[dict]:
+        rows = self.con.execute(
+            "SELECT id, from_device, command, exit_code, duration_ms, truncated,"
+            " timed_out, created FROM shell_audit ORDER BY created DESC LIMIT ?",
+            (limit,)).fetchall()
+        cols = ["id", "from", "command", "exit", "durationMs", "truncated",
+                "timeout", "created"]
+        return [dict(zip(cols, r)) for r in rows]
 
     def mark_agent_read(self, ids: list[str]) -> int:
         if not ids:

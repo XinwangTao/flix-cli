@@ -26,6 +26,7 @@ from aiohttp import web
 
 from . import DEVICE_PORT, model
 from .media_session import SessionError
+from .remoteshell import DEFAULT_TIMEOUT_S, run_command
 
 
 def _to_int(v, default: int = 0) -> int:
@@ -197,6 +198,8 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
             return _group_sync_intent(intent, store)
         if action == model.ACTION_AGENT:
             return _agent_intent(intent, store)
+        if action == model.ACTION_SHELL:
+            return await _shell_intent(intent, store)
         return web.Response(status=500, text="receive intent failed")
 
     def _agent_intent(intent: dict, store) -> web.Response:
@@ -225,6 +228,31 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
                                 created=created_ms)
         publish("agentMessage", {"id": mid, "from": sender})
         return web.Response(text="{0: success}")
+
+    async def _shell_intent(intent: dict, store) -> web.Response:
+        """Remote command execution (rdShell, phase 1 = exec only).
+
+        Trust gate matches the other rd* envelopes: an unpaired sender is
+        refused before anything is spawned and nothing is recorded for it.
+        The command runs in a worker thread so a slow child cannot stall the
+        daemon's event loop.
+        """
+        extra = intent.get("extra") if isinstance(intent.get("extra"), dict) else {}
+        sender = intent.get("deviceId") or extra.get("from")
+        sid = extra.get("id")
+        command = extra.get("command")
+        if not (isinstance(sid, str) and sid and isinstance(command, str) and command):
+            return web.Response(status=400, text="receive intent failed")
+        if not isinstance(sender, str) or not sender or not store.is_paired(sender):
+            return web.Response(status=403, text="receive intent failed")
+        try:
+            timeout = float(extra.get("timeout") or DEFAULT_TIMEOUT_S)
+        except (TypeError, ValueError):
+            timeout = DEFAULT_TIMEOUT_S
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, run_command, command, timeout)
+        store.add_shell_audit(sid, sender, command, result)
+        return web.json_response({"ok": True, "id": sid, **result})
 
     def _pair_intent(intent: dict) -> web.Response:
         # Pairing rides /intent [RT 2026-10-21]: askPairDevice/confirmPairDevice

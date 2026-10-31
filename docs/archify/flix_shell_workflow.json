@@ -1,0 +1,277 @@
+{
+ "schema_version": 2,
+ "diagram_type": "workflow",
+ "meta": {
+  "title": "flix shell：局域网远程执行（L2 新子系统图）",
+  "locale": "zh-CN",
+  "level": "L2",
+  "status": "已确认",
+  "date": "2026-10-31",
+  "quality_profile": "minimal",
+  "confirmed_by": "用户 2026-10-31「确认」；执行身份=flixd 当前用户，MCP 允许 AI 自行发起，审计只落命令摘要+退出码"
+ },
+ "scope": {
+  "in": [
+   "已配对的两台设备之间，A 让 B 执行一条命令并拿回 stdout/stderr/退出码",
+   "入口：CLI `flix shell` 与 MCP `flix_shell`（同一实现）",
+   "授权模型：配对即授权（pair_devices 命中即可执行）",
+   "审计：目标端记录发起方、命令摘要、退出码、耗时"
+  ],
+  "out": [
+   "交互式 PTY 终端（二期，复用同一信封的 mode=pty）",
+   "网页终端、GUI 终端页",
+   "公网中继、NAT 穿透、非局域网链路",
+   "SSH 密钥/known_hosts 兼容层",
+   "未配对设备的任何执行路径"
+  ]
+ },
+ "canvas": {
+  "width": 1240,
+  "height": 720
+ },
+ "lanes": [
+  {
+   "id": "a",
+   "label": "发起端 A（CLI / MCP）"
+  },
+  {
+   "id": "wire",
+   "label": "8891 已配对通道"
+  },
+  {
+   "id": "b",
+   "label": "目标端 B（flixd 执行器）"
+  },
+  {
+   "id": "ex",
+   "label": "失败与人工出口",
+   "variant": "exception"
+  }
+ ],
+ "mainPath": [
+  "call",
+  "paircheck",
+  "intent",
+  "trust",
+  "exec",
+  "reply",
+  "render",
+  "audit"
+ ],
+ "nodes": [
+  {
+   "id": "call",
+   "lane": "a",
+   "col": 0,
+   "type": "frontend",
+   "label": "flix shell / flix_shell",
+   "sublabel": "<设备> -- <命令>，默认超时 30s",
+   "width": 180
+  },
+  {
+   "id": "paircheck",
+   "lane": "a",
+   "col": 1,
+   "type": "security",
+   "label": "本地配对校验",
+   "sublabel": "pair_devices 命中才继续",
+   "width": 168
+  },
+  {
+   "id": "intent",
+   "lane": "wire",
+   "col": 2,
+   "type": "messagebus",
+   "label": "POST /intent rdShell",
+   "sublabel": "sessionId + command + timeout",
+   "width": 176
+  },
+  {
+   "id": "trust",
+   "lane": "b",
+   "col": 2,
+   "type": "security",
+   "label": "目标端信任门",
+   "sublabel": "is_paired(sender) 才执行",
+   "width": 168
+  },
+  {
+   "id": "exec",
+   "lane": "b",
+   "col": 3,
+   "type": "backend",
+   "label": "子进程执行",
+   "sublabel": "进程树 + 超时 + 256KB 截断",
+   "width": 176
+  },
+  {
+   "id": "reply",
+   "lane": "wire",
+   "col": 4,
+   "type": "messagebus",
+   "label": "结果信封",
+   "sublabel": "exit / stdout / stderr / truncated",
+   "width": 172
+  },
+  {
+   "id": "render",
+   "lane": "a",
+   "col": 4,
+   "type": "frontend",
+   "label": "渲染与退出码",
+   "sublabel": "0 成功 / 3 网络 / 4 拒绝 / 5 超时",
+   "width": 168
+  },
+  {
+   "id": "audit",
+   "lane": "b",
+   "col": 4,
+   "type": "backend",
+   "label": "审计落库",
+   "sublabel": "发起方 / 命令摘要 / 退出码",
+   "width": 160
+  },
+  {
+   "id": "deny",
+   "lane": "ex",
+   "col": 1,
+   "type": "security",
+   "label": "拒绝 403",
+   "sublabel": "未配对 / 未知目标",
+   "width": 156
+  },
+  {
+   "id": "timeout",
+   "lane": "ex",
+   "col": 3,
+   "type": "security",
+   "label": "超时或超限",
+   "sublabel": "杀进程树，回 partial",
+   "width": 160
+  },
+  {
+   "id": "human",
+   "lane": "ex",
+   "col": 4,
+   "type": "external",
+   "label": "人工排查",
+   "sublabel": "看审计记录与两端日志",
+   "width": 158
+  }
+ ],
+ "edges": [
+  {
+   "from": "call",
+   "to": "paircheck",
+   "label": "命令 + 目标",
+   "variant": "emphasis",
+   "role": "main"
+  },
+  {
+   "from": "paircheck",
+   "to": "intent",
+   "label": "已配对",
+   "role": "main"
+  },
+  {
+   "from": "paircheck",
+   "to": "deny",
+   "label": "本地未配对",
+   "variant": "security",
+   "role": "error"
+  },
+  {
+   "from": "intent",
+   "to": "trust",
+   "label": "rdShell 信封",
+   "role": "main"
+  },
+  {
+   "from": "trust",
+   "to": "exec",
+   "label": "通过",
+   "role": "main"
+  },
+  {
+   "from": "trust",
+   "to": "deny",
+   "label": "对端未配对 / 403",
+   "variant": "security",
+   "role": "error"
+  },
+  {
+   "from": "exec",
+   "to": "reply",
+   "label": "退出码 + 输出",
+   "role": "main"
+  },
+  {
+   "from": "exec",
+   "to": "timeout",
+   "label": "超时 / 超过 256KB",
+   "variant": "security",
+   "role": "error"
+  },
+  {
+   "from": "timeout",
+   "to": "reply",
+   "label": "partial + 标记",
+   "variant": "dashed"
+  },
+  {
+   "from": "reply",
+   "to": "render",
+   "label": "结果",
+   "role": "main"
+  },
+  {
+   "from": "reply",
+   "to": "audit",
+   "label": "留痕",
+   "variant": "dashed"
+  },
+  {
+   "from": "timeout",
+   "to": "human",
+   "label": "告警",
+   "variant": "dashed"
+  },
+  {
+   "from": "deny",
+   "to": "human",
+   "label": "排查",
+   "variant": "dashed"
+  }
+ ],
+ "cards": [
+  {
+   "dot": "cyan",
+   "title": "输入契约（一期 exec）",
+   "items": [
+    "CLI：flix shell <fp|别名> -- <命令...> [--timeout 30]",
+    "MCP：flix_shell{to, command, timeout?}，与 CLI 同一实现",
+    "返回：exit / stdout / stderr / truncated / duration",
+    "输出上限 256KB，超出截断并置 truncated"
+   ]
+  },
+  {
+   "dot": "rose",
+   "title": "信任边界（配对即授权）",
+   "items": [
+    "两端都查 pair_devices；对端未配对 → 403，不执行不落库",
+    "不引入 SSH 密钥、无 known_hosts",
+    "MCP 暴露 shell = 打破现状边界，按本次确认执行"
+   ]
+  },
+  {
+   "dot": "emerald",
+   "title": "边界与二期",
+   "items": [
+    "一期只做 exec，不分配 PTY，不支持 vim/top",
+    "二期：同一信封 mode=pty，走流式会话端点",
+    "不开放网页终端 / GUI 终端页",
+    "不改现有气泡线格式，新增独立 intent action"
+   ]
+  }
+ ]
+}

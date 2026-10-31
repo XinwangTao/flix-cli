@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>flix shell：局域网远程执行（L2 新子系统图）</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #2b3040; --text: #e7eaf0;
+    --muted: #98a0b3; --cyan: #37c2d8; --emerald: #3fbf7f; --rose: #e0646d;
+    --amber: #d9a13b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 36px 56px; background: var(--bg); color: var(--text);
+    font: 14px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  h1 { font-size: 20px; margin: 0 0 6px; letter-spacing: .2px; }
+  .meta { color: var(--muted); font-size: 12px; margin-bottom: 24px; }
+  .board { position: relative; background: var(--panel); border: 1px solid var(--line);
+           border-radius: 12px; padding: 18px 22px 22px; }
+  .lanes { display: flex; flex-direction: column; gap: 12px; }
+  .lane { display: flex; align-items: center; gap: 14px; }
+  .lane-label { width: 118px; flex: none; color: var(--muted); font-size: 12px;
+                text-align: right; letter-spacing: .3px; }
+  .lane-track { flex: 1; display: grid; grid-template-columns: repeat(5, 1fr);
+                gap: 12px; align-items: center; min-height: 78px; }
+  .node { position: relative; z-index: 2; background: #1e222c; border: 1px solid var(--line);
+          border-left: 3px solid var(--cyan); border-radius: 8px; padding: 9px 11px;
+          min-height: 56px; }
+  .node .label { font-weight: 600; font-size: 13px; }
+  .node .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .node.security { border-left-color: var(--rose); }
+  .node.external { border-left-color: var(--amber); }
+  .node.backend { border-left-color: var(--emerald); }
+  .node.messagebus { border-left-color: var(--cyan); }
+  .edge-layer { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+           gap: 14px; margin-top: 26px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+          padding: 14px 16px; }
+  .card h2 { font-size: 13px; margin: 0 0 8px; display: flex; align-items: center; gap: 8px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .dot.cyan { background: var(--cyan); } .dot.rose { background: var(--rose); }
+  .dot.emerald { background: var(--emerald); } .dot.amber { background: var(--amber); }
+  .card li { color: var(--muted); font-size: 12px; margin: 3px 0; }
+  .legend { margin-top: 18px; color: var(--muted); font-size: 11px; }
+  .legend span { margin-right: 16px; }
+</style>
+</head>
+<body>
+<h1 id="title"></h1>
+<div class="meta" id="meta"></div>
+<div class="board">
+  <div class="lanes" id="lanes"></div>
+  <svg class="edge-layer" id="edges"></svg>
+</div>
+<div class="cards" id="cards"></div>
+<div class="legend">
+  <span>粗线 = 主路径</span><span>虚线 = 旁路/告警</span><span>红线 = 丢弃/失败</span>
+</div>
+
+<script type="application/json" id="spec">
+{
+ "schema_version": 2,
+ "diagram_type": "workflow",
+ "meta": {
+  "title": "flix shell：局域网远程执行（L2 新子系统图）",
+  "locale": "zh-CN",
+  "level": "L2",
+  "status": "已确认",
+  "date": "2026-10-31",
+  "quality_profile": "minimal",
+  "confirmed_by": "用户 2026-10-31「确认」；执行身份=flixd 当前用户，MCP 允许 AI 自行发起，审计只落命令摘要+退出码"
+ },
+ "scope": {
+  "in": [
+   "已配对的两台设备之间，A 让 B 执行一条命令并拿回 stdout/stderr/退出码",
+   "入口：CLI `flix shell` 与 MCP `flix_shell`（同一实现）",
+   "授权模型：配对即授权（pair_devices 命中即可执行）",
+   "审计：目标端记录发起方、命令摘要、退出码、耗时"
+  ],
+  "out": [
+   "交互式 PTY 终端（二期，复用同一信封的 mode=pty）",
+   "网页终端、GUI 终端页",
+   "公网中继、NAT 穿透、非局域网链路",
+   "SSH 密钥/known_hosts 兼容层",
+   "未配对设备的任何执行路径"
+  ]
+ },
+ "canvas": {
+  "width": 1240,
+  "height": 720
+ },
+ "lanes": [
+  {
+   "id": "a",
+   "label": "发起端 A（CLI / MCP）"
+  },
+  {
+   "id": "wire",
+   "label": "8891 已配对通道"
+  },
+  {
+   "id": "b",
+   "label": "目标端 B（flixd 执行器）"
+  },
+  {
+   "id": "ex",
+   "label": "失败与人工出口",
+   "variant": "exception"
+  }
+ ],
+ "mainPath": [
+  "call",
+  "paircheck",
+  "intent",
+  "trust",
+  "exec",
+  "reply",
+  "render",
+  "audit"
+ ],
+ "nodes": [
+  {
+   "id": "call",
+   "lane": "a",
+   "col": 0,
+   "type": "frontend",
+   "label": "flix shell / flix_shell",
+   "sublabel": "<设备> -- <命令>，默认超时 30s",
+   "width": 180
+  },
+  {
+   "id": "paircheck",
+   "lane": "a",
+   "col": 1,
+   "type": "security",
+   "label": "本地配对校验",
+   "sublabel": "pair_devices 命中才继续",
+   "width": 168
+  },
+  {
+   "id": "intent",
+   "lane": "wire",
+   "col": 2,
+   "type": "messagebus",
+   "label": "POST /intent rdShell",
+   "sublabel": "sessionId + command + timeout",
+   "width": 176
+  },
+  {
+   "id": "trust",
+   "lane": "b",
+   "col": 2,
+   "type": "security",
+   "label": "目标端信任门",
+   "sublabel": "is_paired(sender) 才执行",
+   "width": 168
+  },
+  {
+   "id": "exec",
+   "lane": "b",
+   "col": 3,
+   "type": "backend",
+   "label": "子进程执行",
+   "sublabel": "进程树 + 超时 + 256KB 截断",
+   "width": 176
+  },
+  {
+   "id": "reply",
+   "lane": "wire",
+   "col": 4,
+   "type": "messagebus",
+   "label": "结果信封",
+   "sublabel": "exit / stdout / stderr / truncated",
+   "width": 172
+  },
+  {
+   "id": "render",
+   "lane": "a",
+   "col": 4,
+   "type": "frontend",
+   "label": "渲染与退出码",
+   "sublabel": "0 成功 / 3 网络 / 4 拒绝 / 5 超时",
+   "width": 168
+  },
+  {
+   "id": "audit",
+   "lane": "b",
+   "col": 4,
+   "type": "backend",
+   "label": "审计落库",
+   "sublabel": "发起方 / 命令摘要 / 退出码",
+   "width": 160
+  },
+  {
+   "id": "deny",
+   "lane": "ex",
+   "col": 1,
+   "type": "security",
+   "label": "拒绝 403",
+   "sublabel": "未配对 / 未知目标",
+   "width": 156
+  },
+  {
+   "id": "timeout",
+   "lane": "ex",
+   "col": 3,
+   "type": "security",
+   "label": "超时或超限",
+   "sublabel": "杀进程树，回 partial",
+   "width": 160
+  },
+  {
+   "id": "human",
+   "lane": "ex",
+   "col": 4,
+   "type": "external",
+   "label": "人工排查",
+   "sublabel": "看审计记录与两端日志",
+   "width": 158
+  }
+ ],
+ "edges": [
+  {
+   "from": "call",
+   "to": "paircheck",
+   "label": "命令 + 目标",
+   "variant": "emphasis",
+   "role": "main"
+  },
+  {
+   "from": "paircheck",
+   "to": "intent",
+   "label": "已配对",
+   "role": "main"
+  },
+  {
+   "from": "paircheck",
+   "to": "deny",
+   "label": "本地未配对",
+   "variant": "security",
+   "role": "error"
+  },
+  {
+   "from": "intent",
+   "to": "trust",
+   "label": "rdShell 信封",
+   "role": "main"
+  },
+  {
+   "from": "trust",
+   "to": "exec",
+   "label": "通过",
+   "role": "main"
+  },
+  {
+   "from": "trust",
+   "to": "deny",
+   "label": "对端未配对 / 403",
+   "variant": "security",
+   "role": "error"
+  },
+  {
+   "from": "exec",
+   "to": "reply",
+   "label": "退出码 + 输出",
+   "role": "main"
+  },
+  {
+   "from": "exec",
+   "to": "timeout",
+   "label": "超时 / 超过 256KB",
+   "variant": "security",
+   "role": "error"
+  },
+  {
+   "from": "timeout",
+   "to": "reply",
+   "label": "partial + 标记",
+   "variant": "dashed"
+  },
+  {
+   "from": "reply",
+   "to": "render",
+   "label": "结果",
+   "role": "main"
+  },
+  {
+   "from": "reply",
+   "to": "audit",
+   "label": "留痕",
+   "variant": "dashed"
+  },
+  {
+   "from": "timeout",
+   "to": "human",
+   "label": "告警",
+   "variant": "dashed"
+  },
+  {
+   "from": "deny",
+   "to": "human",
+   "label": "排查",
+   "variant": "dashed"
+  }
+ ],
+ "cards": [
+  {
+   "dot": "cyan",
+   "title": "输入契约（一期 exec）",
+   "items": [
+    "CLI：flix shell <fp|别名> -- <命令...> [--timeout 30]",
+    "MCP：flix_shell{to, command, timeout?}，与 CLI 同一实现",
+    "返回：exit / stdout / stderr / truncated / duration",
+    "输出上限 256KB，超出截断并置 truncated"
+   ]
+  },
+  {
+   "dot": "rose",
+   "title": "信任边界（配对即授权）",
+   "items": [
+    "两端都查 pair_devices；对端未配对 → 403，不执行不落库",
+    "不引入 SSH 密钥、无 known_hosts",
+    "MCP 暴露 shell = 打破现状边界，按本次确认执行"
+   ]
+  },
+  {
+   "dot": "emerald",
+   "title": "边界与二期",
+   "items": [
+    "一期只做 exec，不分配 PTY，不支持 vim/top",
+    "二期：同一信封 mode=pty，走流式会话端点",
+    "不开放网页终端 / GUI 终端页",
+    "不改现有气泡线格式，新增独立 intent action"
+   ]
+  }
+ ]
+}
+</script>
+
+<script>
+(function () {
+  var spec = JSON.parse(document.getElementById('spec').textContent);
+  document.getElementById('title').textContent = spec.meta.title;
+  document.getElementById('meta').textContent =
+    spec.diagram_type + ' · ' + spec.meta.locale + ' · ' +
+    spec.nodes.length + ' 节点 / ' + spec.edges.length + ' 边 · ' +
+    (spec.meta.status || '');
+
+  var laneOrder = spec.lanes.map(function (l) { return l.id; });
+  var lanesEl = document.getElementById('lanes');
+  var nodeEls = {};
+
+  spec.lanes.forEach(function (lane) {
+    var row = document.createElement('div');
+    row.className = 'lane';
+    var lab = document.createElement('div');
+    lab.className = 'lane-label';
+    lab.textContent = lane.label;
+    var track = document.createElement('div');
+    track.className = 'lane-track';
+    row.appendChild(lab);
+    row.appendChild(track);
+    lanesEl.appendChild(row);
+    lane.track = track;
+  });
+
+  spec.nodes.forEach(function (n) {
+    var el = document.createElement('div');
+    el.className = 'node ' + n.type;
+    el.style.gridColumn = (n.col + 1);
+    el.innerHTML = '<div class="label"></div><div class="sub"></div>';
+    el.querySelector('.label').textContent = n.label;
+    el.querySelector('.sub').textContent = n.sublabel || '';
+    var lane = spec.lanes.filter(function (l) { return l.id === n.lane; })[0];
+    lane.track.appendChild(el);
+    nodeEls[n.id] = el;
+  });
+
+  var svg = document.getElementById('edges');
+  function draw() {
+    var board = document.querySelector('.board').getBoundingClientRect();
+    svg.setAttribute('width', board.width);
+    svg.setAttribute('height', board.height);
+    svg.setAttribute('viewBox', '0 0 ' + board.width + ' ' + board.height);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    spec.edges.forEach(function (e) {
+      var a = nodeEls[e.from], b = nodeEls[e.to];
+      if (!a || !b) return;
+      var ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+      var x1 = ra.left - board.left, y1 = ra.top - board.top;
+      var x2 = rb.left - board.left, y2 = rb.top - board.top;
+      var down = Math.abs(y2 - y1) > 20;
+      var sx = x1 + ra.width / 2, sy = y1 + (y2 > y1 ? ra.height : 0);
+      var ex = x2 + rb.width / 2, ey = y2 + (y2 > y1 ? 0 : rb.height);
+      var mx = (sx + ex) / 2, my = (sy + ey) / 2;
+      var d = down
+        ? 'M' + sx + ',' + sy + ' C' + sx + ',' + my + ' ' + ex + ',' + my + ' ' + ex + ',' + ey
+        : 'M' + (x1 + ra.width) + ',' + (y1 + ra.height / 2) + ' C' + mx + ',' + (y1 + ra.height / 2) +
+          ' ' + mx + ',' + (y2 + rb.height / 2) + ' ' + x2 + ',' + (y2 + rb.height / 2);
+      var color = e.variant === 'security' ? 'var(--rose)'
+                : e.variant === 'dashed' ? 'var(--muted)' : 'var(--cyan)';
+      var p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      p.setAttribute('d', d);
+      p.setAttribute('fill', 'none');
+      p.setAttribute('stroke', color);
+      p.setAttribute('stroke-width', e.variant === 'emphasis' ? 2.4 : 1.4);
+      p.setAttribute('stroke-dasharray', e.variant === 'dashed' ? '5 4' : 'none');
+      p.setAttribute('marker-end', 'url(#arrow)');
+      svg.appendChild(p);
+
+      var t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      t.setAttribute('x', down ? ex + 6 : mx);
+      t.setAttribute('y', down ? ey - 6 : my - 6);
+      t.setAttribute('fill', '#98a0b3');
+      t.setAttribute('font-size', '10');
+      t.textContent = e.label;
+      svg.appendChild(t);
+    });
+
+    var defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+    defs.innerHTML = '<marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" ' +
+      'markerWidth="6" markerHeight="6" orient="auto-start-reverse">' +
+      '<path d="M0,0 L10,5 L0,10 z" fill="#98a0b3"></path></marker>';
+    svg.appendChild(defs);
+  }
+
+  var cards = document.getElementById('cards');
+  spec.cards.forEach(function (c) {
+    var el = document.createElement('div');
+    el.className = 'card';
+    var h = document.createElement('h2');
+    h.innerHTML = '<span class="dot ' + c.dot + '"></span>';
+    h.appendChild(document.createTextNode(c.title));
+    el.appendChild(h);
+    var ul = document.createElement('ul');
+    ul.style.margin = '0'; ul.style.paddingLeft = '18px';
+    c.items.forEach(function (i) {
+      var li = document.createElement('li'); li.textContent = i; ul.appendChild(li);
+    });
+    el.appendChild(ul);
+    cards.appendChild(el);
+  });
+
+  window.addEventListener('load', draw);
+  window.addEventListener('resize', draw);
+})();
+</script>
+</body>
+</html>
