@@ -10,6 +10,7 @@ from flixcli.adb import AdbClient, AdbDevice
 
 
 class AdbAdapterTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "MSYS 路径还原只在 Windows 上生效")
     def test_msys_path_is_restored_only_for_android_roots(self):
         client = AdbClient()
         with patch.dict(os.environ, {

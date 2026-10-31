@@ -463,6 +463,21 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
         return web.Response(status=404, text="Route not found")
 
 
+    def _wire_log_file() -> Path | None:
+        """Where the verbatim wire capture goes.
+
+        ``FLIX_WIRE_LOG`` overrides the path (``off`` disables it); the default
+        lives in the app state dir so the server is portable — an absolute
+        reverse-engineering path used to make every request 500 off-Windows.
+        """
+        raw = os.environ.get("FLIX_WIRE_LOG", "").strip()
+        if raw.lower() in {"off", "0", "none"}:
+            return None
+        if raw:
+            return Path(raw)
+        from .config import APP_DIR
+        return APP_DIR / "wire_capture.log"
+
     @web.middleware
     async def _wire_log(request, handler):
         import time as _t
@@ -484,8 +499,15 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
         rec = (f"[{_t.strftime('%H:%M:%S')}] {request.method} {request.path_qs}\n"
                f"headers={dict(request.headers)}\n"
                f"body={body_repr}\n----\n")
-        with open(r"D:/flix-cli/reverse/wire_capture.log", "ab") as f:
-            f.write(rec.encode("utf-8", "replace"))
+        target = _wire_log_file()
+        if target is not None:
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with open(target, "ab") as f:
+                    f.write(rec.encode("utf-8", "replace"))
+            except OSError:
+                # Diagnostics must never break protocol handling.
+                pass
         return await handler(request)
 
     app = web.Application(middlewares=[_wire_log])
