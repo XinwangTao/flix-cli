@@ -20,11 +20,50 @@ MAX_TIMEOUT_S = 300.0
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
+def _fallback_encodings() -> tuple[str, ...]:
+    """Code pages a redirected Windows console actually writes.
+
+    `cmd` children write the OEM code page (cp936 here, not UTF-8), so a strict
+    UTF-8 decode fails on Chinese output; POSIX children write the locale codec.
+    """
+    encs: list[str] = []
+    if os.name == "nt":
+        try:
+            import ctypes
+            encs.append(f"cp{ctypes.windll.kernel32.GetOEMCP()}")
+        except Exception:  # noqa: BLE001 - best effort
+            pass
+        encs.append("gbk")
+    else:
+        import locale
+        encs.append(locale.getpreferredencoding(False))
+    seen: set[str] = set()
+    out: list[str] = []
+    for enc in encs:
+        if enc and enc.lower() not in seen:
+            seen.add(enc.lower())
+            out.append(enc)
+    return tuple(out)
+
+
+def _decode(data: bytes) -> str:
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    for enc in _fallback_encodings():
+        try:
+            return data.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return data.decode("utf-8", "replace")
+
+
 def _clip(data: bytes) -> tuple[str, bool]:
-    """Decode UTF-8 output, cutting it at MAX_OUTPUT_BYTES."""
+    """Decode the output, cutting it at MAX_OUTPUT_BYTES."""
     if len(data) <= MAX_OUTPUT_BYTES:
-        return data.decode("utf-8", "replace"), False
-    return data[:MAX_OUTPUT_BYTES].decode("utf-8", "replace"), True
+        return _decode(data), False
+    return _decode(data[:MAX_OUTPUT_BYTES]), True
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:

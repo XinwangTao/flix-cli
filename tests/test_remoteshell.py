@@ -51,6 +51,12 @@ class RunCommandTests(unittest.TestCase):
         self.assertTrue(result["truncated"])
         self.assertLessEqual(len(result["stdout"]), MAX_OUTPUT_BYTES)
 
+    def test_cjk_output_is_decoded_with_the_console_code_page(self):
+        # cmd children write the OEM code page, not UTF-8; a strict UTF-8
+        # decode would turn this into replacement characters.
+        result = run_command("echo 中文测试", timeout=10)
+        self.assertIn("中文测试", result["stdout"])
+
 
 class ShellHttpTests(unittest.IsolatedAsyncioTestCase):
     """Drive the real /intent handler, as a peer would."""
