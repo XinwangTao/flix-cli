@@ -311,6 +311,7 @@ async def _pty_client(ip: str, port: int, my_fp: str, shell_name: str) -> int:
                         stop.set()
                         for task in tasks:
                             task.cancel()
+                    print("\r\n[flix] 会话已关闭")
                     return 0
         except aiohttp.ClientError as exc:
             print(f"[flix] 连接失败: {exc}", file=sys.stderr)
