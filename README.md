@@ -1,8 +1,18 @@
 # flix-cli
 
+[![CI](https://github.com/XinwangTao/flix-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/XinwangTao/flix-cli/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
+[![Release](https://img.shields.io/github/v/release/XinwangTao/flix-cli?label=release)](https://github.com/XinwangTao/flix-cli/releases)
+
 Flix 2.4.0+127（com.ifreedomer 江河智连）局域网互操作复刻：`flixd` 守护进程 + `flix` CLI +
 `flix mcp`（AI 插件接口）。以 IDA MCP 静态逆向 + 线上 verbatim 取证为基准实现
 （协议规格与证据标注见 `reverse/protocol.md`），与官方 Flix 客户端实测互通。
+
+> **English** — An independent, interoperable reimplementation of the Flix LAN transport
+> (discovery, pairing, text/file bubbles, groups, clipboard sync), shipped as a Python CLI and
+> daemon, a stdio MCP server for AI clients, a PySide6 desktop console, and an Android client.
+> Windows is the primary target; the CLI and daemon also run on Linux/macOS.
 
 ```bash
 git clone https://github.com/XinwangTao/flix-cli.git
@@ -67,7 +77,7 @@ announce，因此 flixd 每 60s 对库内设备做一次 `/ping_v2` 探活并刷
 `flix mcp` 是 stdio JSON-RPC MCP server。客户端配置：
 
 ```json
-{ "mcpServers": { "flix": { "command": "D:\\flix-cli\\.venv\\Scripts\\flix.exe",
+{ "mcpServers": { "flix": { "command": "C:\\path\\to\\flix-cli\\.venv\\Scripts\\flix.exe",
                             "args": ["mcp"] } } }
 ```
 
@@ -192,3 +202,10 @@ powershell -File scripts\build_exe.ps1     # 产物：dist\flix.exe、dist\flixd
 `flixd.exe --device-port 18991 --api-port 18998 --web-port 18992` 即完整守护进程
 （发现/配对/群/文件/剪贴板同步 + 网页界面）；`flix.exe` 含全部 CLI 子命令、
 `mcp`（AI 插件）与 `agent`（AI 自动应答）。状态仍在 `%APPDATA%\flixcli`。
+
+## 许可与反馈
+
+本项目以 [MIT](LICENSE) 许可发布。版本变更见 [CHANGELOG.md](CHANGELOG.md)，
+安全问题的报告方式见 [SECURITY.md](SECURITY.md)。
+
+Issues / PR 欢迎；提交前请先在本机跑一遍 `pytest tests -q --ignore=tests/e2e.py`。

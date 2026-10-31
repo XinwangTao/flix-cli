@@ -9,6 +9,11 @@ from pathlib import Path
 import aiohttp
 from aiohttp import web
 
+try:
+    import aiortc  # noqa: F401
+except ImportError:  # 媒体是可选依赖（[media] extra），基础环境里跳过
+    raise unittest.SkipTest("media extra not installed")
+
 from flixcli.config import Store
 from flixcli.media_session import SessionManager
 from flixcli.media_transport import MediaRuntime

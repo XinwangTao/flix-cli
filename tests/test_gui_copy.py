@@ -10,6 +10,11 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+try:
+    import PySide6  # noqa: F401
+except ImportError:  # GUI 是可选依赖，基础环境（CI）里跳过
+    raise unittest.SkipTest("PySide6 not installed")
+
 from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
 
 import flixcli.gui as gui  # noqa: E402

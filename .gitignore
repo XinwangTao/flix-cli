@@ -49,3 +49,8 @@ flixd.log
 build_new_rd/
 build_new_flix/
 build_new_flixd/
+
+# 打包变体与临时产物（build_vNNN/、dist_vNNN/ 等版本化目录）
+build_v*/
+dist_v*/
+.pytest_cache/

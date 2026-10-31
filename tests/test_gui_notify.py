@@ -3,6 +3,11 @@ from __future__ import annotations
 
 import unittest
 
+try:
+    import PySide6  # noqa: F401
+except ImportError:  # GUI 是可选依赖，基础环境（CI）里跳过
+    raise unittest.SkipTest("PySide6 not installed")
+
 from flixcli.gui import (
     TOAST_GAP, TOAST_H, TOAST_MARGIN, TOAST_W, notification_text, pick_notification,
     toast_position,
