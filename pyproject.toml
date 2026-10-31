@@ -1,12 +1,27 @@
 [project]
 name = "flixcli"
-version = "0.1.0"
+version = "2.2.1"
 description = "flixd + flix CLI: interoperable reimplementation of the Flix LAN transport protocol"
+readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.11"
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+]
 dependencies = [
     "aiohttp>=3.9",
     "cryptography>=43,<47",
 ]
+
+[project.urls]
+Homepage = "https://github.com/XinwangTao/flix-cli"
+Repository = "https://github.com/XinwangTao/flix-cli"
+Changelog = "https://github.com/XinwangTao/flix-cli/blob/main/CHANGELOG.md"
+Issues = "https://github.com/XinwangTao/flix-cli/issues"
 
 [project.optional-dependencies]
 gui = [
