@@ -82,9 +82,10 @@ announce，因此 flixd 每 60s 对库内设备做一次 `/ping_v2` 探活并刷
                             "args": ["mcp"] } } }
 ```
 
-工具（20）：原有设备/消息/群组工具，加上 `flix_adb_devices`、`flix_adb_report`、
-`flix_adb_push`、`flix_adb_pull`。ADB 工具要求明确的 `serial`（多设备时不猜目标），
-只执行文件传输和只读报告；shell 不通过 MCP 暴露。
+工具覆盖设备/消息/群组/ADB/AI 通道/远程执行，包括 `flix_adb_devices`、
+`flix_adb_report`、`flix_adb_push`、`flix_adb_pull`、`flix_agent_*` 与 `flix_shell`。
+ADB 工具要求明确的 `serial`（多设备时不猜目标），只执行文件传输和只读报告；
+**ADB shell 仍不通过 MCP 暴露**，远程命令请走 `flix_shell`（exec-only，见「远程执行」）。
 
 局域网多设备 AI 通讯：每台设备跑 `flixd` + `flix mcp`，AI 之间即可互发文本/剪贴板/
 文件/群消息：
