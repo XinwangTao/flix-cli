@@ -776,13 +776,21 @@ class MainWindow(QMainWindow):
         copy_all.triggered.connect(self.copy_all_messages)
         self.addAction(copy_all)
         box.addWidget(self.timeline, 1)
+        # 收到新消息但用户正在往上翻历史时，不抢滚动，只给这个提示。
+        self.new_msg_btn = QPushButton("↓ 有新消息")
+        self.new_msg_btn.setObjectName("newMsgPill")
+        self.new_msg_btn.setCursor(Qt.PointingHandCursor)
+        self.new_msg_btn.hide()
+        self.new_msg_btn.clicked.connect(self.jump_to_latest)
+        box.addWidget(self.new_msg_btn, 0, Qt.AlignHCenter)
+        self.timeline.verticalScrollBar().valueChanged.connect(self._maybe_hide_new_pill)
         composer = QFrame()
         composer.setObjectName("composer")
         cbox = QVBoxLayout(composer)
         cbox.setContentsMargins(14, 12, 14, 10)
         self.composer = QTextEdit()
         self.composer.setObjectName("composerEdit")
-        self.composer.setPlaceholderText("输入消息，Ctrl+Enter 发送")
+        self.composer.setPlaceholderText("输入消息，回车发送（Shift+回车换行）")
         self.composer.setMaximumHeight(96)
         self.composer.installEventFilter(self)
         cbox.addWidget(self.composer)
@@ -1256,7 +1264,20 @@ class MainWindow(QMainWindow):
         # otherwise wipe the highlight (and the copy with it). The next poll
         # after the selection is released redraws normally.
         if self._timeline_signature is not None and self.timeline_selection():
+            # 选中文字期间不重绘（否则选区会被清掉），但新消息不能一直不显示：
+            # 选区释放后补一次重绘。
+            QTimer.singleShot(1200, self.render_timeline)
             return
+        # 重建前记下滚动位置：用户正在翻历史时不能被新消息拉到底部。
+        bar = self.timeline.verticalScrollBar()
+        saved_scroll = bar.value()
+        previous_ids = getattr(self, "_timeline_ids", None)
+        at_bottom = previous_ids is None or bar.maximum() - saved_scroll < 24
+        session_changed = getattr(self, "_timeline_session", None) != (kind, key)
+        self._timeline_ids = {b.get("id") for b in messages}
+        self._timeline_session = (kind, key)
+        fresh = 0 if previous_ids is None else sum(
+            1 for b in messages if b.get("id") not in previous_ids)
         self._timeline_signature = signature
         while self.timeline_layout.count() > 1:
             item = self.timeline_layout.takeAt(0)
@@ -1294,8 +1315,35 @@ class MainWindow(QMainWindow):
             if not outgoing:
                 line.addStretch()
             self.timeline_layout.insertWidget(self.timeline_layout.count() - 1, wrap)
-        QTimer.singleShot(0, lambda: self.timeline.verticalScrollBar().setValue(
-            self.timeline.verticalScrollBar().maximum()))
+        QTimer.singleShot(0, lambda: self._settle_timeline_scroll(
+            at_bottom or session_changed, saved_scroll, fresh))
+
+    def _settle_timeline_scroll(self, follow: bool, saved_scroll: int,
+                                fresh: int) -> None:
+        """Follow the newest message only when the reader is already at the end."""
+        bar = self.timeline.verticalScrollBar()
+        pill = getattr(self, "new_msg_btn", None)
+        if follow:
+            bar.setValue(bar.maximum())
+            if pill is not None:
+                pill.hide()
+            return
+        bar.setValue(min(saved_scroll, max(0, bar.maximum())))
+        if fresh and pill is not None:
+            pill.setText(f"↓ {fresh} 条新消息")
+            pill.show()
+
+    def jump_to_latest(self) -> None:
+        bar = self.timeline.verticalScrollBar()
+        bar.setValue(bar.maximum())
+        self.new_msg_btn.hide()
+
+    def _maybe_hide_new_pill(self, value: int) -> None:
+        if not hasattr(self, "new_msg_btn") or not self.new_msg_btn.isVisible():
+            return
+        bar = self.timeline.verticalScrollBar()
+        if bar.maximum() - value < 24:
+            self.new_msg_btn.hide()
 
     IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".heic"}
 
@@ -1921,8 +1969,11 @@ class MainWindow(QMainWindow):
 
     def eventFilter(self, watched, event):
         if watched is self.composer and event.type() == QEvent.KeyPress:
-            if event.key() in (Qt.Key_Return, Qt.Key_Enter) and event.modifiers() == Qt.ControlModifier:
-                self.send_message(); return True
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                # 回车直接发送；Shift+回车换行。Ctrl+回车保留为发送的旧习惯。
+                # 输入法组词时的回车由 IME 自己消费，不会走到这里。
+                if not (event.modifiers() & Qt.ShiftModifier):
+                    self.send_message(); return True
         if watched is getattr(self, "remote_preview", None):
             session = self.selected_remote()
             allowed = bool(session and session.get("state") == "active" and
@@ -2179,6 +2230,9 @@ QTextEdit#composerEdit { background: transparent; border: 0; color: white;
 QPushButton#chipBtn { background: #212936; color: #9fb0c8; border: 1px solid #2e3949;
     border-radius: 10px; font-size: 15px; }
 QPushButton#chipBtn:hover { color: white; border-color: #3b82f6; }
+QPushButton#newMsgPill { background: #1d4ed8; color: white; border: 0;
+    border-radius: 13px; padding: 5px 16px; font-size: 12px; font-weight: 600; }
+QPushButton#newMsgPill:hover { background: #2563eb; }
 QPushButton#sendButton { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
     stop:0 #2563eb, stop:1 #4f46e5); color: white; border: 0; border-radius: 18px;
     padding: 9px 22px; font-weight: 700; font-size: 13px; }
