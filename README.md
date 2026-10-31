@@ -174,6 +174,20 @@ flix shell <设备> --timeout 120 -- "ping -n 5 127.0.0.1"
 
 流程真源：`docs/archify/flix_shell_workflow.html`（旁路 `.json`）。
 
+### 交互式终端（`--pty`，二期）
+
+```bash
+flix shell --pty 4c4ca286                 # 默认 cmd
+flix shell --pty --shell powershell 4c4ca286
+```
+
+- 目标端用 **ConPTY**（`pip install -e ".[pty]"`）分配伪终端，`vim`/`top` 这类全屏程序可用；
+- 客户端把本机控制台切到 raw 模式并透传 ANSI，**Ctrl+]** 退出会话；
+- 信任门与 exec 相同（配对 + 来源 IP 一致）；缺 `pywinpty` 时明确报 `pty-unavailable`，请退回 exec；
+- 空闲 30 分钟自动断开，同一时间只允许 1 个会话；会话结束写一条审计（时长/退出码）。
+
+流程真源：`docs/archify/flix_shell_pty_workflow.html`（旁路 `.json`）。
+
 ## 回归测试
 
 ```

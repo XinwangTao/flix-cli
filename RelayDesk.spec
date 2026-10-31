@@ -1,12 +1,22 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+# pywinpty ships native DLLs, so they have to be collected explicitly. A missing
+# backend must not break the build: exec-only still works without PTY support.
+_winpty_datas, _winpty_binaries, _winpty_hidden = [], [], []
+try:
+    from PyInstaller.utils.hooks import collect_all
+    _winpty_datas, _winpty_binaries, _winpty_hidden = collect_all('winpty')
+except Exception as _exc:  # noqa: BLE001 - build-time best effort
+    print(f"[spec] winpty not collected: {_exc}")
+
 
 a = Analysis(
     ['scripts/launch_relaydesk.py'],
     pathex=['src'],
-    binaries=[],
-    datas=[],
-    hiddenimports=['flixcli.cli', 'flixcli.mcp_server', 'flixcli.daemon'],
+    binaries=_winpty_binaries,
+    datas=_winpty_datas,
+    hiddenimports=['flixcli.cli', 'flixcli.mcp_server', 'flixcli.daemon',
+                   'flixcli.ptyshell'] + _winpty_hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -7,9 +7,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import contextlib
 import json
+import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 
@@ -123,7 +127,7 @@ async def cmd_shell(args) -> int:
     if parts and parts[0] == "--":
         parts = parts[1:]
     command = " ".join(parts).strip()
-    if not command:
+    if not command and not getattr(args, "pty", False):
         emit({"error": "usage",
               "detail": "nothing to run; use: flix shell <device> -- <command>"}, True)
         return 2
@@ -138,6 +142,9 @@ async def cmd_shell(args) -> int:
             emit({"error": "not-paired",
                   "detail": f"{fp} is not paired; run 'flix pair' first"}, True)
             return 4
+        if getattr(args, "pty", False):
+            return await _pty_client(ip, port or args.port,
+                                     ident["fingerprint"], args.shell)
         intent = shell_intent(ident["fingerprint"], fp, uuid.uuid4().hex,
                               command, args.timeout)
         try:
@@ -165,6 +172,149 @@ async def cmd_shell(args) -> int:
             print(f"[flix] timed out after {args.timeout:g}s; process tree killed",
                   file=sys.stderr)
     return int(result.get("exit") or 0)
+
+
+def _term_cols_rows() -> tuple[int, int]:
+    import shutil
+    size = shutil.get_terminal_size((80, 24))
+    return max(size.columns, 20), max(size.lines, 5)
+
+
+class _ConsoleRaw:
+    """Local console in raw mode, restored on exit."""
+
+    def __init__(self):
+        self._saved = None
+        self._saved_out = None
+
+    def __enter__(self):
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+            k32 = ctypes.windll.kernel32
+            hin = k32.GetStdHandle(-10)
+            mode = wintypes.DWORD()
+            if k32.GetConsoleMode(hin, ctypes.byref(mode)):
+                self._saved = (hin, mode.value)
+                k32.SetConsoleMode(hin, mode.value & ~0x0006)  # no line input/echo
+            hout = k32.GetStdHandle(-11)
+            omode = wintypes.DWORD()
+            if k32.GetConsoleMode(hout, ctypes.byref(omode)):
+                self._saved_out = (hout, omode.value)
+                k32.SetConsoleMode(hout, omode.value | 0x0004)  # VT processing
+        else:
+            import termios
+            import tty
+            fd = sys.stdin.fileno()
+            self._saved = (fd, termios.tcgetattr(fd))
+            tty.setraw(fd)
+        return self
+
+    def __exit__(self, *_exc):
+        if os.name == "nt":
+            import ctypes
+            k32 = ctypes.windll.kernel32
+            for saved in (self._saved, self._saved_out):
+                if saved:
+                    with contextlib.suppress(Exception):
+                        k32.SetConsoleMode(*saved)
+        else:
+            import termios
+            fd, attrs = self._saved
+            termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
+
+
+_WIN_KEYS = {"H": b"\x1b[A", "P": b"\x1b[B", "M": b"\x1b[C", "K": b"\x1b[D",
+             "G": b"\x1b[H", "O": b"\x1b[F", "R": b"\x1b[3~", "S": b"\x7f",
+             "I": b"\x1b[5~", "Q": b"\x1b[6~"}
+
+
+def _read_keys() -> bytes:
+    if os.name == "nt":
+        import msvcrt
+        ch = msvcrt.getwch()
+        if ch in ("\x00", "\xe0"):
+            return _WIN_KEYS.get(msvcrt.getwch(), b"")
+        if ch == "\r":
+            return b"\r"
+        if ch == "\x08":
+            return b"\x7f"
+        return ch.encode("utf-8", "replace")
+    return os.read(sys.stdin.fileno(), 1024)
+
+
+async def _pty_client(ip: str, port: int, my_fp: str, shell_name: str) -> int:
+    """Interactive terminal: local raw console <-> remote ConPTY over WebSocket."""
+    import aiohttp
+
+    cols, rows = _term_cols_rows()
+    query = urllib.parse.urlencode({"from": my_fp, "sid": uuid.uuid4().hex,
+                                    "cols": cols, "rows": rows,
+                                    "shell": shell_name})
+    url = f"http://{ip}:{port}/shell/pty?{query}"
+    loop = asyncio.get_running_loop()
+    with _ConsoleRaw():
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.ws_connect(url, timeout=20,
+                                              max_msg_size=8 * 1024 * 1024) as ws:
+                    stop = asyncio.Event()
+
+                    async def keyboard() -> None:
+                        while not stop.is_set():
+                            data = await loop.run_in_executor(None, _read_keys)
+                            if not data:
+                                await asyncio.sleep(0.02)
+                                continue
+                            if b"\x1d" in data:  # Ctrl+] 本地退出
+                                await ws.send_json({"t": "close"})
+                                return
+                            await ws.send_json(
+                                {"t": "data",
+                                 "b": base64.b64encode(data).decode()})
+
+                    async def resize_watch() -> None:
+                        last = (cols, rows)
+                        while not stop.is_set():
+                            await asyncio.sleep(1.0)
+                            cur = _term_cols_rows()
+                            if cur != last:
+                                last = cur
+                                await ws.send_json(
+                                    {"t": "resize", "cols": cur[0], "rows": cur[1]})
+
+                    tasks = [asyncio.create_task(keyboard()),
+                             asyncio.create_task(resize_watch())]
+                    try:
+                        async for msg in ws:
+                            if msg.type != aiohttp.WSMsgType.TEXT:
+                                continue
+                            try:
+                                frame = json.loads(msg.data)
+                            except ValueError:
+                                continue
+                            kind = frame.get("t")
+                            if kind == "data":
+                                sys.stdout.buffer.write(
+                                    base64.b64decode(frame.get("b") or ""))
+                                sys.stdout.buffer.flush()
+                            elif kind == "exit":
+                                code = frame.get("code")
+                                note = f" exit={code}" if code is not None else ""
+                                print(f"\r\n[flix] 会话结束{note}")
+                                return int(code or 0)
+                            elif kind == "error":
+                                print(f"\r\n[flix] {frame.get('error')}: "
+                                      f"{frame.get('detail', '')}", file=sys.stderr)
+                                return 5
+                    finally:
+                        stop.set()
+                        for task in tasks:
+                            task.cancel()
+                    return 0
+        except aiohttp.ClientError as exc:
+            print(f"[flix] 连接失败: {exc}", file=sys.stderr)
+            return 3
 
 
 async def cmd_clipboard(args) -> int:
@@ -774,6 +924,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("to", help="fingerprint (prefix ok) or ip[:port]")
     p.add_argument("--timeout", type=float, default=30.0,
                    help="seconds before the process tree is killed (default 30)")
+    p.add_argument("--pty", action="store_true",
+                   help="interactive terminal (ConPTY) instead of one-shot exec")
+    p.add_argument("--shell", default="cmd", metavar="NAME",
+                   help="shell for --pty: cmd|powershell|pwsh (default cmd)")
     p.add_argument("--port", type=int, default=DEVICE_PORT)
     p.add_argument("command", nargs=argparse.REMAINDER,
                    help="command to run; put '--' before it")

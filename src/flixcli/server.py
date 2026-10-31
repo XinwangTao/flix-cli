@@ -13,6 +13,7 @@ Confirmed official behaviors (reverse/protocol.md §2-§3, §8):
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import ipaddress
 import json
@@ -26,6 +27,7 @@ from aiohttp import web
 
 from . import DEVICE_PORT, model
 from .media_session import SessionError
+from . import ptyshell
 from .remoteshell import DEFAULT_TIMEOUT_S, run_command
 
 
@@ -253,6 +255,118 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
         result = await loop.run_in_executor(None, run_command, command, timeout)
         store.add_shell_audit(sid, sender, command, result)
         return web.json_response({"ok": True, "id": sid, **result})
+
+    active_ptys = {"count": 0}
+
+    async def shell_pty(request: web.Request) -> web.StreamResponse:
+        """Interactive PTY over a WebSocket upgrade (rdShell phase 2).
+
+        Same trust gate as exec, plus a source-IP check (the file routes use the
+        same one): pairing alone would let any host that knows a fingerprint
+        drive a shell.
+        """
+        sender = request.query.get("from", "")
+        if not sender or not store.is_paired(sender):
+            return web.json_response({"error": "not-paired"}, status=403)
+        row = store.con.execute(
+            "SELECT COALESCE(ip,'') FROM persistence_devices WHERE fingerprint=?",
+            (sender,)).fetchone()
+        expected_ip = row[0] if row else ""
+        if expected_ip and request.remote and expected_ip != request.remote:
+            return web.json_response(
+                {"error": "source-mismatch",
+                 "detail": f"expected={expected_ip} remote={request.remote}"},
+                status=403)
+        if not ptyshell.available():
+            return web.json_response(
+                {"error": "pty-unavailable",
+                 "detail": "install pywinpty on the target"}, status=503)
+        if active_ptys["count"] >= ptyshell.MAX_SESSIONS:
+            return web.json_response({"error": "busy"}, status=409)
+        try:
+            cols = int(request.query.get("cols", 80))
+            rows = int(request.query.get("rows", 24))
+        except (TypeError, ValueError):
+            cols, rows = 80, 24
+        sid = request.query.get("sid") or uuid.uuid4().hex
+        shell = request.query.get("shell", "")
+
+        ws = web.WebSocketResponse(heartbeat=30, max_msg_size=4 * 1024 * 1024)
+        await ws.prepare(request)
+        try:
+            session = ptyshell.PtySession(shell, cols, rows)
+        except ptyshell.PtyUnavailable as exc:
+            with contextlib.suppress(Exception):
+                await ws.send_json({"t": "error", "error": "pty-unavailable",
+                                    "detail": str(exc)})
+                await ws.close()
+            return ws
+
+        active_ptys["count"] += 1
+        started = time.monotonic()
+        last = {"t": time.monotonic()}
+        exit_code: list[int | None] = [None]
+        loop = asyncio.get_running_loop()
+
+        async def pump() -> None:
+            while not ws.closed:
+                data = await loop.run_in_executor(
+                    None, session.read, ptyshell.READ_CHUNK)
+                if data:
+                    last["t"] = time.monotonic()
+                    with contextlib.suppress(Exception):
+                        await ws.send_json(
+                            {"t": "data", "b": base64.b64encode(data).decode()})
+                    continue
+                if not session.isalive():
+                    exit_code[0] = session.exit_code
+                    with contextlib.suppress(Exception):
+                        await ws.send_json({"t": "exit", "code": exit_code[0]})
+                    return
+                await asyncio.sleep(0.05)
+
+        async def watch_idle() -> None:
+            while not ws.closed:
+                await asyncio.sleep(15)
+                if time.monotonic() - last["t"] > ptyshell.MAX_IDLE_S:
+                    with contextlib.suppress(Exception):
+                        await ws.send_json({"t": "exit", "code": None,
+                                            "reason": "idle-timeout"})
+                        await ws.close()
+                    return
+
+        tasks = [asyncio.create_task(pump()), asyncio.create_task(watch_idle())]
+        try:
+            async for msg in ws:
+                if msg.type in (web.WSMsgType.ERROR, web.WSMsgType.CLOSE):
+                    break
+                if msg.type != web.WSMsgType.TEXT:
+                    continue
+                try:
+                    frame = json.loads(msg.data)
+                except ValueError:
+                    continue
+                kind = frame.get("t")
+                last["t"] = time.monotonic()
+                if kind == "data":
+                    session.write(base64.b64decode(frame.get("b") or ""))
+                elif kind == "resize":
+                    session.resize(frame.get("cols", cols), frame.get("rows", rows))
+                elif kind == "close":
+                    break
+        finally:
+            for task in tasks:
+                task.cancel()
+            session.close()
+            active_ptys["count"] -= 1
+            store.add_shell_audit(
+                sid, sender, f"pty:{shell or 'default'}",
+                {"exit": exit_code[0],
+                 "durationMs": int((time.monotonic() - started) * 1000),
+                 "truncated": False, "timeout": False})
+            with contextlib.suppress(Exception):
+                await ws.close()
+        return ws
 
     def _pair_intent(intent: dict) -> web.Response:
         # Pairing rides /intent [RT 2026-10-21]: askPairDevice/confirmPairDevice
@@ -550,6 +664,7 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
     app.router.add_post("/group/v1/command", group_command_post)
     app.router.add_post("/bubble", bubble_post)
     app.router.add_post("/intent", intent_post)
+    app.router.add_get("/shell/pty", shell_pty)
     app.router.add_post("/file", file_post)
     app.router.add_route("*", "/{tail:.*}", not_found)
     return app
