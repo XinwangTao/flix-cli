@@ -416,6 +416,7 @@ class MainWindow(QMainWindow):
         self._timeline_rows = {}
         self._timeline_row_sig = {}
         self._anchor_target = None
+        self._pending_anchor = None
         self._pixmap_cache = {}
         self._render_seq = 0
         # True only when the reader moved the timeline themselves; layout
@@ -1584,8 +1585,11 @@ class MainWindow(QMainWindow):
         if not self._restore_anchor(anchor):
             self._anchor_target = None
             bar.setValue(min(saved_scroll, max(0, bar.maximum())))
-        QTimer.singleShot(0, lambda: self._reassert_anchor(anchor))
-        QTimer.singleShot(80, lambda: self._reassert_anchor(anchor))
+        self._pending_anchor = anchor
+        # Layout activation timing differs per platform; re-assert a few beats
+        # later so a late layout pass cannot leave the reader on a stale row.
+        for delay in (0, 50, 150, 300):
+            QTimer.singleShot(delay, lambda: self._reassert_anchor(anchor))
         if fresh and pill is not None:
             pill.setText(f"↓ {fresh} 条新消息")
             pill.show()
@@ -1593,6 +1597,7 @@ class MainWindow(QMainWindow):
     def _scroll_to_bottom(self) -> None:
         """Pin to the tail; the range is only final once the layout settles."""
         self._anchor_target = None
+        self._pending_anchor = None
         bar = self.timeline.verticalScrollBar()
         bar.setValue(bar.maximum())
         QTimer.singleShot(0, self._reassert_bottom)
@@ -1613,6 +1618,8 @@ class MainWindow(QMainWindow):
         """Remember whether the reader is at the tail, and hide the pill there."""
         if self._timeline_rebuilding:
             return
+        if self._user_scrolled:
+            self._pending_anchor = None
         bar = self.timeline.verticalScrollBar()
         at_bottom = bar.maximum() - value < 24
         self._follow_tail = at_bottom
@@ -1622,10 +1629,14 @@ class MainWindow(QMainWindow):
 
     def _on_timeline_range_changed(self, _minimum: int, _maximum: int) -> None:
         """Keep the tail in view while following; never fight a reader above it."""
-        if self._timeline_rebuilding or not self._follow_tail:
+        if self._timeline_rebuilding:
             return
-        bar = self.timeline.verticalScrollBar()
-        bar.setValue(bar.maximum())
+        if self._follow_tail:
+            bar = self.timeline.verticalScrollBar()
+            bar.setValue(bar.maximum())
+            return
+        if self._pending_anchor and not self._user_scrolled:
+            self._restore_anchor(self._pending_anchor)
 
     IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".heic"}
 

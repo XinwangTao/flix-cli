@@ -133,16 +133,24 @@ class ScrollPolicyTests(unittest.TestCase):
         QTest.qWait(30)
         anchor_key, anchor_offset = self.window._scroll_anchor()
         widget = self.window._timeline_rows[anchor_key]
-        self.assertEqual(widget.y() - self.bar.value(), anchor_offset)
+        self.assertEqual(
+            widget.y() - self.bar.value(), anchor_offset,
+            f"anchor={anchor_key} y={widget.y()} value={self.bar.value()} "
+            f"max={self.bar.maximum()} follow={self.window._follow_tail} "
+            f"user={self.window._user_scrolled}")
 
         self.window.payload["bubbles"].insert(0, {
             "id": "new-tail", "from": PEER, "to": ME, "type": 0,
             "time": 1_700_000_900_000, "groupId": "", "content": "新消息"})
         self.window.render_timeline()
-        QTest.qWait(150)
+        QTest.qWait(450)
 
         widget = self.window._timeline_rows[anchor_key]
-        self.assertEqual(widget.y() - self.bar.value(), anchor_offset)
+        self.assertEqual(
+            widget.y() - self.bar.value(), anchor_offset,
+            f"anchor={anchor_key} y={widget.y()} value={self.bar.value()} "
+            f"max={self.bar.maximum()} follow={self.window._follow_tail} "
+            f"user={self.window._user_scrolled}")
 
     def test_status_change_remounts_only_the_changed_row(self):
         files = []
@@ -165,7 +173,7 @@ class ScrollPolicyTests(unittest.TestCase):
         self.window.payload = {"bubbles": list(reversed(files)),
                                "devices": self.window.payload["devices"]}
         self.window.render_timeline()
-        QTest.qWait(150)
+        QTest.qWait(450)
         after = {key: id(row) for key, row in self.window._timeline_rows.items()}
 
         self.assertNotEqual(after["msg:f3"], before["msg:f3"])
@@ -195,7 +203,7 @@ class ScrollPolicyTests(unittest.TestCase):
         self.window.payload = {"bubbles": [newest] + bubbles[:-1],
                                "devices": devices}
         self.window.render_timeline()
-        QTest.qWait(150)
+        QTest.qWait(450)
         after = {key: id(row) for key, row in self.window._timeline_rows.items()}
 
         self.assertNotIn("msg:m99", after)
@@ -205,7 +213,11 @@ class ScrollPolicyTests(unittest.TestCase):
                 self.assertEqual(after[key], before[key],
                                  f"{key} must keep its widget")
         widget = self.window._timeline_rows[anchor_key]
-        self.assertEqual(widget.y() - self.bar.value(), anchor_offset)
+        self.assertEqual(
+            widget.y() - self.bar.value(), anchor_offset,
+            f"anchor={anchor_key} y={widget.y()} value={self.bar.value()} "
+            f"max={self.bar.maximum()} follow={self.window._follow_tail} "
+            f"user={self.window._user_scrolled}")
 
 
 if __name__ == "__main__":
