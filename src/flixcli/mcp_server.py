@@ -259,9 +259,10 @@ async def _tool_call(name: str, args: dict) -> dict:
                                                         "run flix_discover first"}
             try:
                 if name == "flix_send_text":
-                    bubble = text_bubble(ident["fingerprint"], fp, text)
-                    reply = await post_bubble(ip, bubble, port=port or 8891)
-                    return {"ok": True, "id": bubble["id"], "reply": reply}
+                    from .outbox import send_text as durable_send
+                    result = await durable_send(store, ident, to, text, port)
+                    result.pop("bubble", None)
+                    return result
                 intent = clipboard_intent(ident["fingerprint"], text)
                 reply = await post_intent(ip, intent, port=port or 8891)
                 return {"ok": True, "reply": reply}

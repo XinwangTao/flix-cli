@@ -67,6 +67,18 @@ CREATE TABLE IF NOT EXISTS shell_audit (
   timed_out INTEGER NOT NULL DEFAULT 0,
   created INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS outbox (
+  id TEXT NOT NULL PRIMARY KEY,
+  kind TEXT NOT NULL DEFAULT 'text',
+  peer TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'queued',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  created INTEGER NOT NULL,
+  delivered_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS outbox_state ON outbox(state, created);
 CREATE TABLE IF NOT EXISTS bubble_entities (
   id TEXT NOT NULL PRIMARY KEY,
   from_device TEXT NOT NULL,
@@ -176,7 +188,9 @@ class Store:
             own = (self.prefs().get("identity") or {}).get("fingerprint") or ""
         if local_ips is None:
             local_ips = local_ipv4s()
-        mine = {ip for ip in local_ips if ip}
+        # Loopback is this machine by definition: a native client installed
+        # side by side probes as 127.0.0.1 and must not show up as a device.
+        mine = {ip for ip in local_ips if ip} | {"127.0.0.1", "::1"}
         by_ip: dict[str, dict] = {}
         without_ip: list[dict] = []
         for row in self.devices():
@@ -415,6 +429,84 @@ class Store:
         cols = ["id", "from", "command", "exit", "durationMs", "truncated",
                 "timeout", "created"]
         return [dict(zip(cols, r)) for r in rows]
+
+    # -- durable outbox ------------------------------------------------------
+    OUTBOX_TTL_MS = 7 * 24 * 3600 * 1000
+
+    def add_outbox(self, oid: str, peer: str, kind: str, payload: str,
+                   *, state: str = "queued") -> None:
+        self.con.execute(
+            "INSERT OR IGNORE INTO outbox (id, kind, peer, payload, state, created)"
+            " VALUES (?,?,?,?,?,?)",
+            (oid, kind, peer, payload, state, int(time.time() * 1000)))
+        self.con.commit()
+
+    def mark_outbox(self, oid: str, state: str, error: str = "") -> None:
+        self.con.execute(
+            "UPDATE outbox SET state=?, last_error=?,"
+            " delivered_at=CASE WHEN ?='delivered' THEN ? ELSE delivered_at END"
+            " WHERE id=?",
+            (state, error[:500], state, int(time.time() * 1000), oid))
+        self.con.commit()
+
+    def note_outbox_attempt(self, oid: str, error: str = "") -> None:
+        self.con.execute(
+            "UPDATE outbox SET attempts=attempts+1, last_error=? WHERE id=?",
+            (error[:500], oid))
+        self.con.commit()
+
+    def outbox_pending(self, limit: int = 20) -> list[dict]:
+        rows = self.con.execute(
+            "SELECT id, peer, kind, payload, attempts, created FROM outbox"
+            " WHERE state='queued' ORDER BY created ASC LIMIT ?", (limit,)).fetchall()
+        cols = ["id", "peer", "kind", "payload", "attempts", "created"]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def outbox_list(self, limit: int = 50) -> list[dict]:
+        rows = self.con.execute(
+            "SELECT id, kind, peer, state, attempts, last_error, created, delivered_at"
+            " FROM outbox ORDER BY created DESC LIMIT ?", (limit,)).fetchall()
+        cols = ["id", "kind", "peer", "state", "attempts", "lastError",
+                "created", "deliveredAt"]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def outbox_get(self, oid: str) -> dict | None:
+        row = self.con.execute(
+            "SELECT id, kind, peer, state, attempts, last_error, created, delivered_at"
+            " FROM outbox WHERE id=?", (oid,)).fetchone()
+        if not row:
+            return None
+        cols = ["id", "kind", "peer", "state", "attempts", "lastError",
+                "created", "deliveredAt"]
+        return dict(zip(cols, row))
+
+    def outbox_retry(self, oid: str) -> bool:
+        cur = self.con.execute(
+            "UPDATE outbox SET state='queued', last_error='' WHERE id=?", (oid,))
+        self.con.commit()
+        return cur.rowcount > 0
+
+    def outbox_drop(self, oid: str) -> bool:
+        cur = self.con.execute(
+            "UPDATE outbox SET state='dropped' WHERE id=?", (oid,))
+        self.con.commit()
+        return cur.rowcount > 0
+
+    def outbox_expire(self, ttl_ms: int | None = None) -> int:
+        cutoff = int(time.time() * 1000) - (ttl_ms or self.OUTBOX_TTL_MS)
+        cur = self.con.execute(
+            "UPDATE outbox SET state='expired' WHERE state='queued' AND created<?",
+            (cutoff,))
+        self.con.commit()
+        return cur.rowcount
+
+    def device_ip(self, fingerprint: str) -> tuple[str, int | None]:
+        row = self.con.execute(
+            "SELECT COALESCE(ip,''), port FROM persistence_devices WHERE fingerprint=?",
+            (fingerprint,)).fetchone()
+        if not row:
+            return "", None
+        return row[0] or "", row[1]
 
     def mark_agent_read(self, ids: list[str]) -> int:
         if not ids:

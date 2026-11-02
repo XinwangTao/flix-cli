@@ -55,6 +55,13 @@ class VisibleDeviceTests(unittest.TestCase):
         rows = self.store.visible_devices(own="me", local_ips=[])
         self.assertEqual(sorted(r["fingerprint"] for r in rows), ["a", "b"])
 
+    def test_loopback_native_client_is_ours(self):
+        # The official app installed on this same machine probes as 127.0.0.1.
+        self._seed("native", "TheWang", "127.0.0.1", 8891, 5_000)
+        self._seed("peer", "PEER", "192.168.1.5", 8891, 1_000)
+        rows = self.store.visible_devices(own="me", local_ips=["192.168.1.99"])
+        self.assertEqual([r["fingerprint"] for r in rows], ["peer"])
+
     def test_raw_devices_keeps_every_fingerprint_for_routing(self):
         self._seed("old-fp", "DESKTOP", "192.168.1.20", 8891, 1_000)
         self._seed("new-fp", "DESKTOP", "192.168.1.20", 18991, 2_000)

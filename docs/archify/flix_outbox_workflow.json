@@ -1,0 +1,247 @@
+{
+ "schema_version": 2,
+ "diagram_type": "workflow",
+ "meta": {
+  "title": "durable outbox：文本气泡的持久投递（L2 第一性原理改造）",
+  "locale": "zh-CN",
+  "level": "L2",
+  "status": "已确认",
+  "date": "2026-11-02",
+  "quality_profile": "minimal",
+  "confirmed_by": "用户 2026-11-02「ok」；TTL 7 天、固定 30 秒重投、本期只做文本"
+ },
+ "scope": {
+  "in": [
+   "文本气泡（type 0）发送落库为 outbox 记录，先立即尝试一次，失败即进入 queued",
+   "守护进程每 30 秒重投 queued 记录，直到收到 200 \"received bubble\" 或超过 TTL",
+   "每台对端独立重试；对端恢复后自动送达，无需人重发",
+   "`flix outbox` 查看队列（待投/已投/过期），支持手动重投与丢弃",
+   "投递结果以 HTTP 200 作为唯一 ack 依据"
+  ],
+  "out": [
+   "文件与剪贴板的持久投递（二期，需要重新上传语义）",
+   "rdShell / rdAgent / upgrade 的重试（非幂等，一律不重试）",
+   "对端离线时的发现与唤醒（仍依赖它自己上线）",
+   "跨进程多写者（只有 flixd 一个写者）",
+   "修改官方线格式"
+  ]
+ },
+ "canvas": {
+  "width": 1240,
+  "height": 720
+ },
+ "lanes": [
+  {
+   "id": "a",
+   "label": "发送端 A（CLI / GUI）"
+  },
+  {
+   "id": "wire",
+   "label": "设备通道"
+  },
+  {
+   "id": "b",
+   "label": "接收端 B"
+  },
+  {
+   "id": "ex",
+   "label": "失败与人工出口",
+   "variant": "exception"
+  }
+ ],
+ "mainPath": [
+  "send",
+  "persist",
+  "try",
+  "ack",
+  "worker",
+  "deliver",
+  "inspect"
+ ],
+ "nodes": [
+  {
+   "id": "send",
+   "lane": "a",
+   "col": 0,
+   "type": "frontend",
+   "label": "flix send-text",
+   "sublabel": "或 GUI 回车发送",
+   "width": 160
+  },
+  {
+   "id": "persist",
+   "lane": "a",
+   "col": 1,
+   "type": "backend",
+   "label": "写 outbox",
+   "sublabel": "id + peer + body + created",
+   "width": 168
+  },
+  {
+   "id": "try",
+   "lane": "wire",
+   "col": 2,
+   "type": "messagebus",
+   "label": "立即投递一次",
+   "sublabel": "POST /bubble",
+   "width": 156
+  },
+  {
+   "id": "ack",
+   "lane": "a",
+   "col": 3,
+   "type": "security",
+   "label": "200 即 ack",
+   "sublabel": "标 delivered，不再重试",
+   "width": 164
+  },
+  {
+   "id": "worker",
+   "lane": "a",
+   "col": 3,
+   "type": "backend",
+   "label": "30s 重投循环",
+   "sublabel": "只重投 queued 且未过期",
+   "width": 170
+  },
+  {
+   "id": "deliver",
+   "lane": "wire",
+   "col": 4,
+   "type": "messagebus",
+   "label": "对端恢复后送达",
+   "sublabel": "下次 poll 命中即投",
+   "width": 168
+  },
+  {
+   "id": "inspect",
+   "lane": "a",
+   "col": 4,
+   "type": "frontend",
+   "label": "flix outbox",
+   "sublabel": "查看 / 手动重投 / 丢弃",
+   "width": 166
+  },
+  {
+   "id": "unpaired",
+   "lane": "ex",
+   "col": 2,
+   "type": "security",
+   "label": "4xx 不重试",
+   "sublabel": "未配对 / 参数错，直接失败",
+   "width": 168
+  },
+  {
+   "id": "expired",
+   "lane": "ex",
+   "col": 4,
+   "type": "external",
+   "label": "超过 TTL",
+   "sublabel": "默认 7 天，标 expired",
+   "width": 156
+  },
+  {
+   "id": "manual",
+   "lane": "ex",
+   "col": 4,
+   "type": "external",
+   "label": "人工处置",
+   "sublabel": "重投或丢弃，留审计",
+   "width": 154
+  }
+ ],
+ "edges": [
+  {
+   "from": "send",
+   "to": "persist",
+   "label": "先落库",
+   "variant": "emphasis",
+   "role": "main"
+  },
+  {
+   "from": "persist",
+   "to": "try",
+   "label": "立即试",
+   "role": "main"
+  },
+  {
+   "from": "try",
+   "to": "ack",
+   "label": "200",
+   "role": "main"
+  },
+  {
+   "from": "try",
+   "to": "worker",
+   "label": "超时 / 不可达",
+   "variant": "dashed"
+  },
+  {
+   "from": "try",
+   "to": "unpaired",
+   "label": "4xx",
+   "variant": "security",
+   "role": "error"
+  },
+  {
+   "from": "worker",
+   "to": "deliver",
+   "label": "重投",
+   "role": "main"
+  },
+  {
+   "from": "deliver",
+   "to": "ack",
+   "label": "200",
+   "variant": "dashed"
+  },
+  {
+   "from": "worker",
+   "to": "expired",
+   "label": "超过 TTL",
+   "variant": "security",
+   "role": "error"
+  },
+  {
+   "from": "expired",
+   "to": "manual",
+   "label": "人工",
+   "variant": "dashed"
+  },
+  {
+   "from": "inspect",
+   "to": "manual",
+   "label": "重投 / 丢弃",
+   "variant": "dashed"
+  }
+ ],
+ "cards": [
+  {
+   "dot": "cyan",
+   "title": "为什么这么改（第一性原理）",
+   "items": [
+    "传输层的职责是持久化 + 至少一次投递 + 显式 ack，不是每次都现撞",
+    "现状按功能各写一套：只有 agent 消息有 outbox，文本/文件没有",
+    "今天 3 次真实丢消息都发生在对端短暂离线窗口"
+   ]
+  },
+  {
+   "dot": "rose",
+   "title": "边界与语义",
+   "items": [
+    "只对幂等的文本重试；rdShell/升级这类非幂等动作永不重试",
+    "4xx 视为永久失败，不排队不重试",
+    "ack 只认 200 \"received bubble\"，其它一律视为未送达"
+   ]
+  },
+  {
+   "dot": "emerald",
+   "title": "可观测",
+   "items": [
+    "flix outbox：pending / delivered / expired 三态与尝试次数",
+    "审计保留：谁在何时重投、最终结果",
+    "文件与剪贴板二期沿用同一张表，不另起炉灶"
+   ]
+  }
+ ]
+}

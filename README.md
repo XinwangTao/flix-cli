@@ -59,6 +59,7 @@ announce，因此 flixd 每 60s 对库内设备做一次 `/ping_v2` 探活并刷
 | 手动添加（ping_v2 握手） | `flix ping <ip[:port]>` | — | ✅ 官方 UI 添加成功 |
 | 配对（askPairDevice/confirmPairDevice） | `flix pair [--code]` | flix_pair | ✅ 双侧 pair_devices 落库 |
 | 文本气泡（type 0） | `flix send-text` | flix_send_text | ✅ |
+| 文本持久投递（离线排队 → 30s 重投 → TTL 7 天） | `flix outbox` | — | 线格式不变 |
 | 剪贴板投递（TransIntent clipboard） | `flix clipboard` | flix_send_clipboard | ✅ |
 | 文件传输（bubble + POST /file，share_id=bubbleId，.flixdownload 原子写） | `flix send` | flix_send_files | ✅ 配对后官方自动收 |
 | 剪贴板自动同步（官方 sendClipboard 语义） | flixd 内置（`--no-clip-sync` 关） | — | ✅ 官方实测到达 |
@@ -154,6 +155,24 @@ flix agent --cmd "F:\my-ai\reply.bat" --prefix "[A-AI]"
   `--dry-run` 只记录不发送，便于调试。
 
 流程真源：`docs/archify/flix_agent_workflow.html`（旁路 `.json`）。
+
+## 可靠投递（outbox）
+
+文本气泡先落库再发送，只有对端回 `200 received bubble` 才算送达；对端暂时不在时消息进队列，
+守护进程每 30 秒重投，超过 7 天标记过期。
+
+```bash
+flix send-text <设备> "…"      # 返回 state=delivered|queued
+flix outbox                    # 查看队列：queued / delivered / failed / expired
+flix outbox --retry <id>       # 手动重投
+flix outbox --drop <id>        # 丢弃
+```
+
+- **4xx 不重试**：未配对、参数错误属于永久失败，直接标 `failed`。
+- **只有幂等动作排队**：`flix shell`、`flix upgrade` 这类执行类动作重复跑有副作用，仍然只发一次。
+- 文件与剪贴板暂不排队（二期沿用同一张表）。
+
+流程真源：`docs/archify/flix_outbox_workflow.html`（旁路 `.json`）。
 
 ## 远程执行（flix shell）
 

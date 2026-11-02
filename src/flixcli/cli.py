@@ -109,12 +109,15 @@ async def _send(store, ident, to: str, kind: str, text: str, port_arg) -> int:
 
 
 async def cmd_send_text(args) -> int:
+    from .outbox import send_text as durable_send
     store = Store()
     try:
-        return await _send(store, load_or_create_identity(store), args.to,
-                           "text", args.text, args.port)
+        result = await durable_send(store, load_or_create_identity(store),
+                                    args.to, args.text, args.port)
     finally:
         store.close()
+    emit(result, args.json)
+    return 0 if result.get("ok") else 3
 
 
 async def cmd_shell(args) -> int:
@@ -609,6 +612,32 @@ def cmd_devices(args) -> int:
     return 0
 
 
+def cmd_outbox(args) -> int:
+    """Inspect or fix the durable delivery queue."""
+    store = Store()
+    try:
+        if args.drop:
+            ok = store.outbox_drop(args.drop)
+            emit({"ok": ok, "dropped": args.drop}, args.json)
+            return 0 if ok else 2
+        if args.retry:
+            ok = store.outbox_retry(args.retry)
+            emit({"ok": ok, "queued": args.retry}, args.json)
+            return 0 if ok else 2
+        rows = store.outbox_list(args.limit)
+        if args.json:
+            emit(rows, True)
+            return 0
+        if not rows:
+            print("outbox 为空")
+        for row in rows:
+            print(f"{row['state']:<9} {row['id'][:8]} {row['peer'][:8]} "
+                  f"try={row['attempts']} {row['lastError']}")
+        return 0
+    finally:
+        store.close()
+
+
 def cmd_bubbles(args) -> int:
     store = Store()
     try:
@@ -1006,6 +1035,13 @@ def main(argv: list[str] | None = None) -> int:
 
     add("self", "print our identity", cmd_self)
     add("devices", "list known devices from local store", cmd_devices)
+
+    p = add("outbox", "inspect the durable delivery queue "
+                      "(text bubbles that could not be delivered yet)",
+            cmd_outbox)
+    p.add_argument("--retry", metavar="ID", help="put a failed/expired row back in the queue")
+    p.add_argument("--drop", metavar="ID", help="drop a row without sending it")
+    p.add_argument("--limit", type=int, default=50)
     p = add("bubbles", "recent text/file bubbles received by this node",
             cmd_bubbles)
     p.add_argument("--limit", type=int, default=20)

@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>durable outbox：文本气泡的持久投递（L2 第一性原理改造）</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #2b3040; --text: #e7eaf0;
+    --muted: #98a0b3; --cyan: #37c2d8; --emerald: #3fbf7f; --rose: #e0646d;
+    --amber: #d9a13b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 36px 56px; background: var(--bg); color: var(--text);
+    font: 14px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  h1 { font-size: 20px; margin: 0 0 6px; letter-spacing: .2px; }
+  .meta { color: var(--muted); font-size: 12px; margin-bottom: 24px; }
+  .board { position: relative; background: var(--panel); border: 1px solid var(--line);
+           border-radius: 12px; padding: 18px 22px 22px; }
+  .lanes { display: flex; flex-direction: column; gap: 12px; }
+  .lane { display: flex; align-items: center; gap: 14px; }
+  .lane-label { width: 118px; flex: none; color: var(--muted); font-size: 12px;
+                text-align: right; letter-spacing: .3px; }
+  .lane-track { flex: 1; display: grid; grid-template-columns: repeat(5, 1fr);
+                gap: 12px; align-items: center; min-height: 78px; }
+  .node { position: relative; z-index: 2; background: #1e222c; border: 1px solid var(--line);
+          border-left: 3px solid var(--cyan); border-radius: 8px; padding: 9px 11px;
+          min-height: 56px; }
+  .node .label { font-weight: 600; font-size: 13px; }
+  .node .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .node.security { border-left-color: var(--rose); }
+  .node.external { border-left-color: var(--amber); }
+  .node.backend { border-left-color: var(--emerald); }
+  .node.messagebus { border-left-color: var(--cyan); }
+  .edge-layer { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+           gap: 14px; margin-top: 26px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+          padding: 14px 16px; }
+  .card h2 { font-size: 13px; margin: 0 0 8px; display: flex; align-items: center; gap: 8px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .dot.cyan { background: var(--cyan); } .dot.rose { background: var(--rose); }
+  .dot.emerald { background: var(--emerald); } .dot.amber { background: var(--amber); }
+  .card li { color: var(--muted); font-size: 12px; margin: 3px 0; }
+  .legend { margin-top: 18px; color: var(--muted); font-size: 11px; }
+  .legend span { margin-right: 16px; }
+</style>
+</head>
+<body>
+<h1 id="title"></h1>
+<div class="meta" id="meta"></div>
+<div class="board">
+  <div class="lanes" id="lanes"></div>
+  <svg class="edge-layer" id="edges"></svg>
+</div>
+<div class="cards" id="cards"></div>
+<div class="legend">
+  <span>粗线 = 主路径</span><span>虚线 = 旁路/告警</span><span>红线 = 丢弃/失败</span>
+</div>
+
+<script type="application/json" id="spec">
+{
+ "schema_version": 2,
+ "diagram_type": "workflow",
+ "meta": {
+  "title": "durable outbox：文本气泡的持久投递（L2 第一性原理改造）",
+  "locale": "zh-CN",
+  "level": "L2",
+  "status": "已确认",
+  "date": "2026-11-02",
+  "quality_profile": "minimal",
+  "confirmed_by": "用户 2026-11-02「ok」；TTL 7 天、固定 30 秒重投、本期只做文本"
+ },
+ "scope": {
+  "in": [
+   "文本气泡（type 0）发送落库为 outbox 记录，先立即尝试一次，失败即进入 queued",
+   "守护进程每 30 秒重投 queued 记录，直到收到 200 \"received bubble\" 或超过 TTL",
+   "每台对端独立重试；对端恢复后自动送达，无需人重发",
+   "`flix outbox` 查看队列（待投/已投/过期），支持手动重投与丢弃",
+   "投递结果以 HTTP 200 作为唯一 ack 依据"
+  ],
+  "out": [
+   "文件与剪贴板的持久投递（二期，需要重新上传语义）",
+   "rdShell / rdAgent / upgrade 的重试（非幂等，一律不重试）",
+   "对端离线时的发现与唤醒（仍依赖它自己上线）",
+   "跨进程多写者（只有 flixd 一个写者）",
+   "修改官方线格式"
+  ]
+ },
+ "canvas": {
+  "width": 1240,
+  "height": 720
+ },
+ "lanes": [
+  {
+   "id": "a",
+   "label": "发送端 A（CLI / GUI）"
+  },
+  {
+   "id": "wire",
+   "label": "设备通道"
+  },
+  {
+   "id": "b",
+   "label": "接收端 B"
+  },
+  {
+   "id": "ex",
+   "label": "失败与人工出口",
+   "variant": "exception"
+  }
+ ],
+ "mainPath": [
+  "send",
+  "persist",
+  "try",
+  "ack",
+  "worker",
+  "deliver",
+  "inspect"
+ ],
+ "nodes": [
+  {
+   "id": "send",
+   "lane": "a",
+   "col": 0,
+   "type": "frontend",
+   "label": "flix send-text",
+   "sublabel": "或 GUI 回车发送",
+   "width": 160
+  },
+  {
+   "id": "persist",
+   "lane": "a",
+   "col": 1,
+   "type": "backend",
+   "label": "写 outbox",
+   "sublabel": "id + peer + body + created",
+   "width": 168
+  },
+  {
+   "id": "try",
+   "lane": "wire",
+   "col": 2,
+   "type": "messagebus",
+   "label": "立即投递一次",
+   "sublabel": "POST /bubble",
+   "width": 156
+  },
+  {
+   "id": "ack",
+   "lane": "a",
+   "col": 3,
+   "type": "security",
+   "label": "200 即 ack",
+   "sublabel": "标 delivered，不再重试",
+   "width": 164
+  },
+  {
+   "id": "worker",
+   "lane": "a",
+   "col": 3,
+   "type": "backend",
+   "label": "30s 重投循环",
+   "sublabel": "只重投 queued 且未过期",
+   "width": 170
+  },
+  {
+   "id": "deliver",
+   "lane": "wire",
+   "col": 4,
+   "type": "messagebus",
+   "label": "对端恢复后送达",
+   "sublabel": "下次 poll 命中即投",
+   "width": 168
+  },
+  {
+   "id": "inspect",
+   "lane": "a",
+   "col": 4,
+   "type": "frontend",
+   "label": "flix outbox",
+   "sublabel": "查看 / 手动重投 / 丢弃",
+   "width": 166
+  },
+  {
+   "id": "unpaired",
+   "lane": "ex",
+   "col": 2,
+   "type": "security",
+   "label": "4xx 不重试",
+   "sublabel": "未配对 / 参数错，直接失败",
+   "width": 168
+  },
+  {
+   "id": "expired",
+   "lane": "ex",
+   "col": 4,
+   "type": "external",
+   "label": "超过 TTL",
+   "sublabel": "默认 7 天，标 expired",
+   "width": 156
+  },
+  {
+   "id": "manual",
+   "lane": "ex",
+   "col": 4,
+   "type": "external",
+   "label": "人工处置",
+   "sublabel": "重投或丢弃，留审计",
+   "width": 154
+  }
+ ],
+ "edges": [
+  {
+   "from": "send",
+   "to": "persist",
+   "label": "先落库",
+   "variant": "emphasis",
+   "role": "main"
+  },
+  {
+   "from": "persist",
+   "to": "try",
+   "label": "立即试",
+   "role": "main"
+  },
+  {
+   "from": "try",
+   "to": "ack",
+   "label": "200",
+   "role": "main"
+  },
+  {
+   "from": "try",
+   "to": "worker",
+   "label": "超时 / 不可达",
+   "variant": "dashed"
+  },
+  {
+   "from": "try",
+   "to": "unpaired",
+   "label": "4xx",
+   "variant": "security",
+   "role": "error"
+  },
+  {
+   "from": "worker",
+   "to": "deliver",
+   "label": "重投",
+   "role": "main"
+  },
+  {
+   "from": "deliver",
+   "to": "ack",
+   "label": "200",
+   "variant": "dashed"
+  },
+  {
+   "from": "worker",
+   "to": "expired",
+   "label": "超过 TTL",
+   "variant": "security",
+   "role": "error"
+  },
+  {
+   "from": "expired",
+   "to": "manual",
+   "label": "人工",
+   "variant": "dashed"
+  },
+  {
+   "from": "inspect",
+   "to": "manual",
+   "label": "重投 / 丢弃",
+   "variant": "dashed"
+  }
+ ],
+ "cards": [
+  {
+   "dot": "cyan",
+   "title": "为什么这么改（第一性原理）",
+   "items": [
+    "传输层的职责是持久化 + 至少一次投递 + 显式 ack，不是每次都现撞",
+    "现状按功能各写一套：只有 agent 消息有 outbox，文本/文件没有",
+    "今天 3 次真实丢消息都发生在对端短暂离线窗口"
+   ]
+  },
+  {
+   "dot": "rose",
+   "title": "边界与语义",
+   "items": [
+    "只对幂等的文本重试；rdShell/升级这类非幂等动作永不重试",
+    "4xx 视为永久失败，不排队不重试",
+    "ack 只认 200 \"received bubble\"，其它一律视为未送达"
+   ]
+  },
+  {
+   "dot": "emerald",
+   "title": "可观测",
+   "items": [
+    "flix outbox：pending / delivered / expired 三态与尝试次数",
+    "审计保留：谁在何时重投、最终结果",
+    "文件与剪贴板二期沿用同一张表，不另起炉灶"
+   ]
+  }
+ ]
+}
+</script>
+
+<script>
+(function () {
+  var spec = JSON.parse(document.getElementById('spec').textContent);
+  document.getElementById('title').textContent = spec.meta.title;
+  document.getElementById('meta').textContent =
+    spec.diagram_type + ' · ' + spec.meta.locale + ' · ' +
+    spec.nodes.length + ' 节点 / ' + spec.edges.length + ' 边 · ' +
+    (spec.meta.status || '');
+
+  var laneOrder = spec.lanes.map(function (l) { return l.id; });
+  var lanesEl = document.getElementById('lanes');
+  var nodeEls = {};
+
+  spec.lanes.forEach(function (lane) {
+    var row = document.createElement('div');
+    row.className = 'lane';
+    var lab = document.createElement('div');
+    lab.className = 'lane-label';
+    lab.textContent = lane.label;
+    var track = document.createElement('div');
+    track.className = 'lane-track';
+    row.appendChild(lab);
+    row.appendChild(track);
+    lanesEl.appendChild(row);
+    lane.track = track;
+  });
+
+  spec.nodes.forEach(function (n) {
+    var el = document.createElement('div');
+    el.className = 'node ' + n.type;
+    el.style.gridColumn = (n.col + 1);
+    el.innerHTML = '<div class="label"></div><div class="sub"></div>';
+    el.querySelector('.label').textContent = n.label;
+    el.querySelector('.sub').textContent = n.sublabel || '';
+    var lane = spec.lanes.filter(function (l) { return l.id === n.lane; })[0];
+    lane.track.appendChild(el);
+    nodeEls[n.id] = el;
+  });
+
+  var svg = document.getElementById('edges');
+  function draw() {
+    var board = document.querySelector('.board').getBoundingClientRect();
+    svg.setAttribute('width', board.width);
+    svg.setAttribute('height', board.height);
+    svg.setAttribute('viewBox', '0 0 ' + board.width + ' ' + board.height);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    spec.edges.forEach(function (e) {
+      var a = nodeEls[e.from], b = nodeEls[e.to];
+      if (!a || !b) return;
+      var ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+      var x1 = ra.left - board.left, y1 = ra.top - board.top;
+      var x2 = rb.left - board.left, y2 = rb.top - board.top;
+      var down = Math.abs(y2 - y1) > 20;
+      var sx = x1 + ra.width / 2, sy = y1 + (y2 > y1 ? ra.height : 0);
+      var ex = x2 + rb.width / 2, ey = y2 + (y2 > y1 ? 0 : rb.height);
+      var mx = (sx + ex) / 2, my = (sy + ey) / 2;
+      var d = down
+        ? 'M' + sx + ',' + sy + ' C' + sx + ',' + my + ' ' + ex + ',' + my + ' ' + ex + ',' + ey
+        : 'M' + (x1 + ra.width) + ',' + (y1 + ra.height / 2) + ' C' + mx + ',' + (y1 + ra.height / 2) +
+          ' ' + mx + ',' + (y2 + rb.height / 2) + ' ' + x2 + ',' + (y2 + rb.height / 2);
+      var color = e.variant === 'security' ? 'var(--rose)'
+                : e.variant === 'dashed' ? 'var(--muted)' : 'var(--cyan)';
+      var p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      p.setAttribute('d', d);
+      p.setAttribute('fill', 'none');
+      p.setAttribute('stroke', color);
+      p.setAttribute('stroke-width', e.variant === 'emphasis' ? 2.4 : 1.4);
+      p.setAttribute('stroke-dasharray', e.variant === 'dashed' ? '5 4' : 'none');
+      p.setAttribute('marker-end', 'url(#arrow)');
+      svg.appendChild(p);
+
+      var t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      t.setAttribute('x', down ? ex + 6 : mx);
+      t.setAttribute('y', down ? ey - 6 : my - 6);
+      t.setAttribute('fill', '#98a0b3');
+      t.setAttribute('font-size', '10');
+      t.textContent = e.label;
+      svg.appendChild(t);
+    });
+
+    var defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+    defs.innerHTML = '<marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" ' +
+      'markerWidth="6" markerHeight="6" orient="auto-start-reverse">' +
+      '<path d="M0,0 L10,5 L0,10 z" fill="#98a0b3"></path></marker>';
+    svg.appendChild(defs);
+  }
+
+  var cards = document.getElementById('cards');
+  spec.cards.forEach(function (c) {
+    var el = document.createElement('div');
+    el.className = 'card';
+    var h = document.createElement('h2');
+    h.innerHTML = '<span class="dot ' + c.dot + '"></span>';
+    h.appendChild(document.createTextNode(c.title));
+    el.appendChild(h);
+    var ul = document.createElement('ul');
+    ul.style.margin = '0'; ul.style.paddingLeft = '18px';
+    c.items.forEach(function (i) {
+      var li = document.createElement('li'); li.textContent = i; ul.appendChild(li);
+    });
+    el.appendChild(ul);
+    cards.appendChild(el);
+  });
+
+  window.addEventListener('load', draw);
+  window.addEventListener('resize', draw);
+})();
+</script>
+</body>
+</html>

@@ -151,21 +151,19 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
         return ip, p, fp
 
     async def send_text(to: str, text: str) -> dict:
-        ip, port, fp = resolve(to)
-        if not ip:
-            return {"ok": False, "error": "no-device", "detail": f"unknown target {to!r}"}
-        bubble = model.text_bubble(ident["fingerprint"], fp, text)
-        try:
-            reply = await post_bubble(ip, bubble, port=port)
+        from .outbox import send_text as durable_send
+        result = await durable_send(store, ident, to, text)
+        bubble = result.pop("bubble", None)
+        if bubble and result.get("state") in ("delivered", "queued"):
+            # Echo locally so the transcript shows the message either way; the
+            # outbox row carries the real delivery state.
             store.add_text_bubble(bubble["id"], bubble["from"], bubble["to"],
                                   bubble["content"], bubble["time"],
                                   bubble.get("groupId") or "")
             if api_publish:
                 api_publish({"type": "bubbleChanged",
                              "payload": {"bubbleId": bubble["id"], "type": "text"}})
-            return {"ok": True, "id": bubble["id"], "reply": reply, "ip": ip}
-        except PeerError as e:
-            return {"ok": False, "error": e.kind, "detail": e.detail, "ip": ip}
+        return result
 
     clip_state = {"last_set": None}
 
@@ -286,6 +284,27 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
             pass
 
     tasks.append(asyncio.create_task(agent_outbox_loop()))
+
+    async def outbox_loop() -> None:
+        # Text bubbles are persisted before the first attempt, so a peer that is
+        # only briefly offline gets them on a later pass (30 s, TTL 7 days).
+        from .outbox import flush as flush_text_outbox
+        try:
+            while True:
+                await asyncio.sleep(30)
+                try:
+                    result = await flush_text_outbox(store)
+                except Exception as exc:  # never let one bad row kill the loop
+                    print(f"[flixd] outbox: {exc}", file=sys.stderr, flush=True)
+                    continue
+                if result.get("sent") or result.get("failed"):
+                    print(f"[flixd] outbox delivered {result['sent']} "
+                          f"failed {result['failed']} pending {result['pending']}",
+                          file=sys.stderr, flush=True)
+        except asyncio.CancelledError:
+            pass
+
+    tasks.append(asyncio.create_task(outbox_loop()))
 
     async def presence_probe_loop() -> None:
         # Official clients only announce at startup, so their seenAt would fall
