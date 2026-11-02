@@ -43,12 +43,11 @@ def bubbles_for(peer: str, count: int = 40) -> list[dict]:
 
 
 def settle(window, ms: int = 150) -> None:
-    """Let the offscreen layout compute real geometry before measuring."""
-    QTest.qWait(ms)
+    """Compute geometry first, then let the anchor re-assert timers run."""
     layout = window.timeline_widget.layout()
     if layout is not None:
         layout.activate()
-    QTest.qWait(30)
+    QTest.qWait(ms)
 
 
 def make_window() -> gui.MainWindow:
@@ -106,7 +105,11 @@ class ScrollPolicyTests(unittest.TestCase):
         settle(self.window)
         self.assertEqual(self.bar.value(), before)
         self.assertLess(self.bar.value(), self.bar.maximum())
-        self.assertTrue(self.window.new_msg_btn.isVisible())
+        self.assertTrue(
+            self.window.new_msg_btn.isVisible(),
+            f"value={self.bar.value()} max={self.bar.maximum()} "
+            f"follow={self.window._follow_tail} user={self.window._user_scrolled} "
+            f"text={self.window.new_msg_btn.text()!r}")
         self.assertIn("新消息", self.window.new_msg_btn.text())
 
     def test_reclick_open_conversation_returns_to_newest(self):
