@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,6 +20,26 @@ from flixcli.config import Store
 from flixcli.media_session import SessionManager
 from flixcli.media_transport import MediaRuntime
 from flixcli.server import make_app
+
+
+@contextlib.contextmanager
+def _selector_loop():
+    """Keep this loopback ICE test off the Windows Proactor event loop.
+
+    With Proactor, a UDP ``sendto`` inside ``_loop_writing`` occasionally
+    wedges in ``_overlapped.WSASendTo`` (4/8 runs on this host, 40 s+ stall).
+    Selector is stable for aiortc and this test needs no asyncio subprocess.
+    The daemon keeps the Proactor loop because remote-shell needs subprocess.
+    """
+    if sys.platform != "win32":
+        yield
+        return
+    old = asyncio.get_event_loop_policy()
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    try:
+        yield
+    finally:
+        asyncio.set_event_loop_policy(old)
 
 
 class MediaHttpTests(unittest.TestCase):
@@ -80,7 +102,8 @@ class MediaHttpTests(unittest.TestCase):
                     for runner in runners:
                         await runner.cleanup()
                     a_store.close(); b_store.close()
-        asyncio.run(run())
+        with _selector_loop():
+            asyncio.run(asyncio.wait_for(run(), timeout=30))
 
 
 if __name__ == "__main__":

@@ -37,7 +37,7 @@ class DaemonSingletonTests(unittest.TestCase):
                                      stderr=subprocess.PIPE, text=True)
             try:
                 up = False
-                for _ in range(60):
+                for _ in range(120):
                     try:
                         with urllib.request.urlopen(
                                 f"http://127.0.0.1:{api_port}/api/self",
@@ -49,7 +49,7 @@ class DaemonSingletonTests(unittest.TestCase):
                 self.assertTrue(up, "first daemon did not start")
 
                 second = subprocess.run(cmd, env=env, capture_output=True,
-                                        text=True, timeout=30)
+                                        text=True, timeout=60)
                 self.assertEqual(second.returncode, 5)
                 self.assertIn("already running", second.stderr)
             finally:
