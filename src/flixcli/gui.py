@@ -418,6 +418,9 @@ class MainWindow(QMainWindow):
         self._anchor_target = None
         self._pixmap_cache = {}
         self._render_seq = 0
+        # True only when the reader moved the timeline themselves; layout
+        # reflows and programmatic restores must not count as user intent.
+        self._user_scrolled = False
         self.setWindowTitle("RelayDesk")
         self.resize(1280, 840)
         self.setMinimumSize(980, 640)
@@ -856,6 +859,9 @@ class MainWindow(QMainWindow):
         self.timeline.verticalScrollBar().valueChanged.connect(self._on_timeline_scroll)
         self.timeline.verticalScrollBar().rangeChanged.connect(
             self._on_timeline_range_changed)
+        for widget in (self.timeline, self.timeline.viewport(),
+                       self.timeline.verticalScrollBar()):
+            widget.installEventFilter(self)
         composer = QFrame()
         composer.setObjectName("composer")
         cbox = QVBoxLayout(composer)
@@ -1404,6 +1410,7 @@ class MainWindow(QMainWindow):
         self._timeline_signature = signature
         self._render_seq = getattr(self, "_render_seq", 0) + 1
         sequence = self._render_seq
+        self._user_scrolled = False
         try:
             self._apply_timeline(items)
         except Exception:
@@ -1555,11 +1562,8 @@ class MainWindow(QMainWindow):
         return True
 
     def _reassert_anchor(self, anchor) -> None:
-        if self._timeline_rebuilding or self._follow_tail:
+        if self._timeline_rebuilding or self._follow_tail or self._user_scrolled:
             return
-        bar = self.timeline.verticalScrollBar()
-        if getattr(self, "_anchor_target", None) != bar.value():
-            return  # the reader moved; leave them alone
         self._restore_anchor(anchor)
 
     def _settle_timeline_scroll(self, follow: bool, saved_scroll: int,
@@ -2271,6 +2275,13 @@ class MainWindow(QMainWindow):
             "未连接本机服务，可从下方一键启动（与原生 Flix 端口共存）")
 
     def eventFilter(self, watched, event):
+        timeline = getattr(self, "timeline", None)
+        if timeline is not None and watched in (
+                timeline, timeline.viewport(), timeline.verticalScrollBar()):
+            if event.type() in (QEvent.Wheel, QEvent.KeyPress) or (
+                    event.type() in (QEvent.MouseButtonPress, QEvent.MouseMove)
+                    and event.buttons()):
+                self._user_scrolled = True
         if watched is self.composer and event.type() == QEvent.KeyPress:
             if event.key() in (Qt.Key_Return, Qt.Key_Enter):
                 # 回车直接发送；Shift+回车换行。Ctrl+回车保留为发送的旧习惯。
