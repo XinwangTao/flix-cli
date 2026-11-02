@@ -13,15 +13,20 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from ctypes import wintypes
+try:
+    from ctypes import wintypes
+except (ImportError, ValueError):  # macOS/Linux: ctypes.wintypes is Windows-only
+    wintypes = None
 from datetime import datetime
 from pathlib import Path
 from string import Template
 
 from PySide6.QtCore import (
-    QEasingCurve, QEvent, QPoint, QPropertyAnimation, QSize, QThread, QTimer, Qt, Signal,
+    QEasingCurve, QEvent, QPoint, QPropertyAnimation, QSize, QThread, QTimer, Qt, QUrl, Signal,
 )
-from PySide6.QtGui import QAction, QColor, QFont, QPainter, QPalette, QPixmap
+from PySide6.QtGui import (
+    QAction, QColor, QDesktopServices, QFont, QPainter, QPalette, QPixmap,
+)
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QPushButton,
@@ -31,6 +36,16 @@ from PySide6.QtWidgets import (
 
 from .icons import icon, logo_icon, logo_pixmap
 from .presence import is_online
+
+
+if sys.platform == "darwin":
+    FONT_FAMILIES = ["SF Pro Text", "Helvetica Neue", "PingFang SC"]
+    FONT_STACK = '"SF Pro Text", "Helvetica Neue", "PingFang SC"'
+else:
+    FONT_FAMILIES = ["Segoe UI Variable Text", "Microsoft YaHei UI",
+                     "Microsoft YaHei", "Segoe UI"]
+    FONT_STACK = ('"Segoe UI Variable Text", "Microsoft YaHei UI", '
+                  '"Microsoft YaHei", "Segoe UI"')
 
 
 class ApiError(RuntimeError):
@@ -406,7 +421,12 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("RelayDesk")
         self.resize(1280, 840)
         self.setMinimumSize(980, 640)
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
+        if sys.platform == "darwin":
+            # macOS keeps the native title bar: traffic lights, resize borders
+            # and window dragging come from the system, not from WM_NCHITTEST.
+            self.setWindowFlags(Qt.Window)
+        else:
+            self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
         self.setObjectName("rootWindow")
         self._build()
         self._enable_round_corners()
@@ -483,13 +503,12 @@ class MainWindow(QMainWindow):
     # ---------- construction ----------
 
     def _apply_app_font(self) -> None:
-        """Windows-native type: Chinese falls back to YaHei, Latin stays Segoe."""
+        """Native type per platform; Chinese falls back to the system CJK font."""
         app = QApplication.instance()
         if app is None:
             return
         font = app.font()
-        font.setFamilies(["Segoe UI Variable Text", "Microsoft YaHei UI",
-                          "Microsoft YaHei", "Segoe UI"])
+        font.setFamilies(FONT_FAMILIES)
         font.setPointSizeF(9.75)
         app.setFont(font)
 
@@ -502,6 +521,7 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
         self.title_bar = TitleBar(self)
+        self.title_bar.setVisible(sys.platform != "darwin")
         outer.addWidget(self.title_bar)
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
@@ -683,16 +703,12 @@ class MainWindow(QMainWindow):
         return page
 
     def start_local_daemon(self):
-        """Start flixd on 18991/18998 (official Flix keeps 8891/8898) detached."""
-        import os
+        """Start the background service detached (18991/18998)."""
         import subprocess
-        appdata = os.environ.get("APPDATA", str(Path.home()))
-        log_dir = Path(appdata) / "flixcli"
+        from .config import APP_DIR
+        log_dir = APP_DIR
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = open(log_dir / "flixd-gui-started.log", "ab")
-        flags = 0
-        if sys.platform == "win32":
-            flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
         # One binary does both jobs: a frozen RelayDesk re-spawns *itself* with
         # `serve` (this is why launch_relaydesk.py routes arguments to the CLI).
         # Older builds needed a sibling flixd.exe, which is how users ended up
@@ -701,10 +717,14 @@ class MainWindow(QMainWindow):
             cmd = [sys.executable, "serve"]
         else:
             cmd = [sys.executable, "-m", "flixcli.cli", "serve"]
+        kwargs = {"stdout": log_file, "stderr": log_file, "close_fds": True}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = (subprocess.DETACHED_PROCESS
+                                       | subprocess.CREATE_NO_WINDOW)
+        else:
+            kwargs["start_new_session"] = True
         subprocess.Popen(
-            cmd + ["--device-port", "18991", "--api-port", "18998"],
-            stdout=log_file, stderr=log_file,
-            creationflags=flags, close_fds=True)
+            cmd + ["--device-port", "18991", "--api-port", "18998"], **kwargs)
         self.offline_detail.setText("正在启动本机服务（18991/18998）…几秒后自动重连。")
         self.start_daemon_button.setEnabled(False)
         QTimer.singleShot(3500, self.retry_connection)
@@ -1013,6 +1033,14 @@ class MainWindow(QMainWindow):
             return str(downloads)
         return profile if Path(profile).is_dir() else ""
 
+    @staticmethod
+    def _open_local(target: str) -> None:
+        """Open a file or folder with the OS default app on every platform."""
+        if sys.platform == "win32":
+            os.startfile(target)
+        else:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(target))
+
     def open_save_dir(self):
         # The daemon only reports a saveDir when it was configured with one;
         # fall back to the OS Downloads folder the app writes to by default.
@@ -1022,7 +1050,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"目录不存在：{target or '未设置'}", 5000)
             return
         try:
-            os.startfile(target)
+            self._open_local(target)
         except OSError as exc:
             self.statusBar().showMessage(f"打不开目录：{exc}", 4000)
 
@@ -1770,7 +1798,7 @@ class MainWindow(QMainWindow):
 
     def open_path(self, path: str):
         try:
-            os.startfile(path)
+            self._open_local(path)
         except OSError as exc:
             self.statusBar().showMessage(f"打不开：{exc}", 4000)
 
@@ -2379,11 +2407,13 @@ def palette_for(theme: str) -> QPalette:
 
 def styles_for(theme: str) -> str:
     """One authored sheet for both themes, filled from explicit tokens."""
-    return Template(STYLES).substitute(PALETTES["light" if theme == "light" else "dark"])
+    tokens = dict(PALETTES["light" if theme == "light" else "dark"])
+    tokens["font_stack"] = FONT_STACK
+    return Template(STYLES).substitute(tokens)
 
 
 STYLES = """
-* { font-family: "Segoe UI Variable Text", "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI"; }
+* { font-family: $font_stack; }
 QWidget#rootWindow, QWidget#page { background: $bg; color: $text; }
 QPushButton { background: $surface; color: $text; border: 1px solid $border;
     border-radius: 8px; padding: 7px 12px; font-size: 12.5px; }

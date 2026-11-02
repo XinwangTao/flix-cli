@@ -1,0 +1,62 @@
+name: Build macOS app
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+    branches: [main]
+    paths:
+      - ".github/workflows/build-macos.yml"
+      - "src/**"
+      - "scripts/**"
+      - "assets/**"
+      - "RelayDesk-macos.spec"
+      - "pyproject.toml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14       # Apple Silicon
+            arch: arm64
+          - runner: macos-15-intel # Intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[gui]" pyinstaller
+          pip install pytest
+
+      - name: Unit tests
+        run: pytest tests -q --ignore=tests/e2e.py
+
+      - name: Build .app
+        run: pyinstaller RelayDesk-macos.spec --noconfirm --clean
+
+      - name: Package
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent dist/RelayDesk.app \
+            "RelayDesk-macos-${{ matrix.arch }}.zip"
+          shasum -a 256 "RelayDesk-macos-${{ matrix.arch }}.zip" | tee "RelayDesk-macos-${{ matrix.arch }}.zip.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RelayDesk-macos-${{ matrix.arch }}
+          path: |
+            RelayDesk-macos-${{ matrix.arch }}.zip
+            RelayDesk-macos-${{ matrix.arch }}.zip.sha256
+          if-no-files-found: error
