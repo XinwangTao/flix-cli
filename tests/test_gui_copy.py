@@ -81,7 +81,7 @@ class CopyTests(unittest.TestCase):
         self.assertEqual([id(w) for w in before], [id(w) for w in after],
                          "identical frames must not rebuild the transcript")
 
-    def test_live_selection_blocks_a_rebuild(self):
+    def test_live_selection_survives_an_append(self):
         label = label_with(self.window, "第一行")
         label.setSelection(0, 3)
         fresh = dict(BUBBLES[0], id="b3", time=1_700_000_120_000, content="新消息")
@@ -89,8 +89,24 @@ class CopyTests(unittest.TestCase):
                                "devices": self.window.payload["devices"]}
         before = [id(w) for w in bubble_labels(self.window)]
         self.window.render_timeline()
+        after = [id(w) for w in bubble_labels(self.window)]
+        self.assertEqual(after[:len(before)], before,
+                         "an append must not remount the existing rows")
+        self.assertEqual(len(after), len(before) + 1)
+        self.assertTrue(self.window.timeline_selection().startswith("第一行"),
+                        "the highlight must survive the append")
+
+    def test_live_selection_defers_a_structural_rebuild(self):
+        label = label_with(self.window, "第一行")
+        label.setSelection(0, 3)
+        changed = [dict(bubble) for bubble in BUBBLES]
+        changed[0]["time"] = 1_700_000_999_000  # rewrites a mounted row
+        self.window.payload = {"bubbles": changed,
+                               "devices": self.window.payload["devices"]}
+        before = [id(w) for w in bubble_labels(self.window)]
+        self.window.render_timeline()
         self.assertEqual([id(w) for w in bubble_labels(self.window)], before,
-                         "a rebuild while selecting would drop the highlight")
+                         "a rewrite while selecting would drop the highlight")
 
     def test_copy_all_writes_the_whole_conversation(self):
         self.window.copy_all_messages()

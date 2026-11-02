@@ -6,11 +6,9 @@ All state comes from flixd's loopback API; functional behavior is unchanged.
 """
 from __future__ import annotations
 
-import colorsys
 import ctypes
 import json
 import os
-import re
 import sys
 import urllib.error
 import urllib.parse
@@ -18,6 +16,7 @@ import urllib.request
 from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
+from string import Template
 
 from PySide6.QtCore import (
     QEasingCurve, QEvent, QPoint, QPropertyAnimation, QSize, QThread, QTimer, Qt, Signal,
@@ -102,18 +101,18 @@ class Toast(QWidget):
         self.setFixedSize(TOAST_W, TOAST_H)
         self._on_click = on_click
         self._closing = False
-        bg = "rgba(28,31,38,0.97)" if dark else "rgba(255,255,255,0.98)"
-        border = "rgba(255,255,255,0.12)" if dark else "rgba(15,20,30,0.10)"
-        fg = "#f2f4f8" if dark else "#1b1e24"
-        sub = "#9aa4b2" if dark else "#5b6472"
-        accent = "#5b9cf5" if dark else "#2f6fd0"
+        bg = "rgba(22,29,26,0.97)" if dark else "rgba(255,255,255,0.98)"
+        border = "rgba(255,255,255,0.10)" if dark else "rgba(27,34,30,0.10)"
+        fg = "#e9eeeb" if dark else "#1b221e"
+        sub = "#8a978f" if dark else "#5f6c66"
+        accent = "#4fc38f" if dark else "#1f7a5c"
 
         card = QFrame(self)
         card.setObjectName("toastCard")
         card.setGeometry(0, 0, TOAST_W, TOAST_H)
         card.setStyleSheet(
             f"#toastCard {{ background: {bg}; border: 1px solid {border};"
-            " border-radius: 14px; }")
+            " border-radius: 12px; }")
         inner = QVBoxLayout(card)
         inner.setContentsMargins(16, 12, 16, 12)
         inner.setSpacing(4)
@@ -248,12 +247,10 @@ class ApiThread(QThread):
 
 
 def avatar_color(key: str) -> QColor:
-    hues = (212, 174, 160, 152, 262, 200, 24, 320)
-    color = QColor()
-    # setHsl uses 0-255 component ranges; QSS-style "hsl()" strings are NOT
-    # parsed by QColor and silently fall back to black.
-    color.setHsl(hues[sum(key.encode()) % len(hues)], 185, 122)
-    return color
+    # Three ink tones from the product's neutral family. Variation comes from
+    # lightness, not a rainbow wheel: the list stays one palette.
+    tones = ("#33473e", "#42574d", "#2a3b33")
+    return QColor(tones[sum(key.encode()) % len(tones)])
 
 
 class Avatar(QLabel):
@@ -298,14 +295,15 @@ class TitleBar(QFrame):
     def __init__(self, window: "MainWindow"):
         super().__init__()
         self.window = window
-        self.setFixedHeight(44)
+        self.setFixedHeight(42)
         self.setObjectName("titleBar")
+        self._icon_color = "#8fa39a"
 
         row = QHBoxLayout(self)
         row.setContentsMargins(14, 0, 0, 0)
         row.setSpacing(10)
         logo = QLabel()
-        logo.setPixmap(logo_pixmap(26))
+        logo.setPixmap(logo_pixmap(24))
         name = QLabel("RelayDesk")
         name.setObjectName("titleName")
         row.addWidget(logo)
@@ -313,20 +311,31 @@ class TitleBar(QFrame):
         row.addStretch()
 
         self.btn_min = self._win_button("min", self._minimize)
+        self.btn_min.setAccessibleName("最小化")
         self.btn_max = self._win_button("max", self._toggle_max)
+        self.btn_max.setAccessibleName("最大化")
         self.btn_close = self._win_button("close", self._close, danger=True)
+        self.btn_close.setAccessibleName("关闭")
         for b in (self.btn_min, self.btn_max, self.btn_close):
             row.addWidget(b)
 
     def _win_button(self, icon_name: str, fn, danger: bool = False) -> QPushButton:
         b = QPushButton()
         b.setObjectName("closeBtn" if danger else "winBtn")
-        b.setIcon(icon(icon_name, "#93a4bd", 15))
+        b.setIcon(icon(icon_name, self._icon_color, 15))
         b.setIconSize(QSize(15, 15))
-        b.setFixedSize(46, 44)
+        b.setFixedSize(44, 42)
         b.setCursor(Qt.PointingHandCursor)
         b.clicked.connect(fn)
         return b
+
+    def refresh_icons(self, color: str) -> None:
+        """Window buttons are pixmaps, so a theme switch must redraw them."""
+        self._icon_color = color
+        self.btn_min.setIcon(icon("min", color, 15))
+        self.btn_max.setIcon(
+            icon("restore" if self.window.isMaximized() else "max", color, 15))
+        self.btn_close.setIcon(icon("close", color, 15))
 
     def _minimize(self):
         self.window.showMinimized()
@@ -334,10 +343,10 @@ class TitleBar(QFrame):
     def _toggle_max(self):
         if self.window.isMaximized():
             self.window.showNormal()
-            self.btn_max.setIcon(icon("max", "#93a4bd", 15))
+            self.btn_max.setIcon(icon("max", self._icon_color, 15))
         else:
             self.window.showMaximized()
-            self.btn_max.setIcon(icon("restore", "#93a4bd", 15))
+            self.btn_max.setIcon(icon("restore", self._icon_color, 15))
 
     def _close(self):
         self.window.close()
@@ -381,6 +390,19 @@ class MainWindow(QMainWindow):
         # Rebuilding the transcript every poll destroys any text selection, so
         # the renderer remembers what it last drew and skips identical frames.
         self._timeline_signature = None
+        # "Follow the tail": true while the reader is at the newest message.
+        # Switching conversations turns it on; scrolling up turns it off so a
+        # poll cannot drag the reader away from history.
+        self._follow_tail = True
+        self._timeline_rebuilding = False
+        # Mounted transcript rows, keyed by message id (days get their own key).
+        # The renderer diffs against these instead of rebuilding everything.
+        self._timeline_keys = []
+        self._timeline_rows = {}
+        self._timeline_row_sig = {}
+        self._anchor_target = None
+        self._pixmap_cache = {}
+        self._render_seq = 0
         self.setWindowTitle("RelayDesk")
         self.resize(1280, 840)
         self.setMinimumSize(980, 640)
@@ -460,7 +482,20 @@ class MainWindow(QMainWindow):
 
     # ---------- construction ----------
 
+    def _apply_app_font(self) -> None:
+        """Windows-native type: Chinese falls back to YaHei, Latin stays Segoe."""
+        app = QApplication.instance()
+        if app is None:
+            return
+        font = app.font()
+        font.setFamilies(["Segoe UI Variable Text", "Microsoft YaHei UI",
+                          "Microsoft YaHei", "Segoe UI"])
+        font.setPointSizeF(9.75)
+        app.setFont(font)
+
     def _build(self):
+        self._apply_app_font()
+        self.theme = self._load_theme()
         central = QWidget()
         central.setObjectName("rootWindow")
         outer = QVBoxLayout(central)
@@ -480,22 +515,20 @@ class MainWindow(QMainWindow):
         status.setSizeGripEnabled(False)
         self.setStatusBar(status)
         self.statusBar().showMessage("正在连接本机服务…")
-        self.theme = self._load_theme()
         self.apply_theme(self.theme)
 
     def _build_rail(self):
         rail = QFrame()
         rail.setObjectName("rail")
-        rail.setFixedWidth(72)
+        rail.setFixedWidth(64)
         box = QVBoxLayout(rail)
-        box.setContentsMargins(12, 16, 12, 14)
-        box.setSpacing(8)
+        box.setContentsMargins(10, 14, 10, 12)
+        box.setSpacing(6)
         logo = QLabel()
-        logo.setPixmap(logo_pixmap(42))
+        logo.setPixmap(logo_pixmap(36))
         box.addWidget(logo, 0, Qt.AlignHCenter)
-        box.addSpacing(10)
+        box.addSpacing(12)
         self.rail_buttons = []
-        rail_normal, rail_active = "#8291a8", "#ffffff"
         for name, tip, mode in (
             ("devices", "设备会话", "devices"), ("search", "搜索", "search"),
             ("groups", "群组", "groups"), ("transfers", "传输任务", "transfers"),
@@ -504,15 +537,16 @@ class MainWindow(QMainWindow):
             button = QPushButton()
             button.setObjectName("railButton")
             button.setToolTip(tip)
+            button.setAccessibleName(tip)
             button.setCheckable(True)
             button.setCursor(Qt.PointingHandCursor)
-            button.setFixedSize(46, 46)
-            button.setIcon(icon(name, rail_normal, 21))
-            button.setIconSize(QSize(21, 21))
+            button.setFixedSize(44, 44)
+            button.setProperty("iconName", name)
+            button.setIcon(icon(name, PALETTES[self.theme]["icon"], 20))
+            button.setIconSize(QSize(20, 20))
             button.clicked.connect(lambda _checked=False, m=mode: self.set_mode(m))
             button.setProperty("mode", mode)
-            button.toggled.connect(lambda on, b=button, n=name:
-                                   b.setIcon(icon(n, rail_active if on else rail_normal, 21)))
+            button.toggled.connect(self._refresh_rail_icon)
             self.rail_buttons.append(button)
             box.addWidget(button, 0, Qt.AlignHCenter)
         box.addStretch()
@@ -522,12 +556,20 @@ class MainWindow(QMainWindow):
         box.addWidget(self.connection_dot)
         return rail
 
+    def _refresh_rail_icon(self, _checked: bool) -> None:
+        colors = PALETTES[self.theme]
+        for button in getattr(self, "rail_buttons", []):
+            name = button.property("iconName")
+            if name:
+                button.setIcon(icon(
+                    name, colors["accent"] if button.isChecked() else colors["icon"], 20))
+
     def _build_sidebar(self):
         panel = QFrame()
         panel.setObjectName("sidebar")
-        panel.setFixedWidth(330)
+        panel.setFixedWidth(312)
         box = QVBoxLayout(panel)
-        box.setContentsMargins(18, 18, 16, 12)
+        box.setContentsMargins(20, 20, 16, 14)
         box.setSpacing(12)
         title_row = QHBoxLayout()
         brand_box = QVBoxLayout()
@@ -542,12 +584,14 @@ class MainWindow(QMainWindow):
         refresh = QPushButton("↻")
         refresh.setObjectName("roundBtn")
         refresh.setToolTip("重新广播并刷新")
+        refresh.setAccessibleName("刷新设备列表")
         refresh.setFixedSize(36, 36)
         refresh.setCursor(Qt.PointingHandCursor)
         refresh.clicked.connect(lambda: (self.refresh(), toast_hint(self, "已刷新")))
         add = QPushButton("＋")
         add.setObjectName("roundBtn")
         add.setToolTip("新建群组 / 添加设备")
+        add.setAccessibleName("新建群组或添加设备")
         add.setFixedSize(36, 36)
         add.setCursor(Qt.PointingHandCursor)
         add.clicked.connect(self.show_add_menu)
@@ -565,6 +609,9 @@ class MainWindow(QMainWindow):
         self.entity_list = QListWidget()
         self.entity_list.setObjectName("entityList")
         self.entity_list.currentItemChanged.connect(self.select_entity)
+        # Re-clicking the conversation already open should still take the
+        # reader back to the newest message.
+        self.entity_list.itemClicked.connect(self._on_entity_clicked)
         self.entity_list.setMouseTracking(True)
         box.addWidget(self.entity_list, 1)
         self.sidebar_footer = QLabel("等待服务状态")
@@ -604,13 +651,13 @@ class MainWindow(QMainWindow):
         wrap.addStretch()
         box.addLayout(wrap)
         box.addSpacing(16)
-        self.offline_title = QLabel("未发现 flixcli 服务")
+        self.offline_title = QLabel("未连接本机服务")
         self.offline_title.setObjectName("emptyTitle")
         self.offline_title.setAlignment(Qt.AlignCenter)
         box.addWidget(self.offline_title)
         self.offline_detail = QLabel(
-            "默认端口 8898 可能被官方 Flix 占用。\n"
-            "可一键启动本机服务（端口 18991/18998，与官方共存），或自行运行 flixd。")
+            "默认端口 8898 可能被原生 Flix 占用。\n"
+            "可一键启动本机服务（端口 18991/18998，与 Flix 共存）。")
         self.offline_detail.setObjectName("muted")
         self.offline_detail.setAlignment(Qt.AlignCenter)
         box.addWidget(self.offline_detail)
@@ -679,11 +726,11 @@ class MainWindow(QMainWindow):
     def _build_header(self):
         header = QFrame()
         header.setObjectName("sessionHeader")
-        header.setFixedHeight(78)
+        header.setFixedHeight(72)
         row = QHBoxLayout(header)
-        row.setContentsMargins(20, 10, 20, 10)
+        row.setContentsMargins(24, 10, 20, 10)
         row.setSpacing(12)
-        self.session_avatar = Avatar("◉", "relaydesk", 44)
+        self.session_avatar = Avatar("◉", "relaydesk", 40)
         row.addWidget(self.session_avatar)
         labels = QVBoxLayout()
         self.session_title = QLabel("选择设备或群组")
@@ -699,12 +746,13 @@ class MainWindow(QMainWindow):
         self.session_search.setObjectName("sessionSearch")
         self.session_search.setPlaceholderText("在会话中搜索")
         self.session_search.setClearButtonEnabled(True)
-        self.session_search.setFixedWidth(200)
+        self.session_search.setFixedWidth(220)
         self.session_search.textChanged.connect(lambda _t: self.render_timeline())
         row.addWidget(self.session_search)
         self.header_actions = QHBoxLayout()
-        self.header_actions.setSpacing(8)
+        self.header_actions.setSpacing(6)
         row.addLayout(self.header_actions)
+        self._header_icon_buttons = []
         for glyph, tip, fn, icon_name in (
             ("▣", "发送文件", self.choose_files, "file"),
             ("⧉", "发送剪贴板文本", self.send_clipboard, "clipboard"),
@@ -714,11 +762,13 @@ class MainWindow(QMainWindow):
             button = QPushButton()
             button.setObjectName("headerBtn")
             button.setToolTip(tip)
-            button.setFixedSize(40, 40)
-            button.setIcon(icon(icon_name, "#9fb0c8", 18))
-            button.setIconSize(QSize(18, 18))
+            button.setAccessibleName(tip)
+            button.setFixedSize(36, 36)
+            button.setIcon(icon(icon_name, PALETTES[self.theme]["icon"], 17))
+            button.setIconSize(QSize(17, 17))
             button.setCursor(Qt.PointingHandCursor)
             button.clicked.connect(fn)
+            self._header_icon_buttons.append((button, icon_name))
             self.header_actions.addWidget(button)
         return header
 
@@ -751,7 +801,7 @@ class MainWindow(QMainWindow):
         page = QWidget()
         page.setObjectName("page")
         box = QVBoxLayout(page)
-        box.setContentsMargins(18, 12, 18, 16)
+        box.setContentsMargins(24, 10, 24, 16)
         box.setSpacing(0)
         day_holder = QVBoxLayout()
         self.timeline = QScrollArea()
@@ -760,8 +810,8 @@ class MainWindow(QMainWindow):
         self.timeline_widget = QWidget()
         self.timeline_widget.setObjectName("timelineCanvas")
         self.timeline_layout = QVBoxLayout(self.timeline_widget)
-        self.timeline_layout.setContentsMargins(8, 14, 8, 14)
-        self.timeline_layout.setSpacing(8)
+        self.timeline_layout.setContentsMargins(10, 16, 10, 16)
+        self.timeline_layout.setSpacing(10)
         self.timeline_layout.addStretch()
         self.timeline.setWidget(self.timeline_widget)
         # Right-clicking the empty space of the transcript still offers copy:
@@ -783,7 +833,9 @@ class MainWindow(QMainWindow):
         self.new_msg_btn.hide()
         self.new_msg_btn.clicked.connect(self.jump_to_latest)
         box.addWidget(self.new_msg_btn, 0, Qt.AlignHCenter)
-        self.timeline.verticalScrollBar().valueChanged.connect(self._maybe_hide_new_pill)
+        self.timeline.verticalScrollBar().valueChanged.connect(self._on_timeline_scroll)
+        self.timeline.verticalScrollBar().rangeChanged.connect(
+            self._on_timeline_range_changed)
         composer = QFrame()
         composer.setObjectName("composer")
         cbox = QVBoxLayout(composer)
@@ -799,29 +851,32 @@ class MainWindow(QMainWindow):
         image = QPushButton()
         image.setObjectName("chipBtn")
         image.setToolTip("发送图片")
+        image.setAccessibleName("发送图片")
         image.setFixedSize(36, 36)
-        image.setIcon(icon("image", "#9fb0c8", 17))
-        image.setIconSize(QSize(17, 17))
+        image.setIcon(icon("image", PALETTES[self.theme]["icon"], 16))
+        image.setIconSize(QSize(16, 16))
         image.setCursor(Qt.PointingHandCursor)
         image.clicked.connect(lambda: self.choose_files(images_only=True))
         file_button = QPushButton()
         file_button.setObjectName("chipBtn")
         file_button.setToolTip("发送文件")
+        file_button.setAccessibleName("发送文件")
         file_button.setFixedSize(36, 36)
-        file_button.setIcon(icon("file", "#9fb0c8", 17))
-        file_button.setIconSize(QSize(17, 17))
+        file_button.setIcon(icon("file", PALETTES[self.theme]["icon"], 16))
+        file_button.setIconSize(QSize(16, 16))
         file_button.setCursor(Qt.PointingHandCursor)
         file_button.clicked.connect(self.choose_files)
         actions.addWidget(image)
         actions.addWidget(file_button)
-        self.composer_hint = QLabel("文本与附件经本机 flixd 发送")
+        self._chip_icon_buttons = [(image, "image"), (file_button, "file")]
+        self.composer_hint = QLabel("消息经本机服务发送")
         self.composer_hint.setObjectName("muted")
         actions.addSpacing(6)
         actions.addWidget(self.composer_hint)
         actions.addStretch()
         self.send_button = QPushButton(" 发送")
         self.send_button.setObjectName("sendButton")
-        self.send_button.setIcon(icon("send", "#ffffff", 15))
+        self.send_button.setIcon(icon("send", PALETTES[self.theme]["on_accent"], 15))
         self.send_button.setIconSize(QSize(15, 15))
         self.send_button.setCursor(Qt.PointingHandCursor)
         self.send_button.clicked.connect(self.send_message)
@@ -864,10 +919,16 @@ class MainWindow(QMainWindow):
         card_box.addSpacing(12)
         row = QHBoxLayout()
         self.copy_button = QPushButton("复制本机信息")
+        self.copy_button.setObjectName("secondaryButton")
+        self.copy_button.setCursor(Qt.PointingHandCursor)
         self.copy_button.clicked.connect(self.copy_settings_info)
         self.open_dir_button = QPushButton("打开下载目录")
+        self.open_dir_button.setObjectName("secondaryButton")
+        self.open_dir_button.setCursor(Qt.PointingHandCursor)
         self.open_dir_button.clicked.connect(self.open_save_dir)
         self.theme_button = QPushButton()
+        self.theme_button.setObjectName("secondaryButton")
+        self.theme_button.setCursor(Qt.PointingHandCursor)
         self.theme_button.clicked.connect(self.toggle_theme)
         row.addWidget(self.copy_button)
         row.addWidget(self.open_dir_button)
@@ -919,9 +980,26 @@ class MainWindow(QMainWindow):
             widget.style().polish(widget)
             # QListWidget/QListView override update(index); call the base one.
             QWidget.update(widget)
+        self._refresh_icons()
+        self._sync_theme_button()
         self.update()
         self.repaint()
         self._save_prefs(theme=self.theme)
+
+    def _refresh_icons(self) -> None:
+        """Icons are baked pixmaps: redraw them from the active palette."""
+        colors = PALETTES[self.theme]
+        self._refresh_rail_icon(False)
+        for button, name in getattr(self, "_header_icon_buttons", []):
+            button.setIcon(icon(name, colors["icon"], 17))
+        for button, name in getattr(self, "_chip_icon_buttons", []):
+            button.setIcon(icon(name, colors["icon"], 16))
+        send = getattr(self, "send_button", None)
+        if send is not None:
+            send.setIcon(icon("send", colors["on_accent"], 15))
+        title = getattr(self, "title_bar", None)
+        if title is not None:
+            title.refresh_icons(colors["muted"])
 
     def copy_settings_info(self):
         QApplication.clipboard().setText(self.settings_text.text())
@@ -941,7 +1019,7 @@ class MainWindow(QMainWindow):
         configured = getattr(self, "save_dir", "")
         target = configured if configured and Path(configured).is_dir() else self.default_save_dir()
         if not target or not Path(target).is_dir():
-            self.statusBar().showMessage(f"目录不存在：{target or '—'}", 5000)
+            self.statusBar().showMessage(f"目录不存在：{target or '未设置'}", 5000)
             return
         try:
             os.startfile(target)
@@ -1129,10 +1207,10 @@ class MainWindow(QMainWindow):
             f"{len(devices)} 台设备 · {len(payload.get('groups') or [])} 个群组 · {len(adb)} 条 ADB 连接")
         self.save_dir = (payload.get("settings") or {}).get("saveDir") or ""
         self.settings_text.setText(
-            f"本机别名：{(payload.get('self') or {}).get('alias', '—')}\n"
+            f"本机别名：{(payload.get('self') or {}).get('alias', '未设置')}\n"
             f"指纹：{self.self_id}\n"
             f"控制台端口：http://127.0.0.1:{self.api_port}\n"
-            f"设备通道端口：{(payload.get('self') or {}).get('port', '—')}\n"
+            f"设备通道端口：{(payload.get('self') or {}).get('port', '未设置')}\n"
             f"下载目录：{(payload.get('settings') or {}).get('saveDir') or '系统 Downloads'}\n"
             f"活动媒体会话：{len((payload.get('media') or {}).get('sessions', []))}")
         self.populate_sidebar()
@@ -1210,7 +1288,19 @@ class MainWindow(QMainWindow):
         if current is None:
             return
         self.current = current.data(Qt.UserRole)
+        self._follow_tail = True  # opening a conversation starts at the newest message
         self.render_current()
+
+    def _on_entity_clicked(self, item):
+        """Clicking the open conversation again jumps back to the newest message."""
+        if item is None or not self.current:
+            return
+        data = item.data(Qt.UserRole) or {}
+        if (data.get("kind"), data.get("key")) != (
+                self.current.get("kind"), self.current.get("key")):
+            return  # a different conversation: currentItemChanged already handles it
+        self._follow_tail = True
+        self.jump_to_latest()
 
     def render_current(self):
         if not self.current:
@@ -1240,110 +1330,270 @@ class MainWindow(QMainWindow):
     def render_timeline(self):
         if not self.current:
             self._timeline_signature = None
-        kind, key = (self.current["kind"], self.current["key"]) if self.current else ("", "")
+            self._clear_timeline()
+            return
+        kind, key = self.current["kind"], self.current["key"]
         query = getattr(self, "session_search", None)
         query = query.text().strip() if query is not None else ""
         messages = []
-        if self.current:
-            for bubble in reversed(self.payload.get("bubbles") or []):
-                if kind == "device" and key not in (bubble.get("from"), bubble.get("to")):
-                    continue
-                if kind == "group" and bubble.get("groupId") != key:
-                    continue
-                messages.append(bubble)
-            if query:
-                needle = query.lower()
-                messages = [b for b in messages
-                            if needle in self._search_text(b).lower()]
-        signature = (kind, key, query, tuple(
-            (b.get("id"), b.get("status"), b.get("time"), self._search_text(b))
-            for b in messages))
+        for bubble in reversed(self.payload.get("bubbles") or []):
+            if kind == "device" and key not in (bubble.get("from"), bubble.get("to")):
+                continue
+            if kind == "group" and bubble.get("groupId") != key:
+                continue
+            messages.append(bubble)
+        if query:
+            needle = query.lower()
+            messages = [b for b in messages
+                        if needle in self._search_text(b).lower()]
+        items = self._timeline_items(messages, query)
+        signature = (kind, key, query, tuple(item[3] for item in items))
         if signature == self._timeline_signature:
             return
-        # Keep the user's selection alive: a poll that lands mid-drag would
-        # otherwise wipe the highlight (and the copy with it). The next poll
-        # after the selection is released redraws normally.
-        if self._timeline_signature is not None and self.timeline_selection():
-            # 选中文字期间不重绘（否则选区会被清掉），但新消息不能一直不显示：
-            # 选区释放后补一次重绘。
+        session_changed = getattr(self, "_timeline_session", None) != (kind, key)
+        # A live selection must survive a poll, but it may not hold back a
+        # conversation switch; pure appends are safe because no mounted widget
+        # is touched.
+        if (not session_changed and self.timeline_selection()
+                and not self._is_safe_append(items)):
             QTimer.singleShot(1200, self.render_timeline)
             return
-        # 重建前记下滚动位置：用户正在翻历史时不能被新消息拉到底部。
         bar = self.timeline.verticalScrollBar()
         saved_scroll = bar.value()
         previous_ids = getattr(self, "_timeline_ids", None)
         at_bottom = previous_ids is None or bar.maximum() - saved_scroll < 24
-        session_changed = getattr(self, "_timeline_session", None) != (kind, key)
+        # Opening (or re-clicking) a conversation always starts at the newest
+        # message; otherwise only follow when the reader is already at the end.
+        follow = bool(at_bottom or session_changed
+                      or getattr(self, "_follow_tail", False))
+        anchor = None if follow else self._scroll_anchor()
+        self._follow_tail = follow
+        self._timeline_rebuilding = True
         self._timeline_ids = {b.get("id") for b in messages}
         self._timeline_session = (kind, key)
         fresh = 0 if previous_ids is None else sum(
             1 for b in messages if b.get("id") not in previous_ids)
         self._timeline_signature = signature
-        while self.timeline_layout.count() > 1:
-            item = self.timeline_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        if not self.current:
-            return
+        self._render_seq = getattr(self, "_render_seq", 0) + 1
+        sequence = self._render_seq
+        try:
+            self._apply_timeline(items)
+        except Exception:
+            self._timeline_rebuilding = False
+            raise
+        QTimer.singleShot(0, lambda: self._settle_timeline_scroll(
+            follow, saved_scroll, fresh, anchor, sequence))
+
+    # ---------- incremental transcript ----------
+    #
+    # The old renderer tore the whole transcript down on every change: one
+    # status flip re-decoded every image and lost the reader's place. Rows are
+    # now mounted once and keyed by message id; each poll diffs the desired key
+    # list against the mounted one and touches only what actually changed.
+
+    def _timeline_items(self, messages: list[dict], query: str) -> list[tuple]:
+        """Desired rows in display order: (key, kind, payload, signature)."""
         if not messages:
-            empty = QLabel("没有匹配的消息" if query
-                           else "还没有消息。发送一条文本或文件开始会话。")
-            empty.setObjectName("muted"); empty.setAlignment(Qt.AlignCenter)
-            self.timeline_layout.insertWidget(0, empty)
+            text = ("没有匹配的消息" if query
+                    else "还没有消息。发送一条文本或文件开始会话。")
+            return [("empty", "empty", text, ("empty", text))]
+        items = []
         last_day = None
         for bubble in messages:
             ts = datetime.fromtimestamp((bubble.get("time") or 0) / 1000)
             if ts.date() != last_day:
                 last_day = ts.date()
-                sep = QLabel(ts.strftime("%m 月 %d 日"))
-                sep.setObjectName("daySeparator")
-                sep.setAlignment(Qt.AlignCenter)
-                self.timeline_layout.insertWidget(self.timeline_layout.count() - 1, sep)
+                items.append(("day:" + last_day.isoformat(), "day", last_day,
+                              ("day", last_day)))
+            content = bubble.get("content", "")
+            signature = (bubble.get("id"), bubble.get("status"),
+                         bubble.get("time"), self._search_text(bubble),
+                         repr(content) if isinstance(content, dict) else content)
+            items.append(("msg:" + str(bubble.get("id")), "msg", bubble,
+                          signature))
+        return items
+
+    def _is_safe_append(self, items: list[tuple]) -> bool:
+        old_keys = getattr(self, "_timeline_keys", [])
+        if len(items) < len(old_keys):
+            return False
+        if [item[0] for item in items[:len(old_keys)]] != old_keys:
+            return False
+        return all(self._timeline_row_sig.get(item[0]) == item[3]
+                   for item in items[:len(old_keys)])
+
+    def _clear_timeline(self) -> None:
+        for key in list(getattr(self, "_timeline_keys", [])):
+            self._unmount_row(key)
+        self._timeline_keys = []
+        self._timeline_ids = set()
+        self._timeline_session = None
+
+    def _unmount_row(self, key: str) -> None:
+        widget = self._timeline_rows.pop(key, None)
+        self._timeline_row_sig.pop(key, None)
+        if widget is not None:
+            self.timeline_layout.removeWidget(widget)
+            widget.setParent(None)
+            widget.deleteLater()
+
+    def _mount_row(self, item: tuple, index: int) -> None:
+        key, kind, payload, signature = item
+        if kind == "empty":
+            widget = QLabel(payload)
+            widget.setObjectName("muted")
+            widget.setAlignment(Qt.AlignCenter)
+        elif kind == "day":
+            widget = QLabel(payload.strftime("%m 月 %d 日"))
+            widget.setObjectName("daySeparator")
+            widget.setAlignment(Qt.AlignCenter)
+        else:
+            bubble = payload
+            ts = datetime.fromtimestamp((bubble.get("time") or 0) / 1000)
             raw = bubble.get("content", "")
             outgoing = bubble.get("from") == self.self_id
-            wrap = QWidget(); line = QHBoxLayout(wrap); line.setContentsMargins(4, 0, 4, 0)
+            widget = QWidget()
+            line = QHBoxLayout(widget)
+            line.setContentsMargins(4, 0, 4, 0)
             image = self._image_path(raw) if isinstance(raw, dict) else ""
             if image:
-                widget = self._image_bubble(image, outgoing, ts)
+                inner = self._image_bubble(image, outgoing, ts)
             elif isinstance(raw, dict):
-                widget = self._file_bubble(raw, outgoing, ts)
+                inner = self._file_bubble(raw, outgoing, ts)
             else:
-                widget = self._bubble(str(raw), outgoing, ts)
+                inner = self._bubble(str(raw), outgoing, ts)
             if outgoing:
                 line.addStretch()
-            line.addWidget(widget)
+            line.addWidget(inner)
             if not outgoing:
                 line.addStretch()
-            self.timeline_layout.insertWidget(self.timeline_layout.count() - 1, wrap)
-        QTimer.singleShot(0, lambda: self._settle_timeline_scroll(
-            at_bottom or session_changed, saved_scroll, fresh))
+        self.timeline_layout.insertWidget(index, widget)
+        self._timeline_rows[key] = widget
+        self._timeline_row_sig[key] = signature
+
+    def _apply_timeline(self, items: list[tuple]) -> None:
+        old_keys = list(getattr(self, "_timeline_keys", []))
+        new_keys = [item[0] for item in items]
+        new_by_key = {item[0]: item for item in items}
+        new_set = set(new_keys)
+        # History only ever grows at the tail, so survivors normally form a
+        # prefix of the desired order (the 100-message cap drops rows at the
+        # front). Anything else (search rewrite, out-of-band edit) is rare and
+        # falls back to a clean rebuild.
+        survivors = [key for key in old_keys if key in new_set]
+        if survivors != new_keys[:len(survivors)]:
+            for key in old_keys:
+                self._unmount_row(key)
+        else:
+            for key in old_keys:
+                if key not in new_set:
+                    self._unmount_row(key)
+        for index, key in enumerate(new_keys):
+            if key not in self._timeline_rows:
+                self._mount_row(new_by_key[key], index)
+        # Status/progress changes keep their key; redraw just that row.
+        for index, key in enumerate(new_keys):
+            if key not in self._timeline_rows:
+                continue
+            if self._timeline_row_sig.get(key) == new_by_key[key][3]:
+                continue
+            self._unmount_row(key)
+            self._mount_row(new_by_key[key], index)
+        self._timeline_keys = new_keys
+
+    def _scroll_anchor(self):
+        """(row key, offset from viewport top) for the first visible row."""
+        bar = self.timeline.verticalScrollBar()
+        top = bar.value()
+        for key in getattr(self, "_timeline_keys", []):
+            widget = self._timeline_rows.get(key)
+            if widget is None:
+                continue
+            if widget.y() + widget.height() > top:
+                return key, widget.y() - top
+        return None
+
+    def _restore_anchor(self, anchor) -> bool:
+        if not anchor:
+            return False
+        key, offset = anchor
+        widget = self._timeline_rows.get(key)
+        if widget is None:
+            return False
+        bar = self.timeline.verticalScrollBar()
+        target = max(0, widget.y() - offset)
+        self._anchor_target = target
+        bar.setValue(target)
+        return True
+
+    def _reassert_anchor(self, anchor) -> None:
+        if self._timeline_rebuilding or self._follow_tail:
+            return
+        bar = self.timeline.verticalScrollBar()
+        if getattr(self, "_anchor_target", None) != bar.value():
+            return  # the reader moved; leave them alone
+        self._restore_anchor(anchor)
 
     def _settle_timeline_scroll(self, follow: bool, saved_scroll: int,
-                                fresh: int) -> None:
+                                fresh: int, anchor=None,
+                                sequence: int | None = None) -> None:
         """Follow the newest message only when the reader is already at the end."""
+        if sequence is not None and sequence != getattr(self, "_render_seq", sequence):
+            return  # a newer frame already took over
         bar = self.timeline.verticalScrollBar()
         pill = getattr(self, "new_msg_btn", None)
+        self._timeline_rebuilding = False
+        self._follow_tail = follow
         if follow:
-            bar.setValue(bar.maximum())
+            self._scroll_to_bottom()
             if pill is not None:
                 pill.hide()
             return
-        bar.setValue(min(saved_scroll, max(0, bar.maximum())))
+        if not self._restore_anchor(anchor):
+            self._anchor_target = None
+            bar.setValue(min(saved_scroll, max(0, bar.maximum())))
+        QTimer.singleShot(0, lambda: self._reassert_anchor(anchor))
+        QTimer.singleShot(80, lambda: self._reassert_anchor(anchor))
         if fresh and pill is not None:
             pill.setText(f"↓ {fresh} 条新消息")
             pill.show()
 
-    def jump_to_latest(self) -> None:
+    def _scroll_to_bottom(self) -> None:
+        """Pin to the tail; the range is only final once the layout settles."""
+        self._anchor_target = None
         bar = self.timeline.verticalScrollBar()
         bar.setValue(bar.maximum())
-        self.new_msg_btn.hide()
+        QTimer.singleShot(0, self._reassert_bottom)
+        QTimer.singleShot(80, self._reassert_bottom)
 
-    def _maybe_hide_new_pill(self, value: int) -> None:
-        if not hasattr(self, "new_msg_btn") or not self.new_msg_btn.isVisible():
+    def _reassert_bottom(self) -> None:
+        if self._timeline_rebuilding or not self._follow_tail:
             return
         bar = self.timeline.verticalScrollBar()
-        if bar.maximum() - value < 24:
-            self.new_msg_btn.hide()
+        bar.setValue(bar.maximum())
+
+    def jump_to_latest(self) -> None:
+        self._follow_tail = True
+        self._scroll_to_bottom()
+        self.new_msg_btn.hide()
+
+    def _on_timeline_scroll(self, value: int) -> None:
+        """Remember whether the reader is at the tail, and hide the pill there."""
+        if self._timeline_rebuilding:
+            return
+        bar = self.timeline.verticalScrollBar()
+        at_bottom = bar.maximum() - value < 24
+        self._follow_tail = at_bottom
+        pill = getattr(self, "new_msg_btn", None)
+        if pill is not None and pill.isVisible() and at_bottom:
+            pill.hide()
+
+    def _on_timeline_range_changed(self, _minimum: int, _maximum: int) -> None:
+        """Keep the tail in view while following; never fight a reader above it."""
+        if self._timeline_rebuilding or not self._follow_tail:
+            return
+        bar = self.timeline.verticalScrollBar()
+        bar.setValue(bar.maximum())
 
     IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".heic"}
 
@@ -1439,19 +1689,37 @@ class MainWindow(QMainWindow):
                     return str(file)
         return ""
 
+    def _pixmap_for(self, path: str) -> QPixmap:
+        """Decode once per (path, mtime, size); keep the 260 px version only."""
+        try:
+            stat = os.stat(path)
+            cache_key = (path, stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            cache_key = (path, 0, 0)
+        cached = self._pixmap_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        pixmap = QPixmap(path)
+        if not pixmap.isNull():
+            pixmap = pixmap.scaled(260, 260, Qt.KeepAspectRatio,
+                                   Qt.SmoothTransformation)
+            self._pixmap_cache[cache_key] = pixmap
+            while len(self._pixmap_cache) > 32:
+                self._pixmap_cache.pop(next(iter(self._pixmap_cache)))
+        return pixmap
+
     def _image_bubble(self, path: str, outgoing: bool, ts: datetime) -> QFrame:
         frame = QFrame()
         frame.setObjectName("bubbleOut" if outgoing else "bubbleIn")
         box = QVBoxLayout(frame)
         box.setContentsMargins(6, 6, 6, 6)
         picture = QLabel()
-        pixmap = QPixmap(path)
+        pixmap = self._pixmap_for(path)
         if pixmap.isNull():
             picture.setText("图片无法解码")
             picture.setObjectName("bubbleText")
         else:
-            picture.setPixmap(pixmap.scaled(260, 260, Qt.KeepAspectRatio,
-                                            Qt.SmoothTransformation))
+            picture.setPixmap(pixmap)
         picture.setToolTip(path)
         picture.setCursor(Qt.PointingHandCursor)
         picture.mouseDoubleClickEvent = lambda event, target=path: self.open_path(target)
@@ -1470,10 +1738,17 @@ class MainWindow(QMainWindow):
         box = QVBoxLayout(frame)
         box.setContentsMargins(12, 10, 12, 8)
         box.setSpacing(2)
-        name = QLabel("▤  " + str(content.get("name") or "文件"))
+        head = QHBoxLayout()
+        head.setSpacing(7)
+        glyph = QLabel()
+        glyph.setPixmap(icon("file", "#8a978f", 16).pixmap(16, 16))
+        glyph.setAlignment(Qt.AlignTop)
+        head.addWidget(glyph, 0)
+        name = QLabel(str(content.get("name") or "文件"))
         name.setObjectName("bubbleText")
         name.setWordWrap(True)
-        box.addWidget(name)
+        head.addWidget(name, 1)
+        box.addLayout(head)
         state = content.get("state")
         detail = self.format_size(content.get("size", 0))
         if state is not None and int(state) != 2:
@@ -1965,7 +2240,7 @@ class MainWindow(QMainWindow):
             return
         self.workspace_stack.setCurrentIndex(6)
         self.statusBar().showMessage(
-            "未发现 flixcli 服务——可从下方一键启动（与官方 Flix 端口共存）")
+            "未连接本机服务，可从下方一键启动（与原生 Flix 端口共存）")
 
     def eventFilter(self, watched, event):
         if watched is self.composer and event.type() == QEvent.KeyPress:
@@ -2051,224 +2326,168 @@ def main(argv: list[str] | None = None, *, api_port: int = 8898) -> int:
 PREFS_FILE = Path.home() / ".relaydesk_gui.json"
 
 
+PALETTES = {
+    "dark": {
+        "bg": "#0e1211", "bg_rail": "#121715", "bg_side": "#141a18",
+        "surface": "#1a211e", "surface_hi": "#202824",
+        "border": "#2a332f", "border_hi": "#3a463f",
+        "text": "#e9eeeb", "text_dim": "#b6c2bc", "muted": "#8a978f",
+        "accent": "#3fa27b", "accent_hi": "#4ab68b", "accent_press": "#348a69",
+        "accent_soft": "rgba(63,162,123,0.14)",
+        "on_accent": "#06110c", "on_accent_meta": "rgba(6,17,12,0.62)",
+        "danger": "#d96157", "danger_hi": "#e57369",
+        "online": "#4fc38f", "offline": "#5c6b64",
+        "menu_bg": "#161d1a", "header_bg": "rgba(18,23,21,0.92)",
+        "scroll": "#33413a", "scroll_hi": "#46564d",
+        "icon": "#8fa39a",
+    },
+    "light": {
+        "bg": "#f1f0ea", "bg_rail": "#e9e7df", "bg_side": "#f7f6f1",
+        "surface": "#ffffff", "surface_hi": "#f0efe8",
+        "border": "#d9d5ca", "border_hi": "#c3bfb2",
+        "text": "#1b221e", "text_dim": "#43514a", "muted": "#5f6c66",
+        "accent": "#1f7a5c", "accent_hi": "#186a4f", "accent_press": "#145a43",
+        "accent_soft": "rgba(31,122,92,0.10)",
+        "on_accent": "#ffffff", "on_accent_meta": "rgba(255,255,255,0.78)",
+        "danger": "#b4483f", "danger_hi": "#9e3c34",
+        "online": "#1f7a5c", "offline": "#8a948e",
+        "menu_bg": "#ffffff", "header_bg": "rgba(247,246,241,0.92)",
+        "scroll": "#cfcabf", "scroll_hi": "#b8b3a6",
+        "icon": "#5f6c66",
+    },
+}
+
+
 def palette_for(theme: str) -> QPalette:
-    """Dark/light base palette for the parts QSS does not cover."""
-    light = theme == "light"
-    text = QColor("#12161d") if light else QColor("#eef3fc")
-    base = QColor("#ffffff") if light else QColor("#0d1119")
-    window = QColor("#f4f6fa") if light else QColor("#080b10")
-    muted = QColor("#5c6b80") if light else QColor("#9fb0c8")
+    """Qt palette for the parts QSS does not reach (menus, dialogs, tooltips)."""
+    t = PALETTES["light" if theme == "light" else "dark"]
     pal = QPalette()
-    pal.setColor(QPalette.Window, window)
-    pal.setColor(QPalette.WindowText, text)
-    pal.setColor(QPalette.Base, base)
-    pal.setColor(QPalette.AlternateBase, window)
-    pal.setColor(QPalette.Text, text)
-    pal.setColor(QPalette.Button, window)
-    pal.setColor(QPalette.ButtonText, text)
-    pal.setColor(QPalette.ToolTipBase, base)
-    pal.setColor(QPalette.ToolTipText, text)
-    pal.setColor(QPalette.PlaceholderText, muted)
-    pal.setColor(QPalette.Highlight, QColor("#3b82f6"))
-    pal.setColor(QPalette.HighlightedText, QColor("#ffffff"))
+    pal.setColor(QPalette.Window, QColor(t["bg"]))
+    pal.setColor(QPalette.WindowText, QColor(t["text"]))
+    pal.setColor(QPalette.Base, QColor(t["surface"]))
+    pal.setColor(QPalette.AlternateBase, QColor(t["bg_side"]))
+    pal.setColor(QPalette.Text, QColor(t["text"]))
+    pal.setColor(QPalette.Button, QColor(t["surface"]))
+    pal.setColor(QPalette.ButtonText, QColor(t["text"]))
+    pal.setColor(QPalette.ToolTipBase, QColor(t["surface"]))
+    pal.setColor(QPalette.ToolTipText, QColor(t["text"]))
+    pal.setColor(QPalette.PlaceholderText, QColor(t["muted"]))
+    pal.setColor(QPalette.Highlight, QColor(t["accent"]))
+    pal.setColor(QPalette.HighlightedText, QColor(t["on_accent"]))
     return pal
 
 
-# Brand colours keep their hue in both themes; neutrals are inverted.
-LIGHT_KEEP = {"#3b82f6", "#2563eb", "#8b5cf6", "#4f46e5", "#21c78a",
-              "#ef5350", "#e81123", "#ffffff", "#000000"}
-
-HEX_RE = re.compile(r"#[0-9a-fA-F]{6}")
-
-
-RGBA_RE = re.compile(r"rgba\((\d{1,3}),\s*(\d{1,3}),\s*(\d{1,3}),\s*([0-9.]+)\)")
-
-
-def _flip_rgb(r: int, g: int, b: int):
-    """Mirror a colour's lightness so the whole sheet follows the theme.
-
-    Foreground colours (the light ones) are pushed deep into the dark range
-    rather than merely mirrored: a mid-grey on a near-white background reads
-    worse than the original pair did, so light text lands around L=0.12-0.30.
-    """
-    hue, light, sat = colorsys.rgb_to_hls(r / 255, g / 255, b / 255)
-    if light >= 0.5:
-        light = 0.12 + (1.0 - light) * 0.30
-    else:
-        light = min(1.0 - light, 0.93)
-    return tuple(round(c * 255) for c in colorsys.hls_to_rgb(hue, light, sat))
-
-
-def _flip_hex(value: str) -> str:
-    r, g, b = (int(value[i:i + 2], 16) for i in (1, 3, 5))
-    return "#%02x%02x%02x" % _flip_rgb(r, g, b)
-
-
-def _flip_rgba(match) -> str:
-    r, g, b = _flip_rgb(int(match.group(1)), int(match.group(2)), int(match.group(3)))
-    return "rgba(%d,%d,%d,%s)" % (r, g, b, match.group(4))
-
-
-# The flip turns `QLabel#bubbleText` dark, which is right for incoming bubbles
-# but wrong on the blue outgoing bubble: pin white there explicitly.
-LIGHT_OVERRIDES = """
-QFrame#bubbleOut QLabel#bubbleText { color: #ffffff; }
-QFrame#bubbleOut QLabel#bubbleMeta { color: rgba(255,255,255,0.80); }
-QFrame#bubbleIn { background: #ffffff; }
-QLabel#bubbleMeta { color: #5c6b80; }
-"""
-
-
-BRAND_RE = re.compile(r"#(3b82f6|2563eb|8b5cf6|4f46e5|21c78a|ef5350|e81123)", re.I)
-
-
-def _flip_named(block: str) -> str:
-    """`color: white` is not a hex, so it survived every flip: on a light
-    background that is white-on-white. Rules that carry a brand colour keep
-    their white text (accent buttons, badges)."""
-    if BRAND_RE.search(block):
-        return block
-    return block.replace("color: white", "color: #12161d")
-
-
 def styles_for(theme: str) -> str:
-    """Dark is the authored sheet; light is the same sheet with flipped neutrals."""
-    if theme != "light":
-        return STYLES
-    out = HEX_RE.sub(
-        lambda m: m.group(0) if m.group(0).lower() in LIGHT_KEEP else _flip_hex(m.group(0)),
-        STYLES)
-    # rgba() carries the translucent headers and overlays; hex-only flipping
-    # left those dark (the session header was the visible offender).
-    out = RGBA_RE.sub(_flip_rgba, out)
-    # Named colours go last, otherwise the dark text they produce is flipped
-    # straight back to light by the hex pass above.
-    out = "".join(_flip_named(b) for b in re.split(r"(?<=\})", out))
-    return out + LIGHT_OVERRIDES
+    """One authored sheet for both themes, filled from explicit tokens."""
+    return Template(STYLES).substitute(PALETTES["light" if theme == "light" else "dark"])
 
-
-LIGHT_SWAP = {
-    "#080b10": "#eef1f6", "#0b0f16": "#f4f6fa", "#0d1119": "#ffffff",
-    "#1a212c": "#ffffff", "#232c3a": "#e4e9f1", "#232c39": "#e9edf4",
-    "#242e3d": "#eceff5", "#2b3547": "#dbe2ec",
-    "#eef3fc": "#12161d", "#edf3ff": "#12161d", "#e5edf9": "#1b2230",
-    "#dce6f6": "#243044", "#dbe5f5": "#1b2230", "#c8d4e7": "#2a3446",
-    "#9fb0c8": "#5c6b80", "#93a4bd": "#65758c", "#7c8ba3": "#6b7a90",
-}
 
 STYLES = """
-QWidget#rootWindow, QWidget#page { background: qlineargradient(y1:0,y1:1,
-    stop:0 #0b0f16, stop:1 #080b10); color: #eef3fc; }
-QFrame#titleBar { background: #0d1119; border-bottom: 1px solid #232c3a; }
-QLabel#titleLogo { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
-    stop:0 #3b82f6, stop:1 #8b5cf6); border-radius: 7px; color: white;
-    font-size: 14px; font-weight: 800; }
-QLabel#titleName { color: #dbe5f5; font-size: 13px; font-weight: 650; }
-QPushButton#winBtn { background: transparent; color: #93a4bd; border: 0;
-    font-size: 13px; border-radius: 0; }
-QPushButton#winBtn:hover { background: #232c39; color: white; }
-QPushButton#closeBtn { background: transparent; color: #93a4bd; border: 0;
-    font-size: 13px; border-radius: 0; }
-QPushButton#closeBtn:hover { background: #e81123; color: white; }
+* { font-family: "Segoe UI Variable Text", "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI"; }
+QWidget#rootWindow, QWidget#page { background: $bg; color: $text; }
+QPushButton { background: $surface; color: $text; border: 1px solid $border;
+    border-radius: 8px; padding: 7px 12px; font-size: 12.5px; }
+QPushButton:hover { background: $surface_hi; border-color: $border_hi; }
+QPushButton:disabled { color: $muted; border-color: $border; }
+QFrame#titleBar { background: $bg_rail; border-bottom: 1px solid $border; }
+QLabel#titleName { color: $text_dim; font-size: 12px; font-weight: 600; }
+QPushButton#winBtn, QPushButton#closeBtn { background: transparent; border: 0; border-radius: 0; }
+QPushButton#winBtn:hover { background: $surface_hi; }
+QPushButton#closeBtn:hover { background: $danger; }
 
-QFrame#rail { background: #0d1119; border-right: 1px solid #232c3a; }
-QLabel#logo { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
-    stop:0 #3b82f6, stop:1 #8b5cf6); border-radius: 12px; color: white;
-    font-size: 21px; font-weight: 800; }
-QPushButton#railButton { background: transparent; color: #8291a8; border: 0;
-    border-radius: 13px; font-size: 19px; }
-QPushButton#railButton:hover { background: #1c2430; color: #dbe5f5; }
-QPushButton#railButton:checked { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
-    stop:0 #2563eb, stop:1 #4f46e5); color: white; }
-QLabel#connectionDot { color: #ef5350; font-size: 16px; }
-QLabel#connectionDot[online="true"] { color: #21c78a; }
+QFrame#rail { background: $bg_rail; border-right: 1px solid $border; }
+QPushButton#railButton { background: transparent; border: 0; border-radius: 10px; }
+QPushButton#railButton:hover { background: $surface_hi; }
+QPushButton#railButton:checked { background: $accent_soft; }
+QLabel#connectionDot { color: $offline; font-size: 10px; }
+QLabel#connectionDot[online="true"] { color: $online; }
 
-QFrame#sidebar { background: #0a0d13; border-right: 1px solid #222b39; }
-QLabel#brand { color: white; font-size: 23px; font-weight: 800; letter-spacing: .2px; }
-QLabel#brandSub { color: #6e7d95; font-size: 11.5px; }
-QPushButton#roundBtn { background: #1a212c; color: #9fb0c8; border: 1px solid #2b3547;
-    border-radius: 18px; font-size: 15px; }
-QPushButton#roundBtn:hover { background: #242e3d; color: white; border-color: #3b82f6; }
-QLineEdit#search { background: #141924; color: #e5edf9; border: 1px solid #29323f;
-    border-radius: 10px; padding: 10px 13px; font-size: 13px; selection-background-color: #2563eb; }
-QLineEdit#search:focus { border-color: #3b82f6; background: #171d29; }
-QLabel#sidebarTitle { color: #7f8da4; padding-top: 4px; font-weight: 700; font-size: 12px;
-    letter-spacing: 1.5px; }
+QFrame#sidebar { background: $bg_side; border-right: 1px solid $border; }
+QLabel#brand { color: $text; font-size: 17px; font-weight: 700; }
+QLabel#brandSub { color: $muted; font-size: 11.5px; }
+QPushButton#roundBtn { background: transparent; color: $text_dim;
+    border: 1px solid $border; border-radius: 9px; }
+QPushButton#roundBtn:hover { background: $surface_hi; border-color: $border_hi; }
+QLineEdit#search, QLineEdit#sessionSearch { background: $surface; color: $text;
+    border: 1px solid $border; border-radius: 9px; padding: 8px 11px; font-size: 12.5px;
+    selection-background-color: $accent; selection-color: $on_accent; }
+QLineEdit#search:focus, QLineEdit#sessionSearch:focus { border-color: $accent; }
+QLabel#sidebarTitle { color: $muted; padding-top: 2px; font-weight: 600; font-size: 11px; }
 QListWidget#entityList { background: transparent; border: 0; outline: 0; }
-QListWidget#entityList::item { color: #dbe5f5; margin: 3px 0; border-radius: 13px;
+QListWidget#entityList::item { color: $text; margin: 2px 0; border-radius: 10px;
     border: 1px solid transparent; }
-QListWidget#entityList::item:selected { background: #20222b; border: 1px solid #3b82f6; }
-QListWidget#entityList::item:hover { background: #171c25; }
+QListWidget#entityList::item:selected { background: $accent_soft; border: 1px solid $accent; }
+QListWidget#entityList::item:hover { background: $surface_hi; }
 QFrame#entityCard { background: transparent; }
-QLabel#entityName { color: #eef3fc; font-size: 13.5px; font-weight: 650; }
-QLabel#entitySub { color: #7c8ba3; font-size: 11.5px; }
-QLabel#onlineDot { color: #21c78a; font-size: 11px; }
-QLabel#offlineDot { color: #55627a; font-size: 11px; }
+QLabel#entityName { color: $text; font-size: 13px; font-weight: 600; }
+QLabel#entitySub { color: $muted; font-size: 11.5px; }
+QLabel#onlineDot { color: $online; font-size: 10px; }
+QLabel#offlineDot { color: $offline; font-size: 10px; }
 
-QFrame#workspace { background: transparent; }
-QFrame#sessionHeader { background: rgba(14,18,25,0.85); border-bottom: 1px solid #232c3a; }
-QLabel#sessionTitle { color: white; font-size: 17px; font-weight: 750; }
-QLabel#muted { color: #7c8ba3; font-size: 12px; }
-QPushButton#headerBtn { background: #1a212c; color: #9fb0c8; border: 1px solid #2b3547;
-    border-radius: 20px; font-size: 16px; }
-QPushButton#headerBtn:hover { background: #243044; color: white; border-color: #3b82f6; }
+QFrame#workspace { background: $bg; }
+QFrame#sessionHeader { background: $bg; border-bottom: 1px solid $border; }
+QLabel#sessionTitle { color: $text; font-size: 16px; font-weight: 650; }
+QLabel#muted { color: $muted; font-size: 12px; }
+QPushButton#headerBtn { background: transparent; border: 1px solid $border; border-radius: 9px; }
+QPushButton#headerBtn:hover { background: $surface_hi; border-color: $border_hi; }
 
 QScrollArea#timeline { background: transparent; border: 0; }
 QWidget#timelineCanvas { background: transparent; }
-QLabel#daySeparator { color: #5b6980; font-size: 11px; background: #171d27;
-    border-radius: 9px; padding: 3px 12px; margin: 4px auto; }
-QFrame#bubbleOut { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
-    stop:0 #2f6ef2, stop:1 #2b5fe0); border-radius: 15px; border-bottom-right-radius: 5px; }
-QFrame#bubbleIn { background: #222834; border-radius: 15px; border-bottom-left-radius: 5px; }
-QLabel#bubbleText { color: white; font-size: 13.5px; line-height: 150%; }
-QLabel#bubbleMeta { color: rgba(255,255,255,0.62); font-size: 10.5px; }
-QFrame#bubbleIn QLabel#bubbleMeta { color: #7c8ba3; }
+QLabel#daySeparator { color: $muted; font-size: 11px; padding: 6px 0 2px 0; }
+QFrame#bubbleOut { background: $accent; border-radius: 12px; border-bottom-right-radius: 4px; }
+QFrame#bubbleIn { background: $surface; border: 1px solid $border;
+    border-radius: 12px; border-bottom-left-radius: 4px; }
+QLabel#bubbleText { color: $text; font-size: 13px; }
+QFrame#bubbleOut QLabel#bubbleText { color: $on_accent; }
+QLabel#bubbleMeta { color: $muted; font-size: 10.5px; }
+QFrame#bubbleOut QLabel#bubbleMeta { color: $on_accent_meta; }
 
-QFrame#composer { background: #161b24; border: 1px solid #2b3543; border-radius: 16px; }
-QTextEdit#composerEdit { background: transparent; border: 0; color: white;
-    font-size: 13.5px; selection-background-color: #2563eb; }
-QPushButton#chipBtn { background: #212936; color: #9fb0c8; border: 1px solid #2e3949;
-    border-radius: 10px; font-size: 15px; }
-QPushButton#chipBtn:hover { color: white; border-color: #3b82f6; }
-QPushButton#newMsgPill { background: #1d4ed8; color: white; border: 0;
-    border-radius: 13px; padding: 5px 16px; font-size: 12px; font-weight: 600; }
-QPushButton#newMsgPill:hover { background: #2563eb; }
-QPushButton#sendButton { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
-    stop:0 #2563eb, stop:1 #4f46e5); color: white; border: 0; border-radius: 18px;
-    padding: 9px 22px; font-weight: 700; font-size: 13px; }
-QPushButton#sendButton:hover { background: #3b82f6; }
-QPushButton#sendButton:pressed { background: #1d4ed8; }
+QFrame#composer { background: $surface; border: 1px solid $border; border-radius: 12px; }
+QTextEdit#composerEdit { background: transparent; border: 0; color: $text; font-size: 13px;
+    selection-background-color: $accent; selection-color: $on_accent; }
+QPushButton#chipBtn { background: transparent; border: 1px solid $border; border-radius: 8px; }
+QPushButton#chipBtn:hover { background: $surface_hi; border-color: $border_hi; }
+QPushButton#newMsgPill { background: $accent; color: $on_accent; border: 0;
+    border-radius: 11px; padding: 5px 14px; font-size: 12px; font-weight: 600; }
+QPushButton#newMsgPill:hover { background: $accent_hi; }
+QPushButton#sendButton { background: $accent; color: $on_accent; border: 0; border-radius: 9px;
+    padding: 8px 18px; font-weight: 600; font-size: 12.5px; }
+QPushButton#sendButton:hover { background: $accent_hi; }
+QPushButton#sendButton:pressed { background: $accent_press; }
 
-QListWidget#contentList { background: #10151d; color: #dce6f6; border: 1px solid #242e3d;
-    border-radius: 11px; padding: 6px; }
-QListWidget#contentList::item { padding: 10px; border-bottom: 1px solid #1d2531;
+QListWidget#contentList { background: $surface; color: $text; border: 1px solid $border;
+    border-radius: 10px; padding: 6px; }
+QListWidget#contentList::item { padding: 10px; border-bottom: 1px solid $border;
     border-radius: 6px; }
-QListWidget#contentList::item:hover { background: #181f2a; }
-QLabel#pageTitle { color: white; font-size: 22px; font-weight: 800; }
-QLabel#emptyLogo { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
-    stop:0 #3b82f6, stop:1 #8b5cf6); border-radius: 30px; color: white;
-    font-size: 46px; font-weight: 800; }
-QFrame#settingsCard { background: #121824; border: 1px solid #263042; border-radius: 13px; }
-QLabel#settingsText { color: #b9c7da; font-size: 13px; }
-QLabel#mediaPreview { background: #05070a; color: #718096; border: 1px solid #263143;
-    border-radius: 11px; }
-QCheckBox { color: #c8d4e7; spacing: 7px; font-size: 13px; }
-QPushButton#primaryBtn { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
-    stop:0 #2563eb, stop:1 #4f46e5); color: white; border: 0; border-radius: 9px;
-    padding: 9px 18px; font-weight: 700; }
-QPushButton#primaryBtn:hover { background: #3b82f6; }
-QPushButton#secondaryButton { background: #202735; color: #edf3ff; border: 1px solid #35405a;
+QListWidget#contentList::item:hover { background: $surface_hi; }
+QLabel#pageTitle { color: $text; font-size: 20px; font-weight: 700; }
+QLabel#emptyTitle { color: $text; font-size: 19px; font-weight: 650; }
+QFrame#settingsCard { background: $surface; border: 1px solid $border; border-radius: 10px; }
+QLabel#settingsText { color: $text_dim; font-size: 12.5px; }
+QLabel#mediaPreview { background: $bg; color: $muted; border: 1px solid $border;
+    border-radius: 10px; }
+QCheckBox { color: $text_dim; spacing: 7px; font-size: 12.5px; }
+QPushButton#primaryBtn { background: $accent; color: $on_accent; border: 0; border-radius: 9px;
+    padding: 9px 18px; font-weight: 600; }
+QPushButton#primaryBtn:hover { background: $accent_hi; }
+QPushButton#secondaryButton { background: transparent; color: $text; border: 1px solid $border;
     border-radius: 9px; padding: 8px 14px; font-size: 12.5px; }
-QPushButton#secondaryButton:hover { border-color: #3b82f6; background: #28324a; }
-QPushButton#secondaryButton:disabled { color: #596579; background: #171b22; border-color: #232c39; }
-QMenu { background: #161c26; color: white; border: 1px solid #354055; border-radius: 9px;
+QPushButton#secondaryButton:hover { background: $surface_hi; border-color: $border_hi; }
+QPushButton#secondaryButton:disabled { color: $muted; border-color: $border; }
+QMenu { background: $menu_bg; color: $text; border: 1px solid $border; border-radius: 9px;
     padding: 5px; }
-QMenu::item { padding: 8px 22px; border-radius: 6px; }
-QMenu::item:selected { background: #2563eb; }
-QStatusBar { background: #0d1119; color: #7f8ea6; border-top: 1px solid #1e2734;
+QMenu::item { padding: 8px 20px; border-radius: 6px; }
+QMenu::item:selected { background: $accent_soft; color: $text; }
+QStatusBar { background: $bg_rail; color: $muted; border-top: 1px solid $border;
     font-size: 11.5px; }
-QScrollBar:vertical { background: transparent; width: 9px; margin: 2px; }
-QScrollBar::handle:vertical { background: #313e52; border-radius: 4px; min-height: 36px; }
-QScrollBar::handle:vertical:hover { background: #40506a; }
+QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
+QScrollBar::handle:vertical { background: $scroll; border-radius: 5px; min-height: 36px; }
+QScrollBar::handle:vertical:hover { background: $scroll_hi; }
 QScrollBar::add-line, QScrollBar::sub-line { height: 0; }
+QToolTip { background: $menu_bg; color: $text; border: 1px solid $border; padding: 5px 8px; }
+QPushButton:focus { border: 1px solid $accent; }
+QPushButton#railButton:focus { border: 1px solid $accent; }
+QPushButton#sendButton:focus, QPushButton#primaryBtn:focus { border: 1px solid $on_accent; }
+QPushButton#newMsgPill:focus { border: 1px solid $on_accent; }
+QListWidget#entityList:focus { border: 1px solid $accent; border-radius: 10px; }
 """

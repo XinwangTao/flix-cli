@@ -1,16 +1,17 @@
 """Vector icon set for the RelayDesk desktop client.
 
-Hand-drawn 24x24 stroke icons in the Lucide style (round caps, 2px) rendered
-through QSvgRenderer, plus the brand logo mark: two relay nodes joined by an
-arc, on the app's blue→violet gradient.
+Hand-drawn 24x24 icons with square caps and 1.8px strokes: the squared
+terminals read like instrument markings instead of the rounded default icon
+library look. The brand mark is a flat ink tile with a single relay arc.
 """
 from __future__ import annotations
 
 from PySide6.QtCore import QByteArray, QRectF, Qt
-from PySide6.QtGui import QColor, QLinearGradient, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 
-_M = 'fill="none" stroke="COLOR" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"'
+_M = ('fill="none" stroke="COLOR" stroke-width="1.8" '
+      'stroke-linecap="square" stroke-linejoin="miter"')
 
 ICONS: dict[str, str] = {
     # devices / session picker
@@ -53,11 +54,11 @@ ICONS: dict[str, str] = {
 }
 
 LOGO_MARK = (
-    '<circle cx="19" cy="43" r="6.5" fill="white"/>'
-    '<circle cx="45" cy="21" r="6.5" fill="white"/>'
-    '<path d="M19 43C27 43 37 21 45 21" fill="none" stroke="white" '
-    'stroke-width="4" stroke-linecap="round"/>'
-    '<circle cx="32.4" cy="31.2" r="2.6" fill="#a5f3fc"/>'
+    '<path d="M16 48C26 48 38 16 48 16" fill="none" stroke="#4fc38f" '
+    'stroke-width="5.5" stroke-linecap="square"/>'
+    '<circle cx="16" cy="48" r="7.5" fill="#e9eeeb"/>'
+    '<circle cx="48" cy="16" r="7.5" fill="#4fc38f"/>'
+    '<circle cx="32" cy="32" r="3.4" fill="#e9eeeb"/>'
 )
 
 
@@ -84,22 +85,22 @@ def icon(name: str, color: str = "#8291a8", size: int = 20) -> QIcon:
 
 
 def logo_pixmap(size: int = 256, with_background: bool = True) -> QPixmap:
-    """Brand mark: two relay nodes joined by an arc on the blue→violet gradient."""
-    pm = QPixmap(size, size)
+    """Brand mark: two relay nodes joined by one arc on a flat ink tile."""
+    zoom = 2  # render at 2x so the mark stays crisp on hidpi displays
+    pm = QPixmap(size * zoom, size * zoom)
+    pm.setDevicePixelRatio(zoom)
     pm.fill(Qt.transparent)
     painter = QPainter(pm)
     painter.setRenderHint(QPainter.Antialiasing)
+    # QPainter works in logical coordinates once the pixmap carries a DPR.
     if with_background:
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(Qt.NoBrush)
-        gradient = QLinearGradient(0, 0, size, size)
-        gradient.setColorAt(0.0, QColor("#3b82f6"))
-        gradient.setColorAt(1.0, QColor("#8b5cf6"))
-        painter.setBrush(gradient)
         radius = size * 0.24
-        painter.drawRoundedRect(QRectF(0, 0, size, size), radius, radius)
-    scale = size / 64.0
-    painter.scale(scale, scale)
+        painter.setPen(QColor("#34433c"))
+        painter.setBrush(QColor("#1a2420"))
+        painter.drawRoundedRect(QRectF(0.5, 0.5, size - 1, size - 1),
+                                radius, radius)
+    k = size / 64.0
+    painter.scale(k, k)
     svg = (f'<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" '
            f'viewBox="0 0 64 64">{LOGO_MARK}</svg>')
     QSvgRenderer(QByteArray(svg.encode())).render(painter, QRectF(0, 0, 64, 64))
