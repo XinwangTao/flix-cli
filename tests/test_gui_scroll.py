@@ -27,6 +27,7 @@ APP = QApplication.instance() or QApplication([])
 # it and asynchronously replace the fake payload in the middle of an assertion.
 gui.LocalApi.discover = staticmethod(lambda port=0: None)
 gui.MainWindow.start_local_daemon = lambda self: None
+gui.MainWindow._discovery_done = lambda self, found: None
 
 ME = "fp-me"
 PEER = "fp-peer"

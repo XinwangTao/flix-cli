@@ -24,6 +24,7 @@ APP = QApplication.instance() or QApplication([])
 # Keep the host's real daemon out of the test window (it would replace payload).
 gui.LocalApi.discover = staticmethod(lambda port=0: None)
 gui.MainWindow.start_local_daemon = lambda self: None
+gui.MainWindow._discovery_done = lambda self, found: None
 
 PEER = "fp-peer"
 ME = "fp-me"
