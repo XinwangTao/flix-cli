@@ -13,7 +13,7 @@ import asyncio
 import json
 import sys
 
-from . import __version__
+from . import DEVICE_PORT, __version__
 from .adb import AdbClient, AdbError
 from .channel import PeerError, post_bubble, post_intent
 from .config import Store, load_or_create_identity
@@ -88,14 +88,15 @@ TOOLS = [
     {"name": "flix_pair",
      "description": "Pair with a device (ping_v2 identity exchange then "
                     "askPairDevice). Pairing enables auto file receive on "
-                    "official clients.",
+                    "official clients. code is REQUIRED and must be the "
+                    "peer's 4-digit pairing key.",
      "inputSchema": {"type": "object",
                      "properties": {"to": {"type": "string",
                                            "description": "ip[:port]"},
                                     "code": {"type": "string",
                                              "description": "peer's 4-digit "
-                                             "pairing key (optional)"}},
-                     "required": ["to"]}},
+                                             "pairing key (from its QR)"}},
+                     "required": ["to", "code"]}},
     {"name": "flix_group_create",
      "description": "Create a LAN group with optional member fingerprints.",
      "inputSchema": {"type": "object",
@@ -278,8 +279,7 @@ async def _tool_call(name: str, args: dict) -> dict:
             to = str(args.get("to", ""))
             head, _, tail = to.rpartition(":")
             ip, port = (head, int(tail)) if tail.isdigit() else (to, DEVICE_PORT)
-            from . import DEVICE_PORT as DP
-            port = port or DP
+            port = port or DEVICE_PORT
             modal = await ping_v2(ip, ident, port=port)
             peer_fp = modal.get("fingerprint")
             if not peer_fp:
@@ -288,9 +288,12 @@ async def _tool_call(name: str, args: dict) -> dict:
                                 device_model=str(modal.get("deviceModel") or ""),
                                 port=modal.get("port"), version=modal.get("version"),
                                 ip=ip, os_name=str(modal.get("os") or ""))
+            peer_code = str(args.get("code") or "").strip()
+            if not peer_code:
+                return {"ok": False, "error": "pair-code-required",
+                        "detail": "pass the peer's 4-digit key (flix qrcode)"}
             code, msg = await pair_device(ip, ident["fingerprint"], peer_fp,
-                                          str(args.get("code") or ""),
-                                          port=port)
+                                          peer_code, port=port)
             if code == 0:
                 store.add_pair(peer_fp, store.own_pair_key())
             return {"ok": code == 0, "paired": code == 0, "peer": peer_fp,
@@ -300,24 +303,27 @@ async def _tool_call(name: str, args: dict) -> dict:
         finally:
             store.close()
     if name == "flix_group_create":
-        from .groupchat import new_group
+        from .groupchat import new_group, update_group
         store = Store()
         try:
+            ident = load_or_create_identity(store)
             g = new_group(store, str(args.get("name", "")),
                           [str(m) for m in (args.get("members") or [])])
-            return {"ok": True, **g}
+            res = await update_group(store, ident, g["id"])
+            return {"ok": True, **g, "delivered": res.get("delivered", 0),
+                    "total": res.get("total", 0),
+                    "results": res.get("results", [])}
         finally:
             store.close()
     if name == "flix_group_add":
-        from .groupchat import find_group
+        from .groupchat import update_group
         store = Store()
         try:
-            g = find_group(store, str(args.get("group", "")))
-            if not g:
-                return {"ok": False, "error": "no-group"}
+            ident = load_or_create_identity(store)
             fp = str(args.get("fingerprint", ""))
-            store.add_group_member(g["id"], fp)
-            return {"ok": True, "group": g["id"], "added": fp}
+            res = await update_group(store, ident, str(args.get("group", "")),
+                                     add=(fp,))
+            return {**res, "added": fp}
         finally:
             store.close()
     if name == "flix_status":

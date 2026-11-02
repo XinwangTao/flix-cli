@@ -674,9 +674,18 @@ async def cmd_pair(args) -> int:
                             port=modal.get("port"), version=modal.get("version"),
                             ip=ip, os_name=str(modal.get("os") or ""))
         own_key = store.own_pair_key()
+        # The receiver now verifies verifyCode against its own pairing key.
+        # Sending OUR key (the old fallback) cannot work; the caller must
+        # supply the peer's 4-digit code (from `flix qrcode` on that device).
+        if not args.code:
+            emit({"error": "pair-code-required",
+                  "detail": "pass --code <peer 4-digit key>; run `flix qrcode` "
+                            "on the peer or scan its pairing QR",
+                  "peer": peer_fp}, args.json)
+            return 2
         try:
             code, msg = await pair_device(ip, ident["fingerprint"], peer_fp,
-                                          args.code or own_key, port=port)
+                                          args.code, port=port)
         except PeerError as e:
             emit({"error": e.kind, "detail": e.detail, "ip": to}, args.json)
             return 3 if e.kind in ("timeout", "unreachable") else 4
@@ -693,28 +702,38 @@ async def cmd_pair(args) -> int:
 # --- group chat -------------------------------------------------------------
 
 
-def cmd_group_create(args) -> int:
-    from .groupchat import new_group
+async def cmd_group_create(args) -> int:
+    from .groupchat import new_group, update_group
     store = Store()
     try:
+        ident = load_or_create_identity(store)
         g = new_group(store, args.name, args.member or [])
-        emit(g, args.json)
+        # Creating a group must tell its members, otherwise the peer keeps
+        # receiving bubbles with a groupId it has no row for.
+        res = await update_group(store, ident, g["id"])
+        emit({**g, "delivered": res.get("delivered", 0),
+              "total": res.get("total", 0),
+              "results": res.get("results", [])}, args.json)
         return 0
     finally:
         store.close()
 
 
-def cmd_group_add(args) -> int:
+async def cmd_group_add(args) -> int:
+    from .groupchat import update_group
     store = Store()
     try:
-        from .groupchat import find_group
-        g = find_group(store, args.group)
-        if g is None:
-            emit({"error": "no-group", "detail": args.group}, args.json)
+        ident = load_or_create_identity(store)
+        res = await update_group(store, ident, args.group,
+                                 add=(args.fingerprint,))
+        if not res.get("ok"):
+            emit(res, args.json)
             return 2
-        store.add_group_member(g["id"], args.fingerprint)
-        emit({"ok": True, "group": g["id"],
-              "members": store.group_members(g["id"])}, args.json)
+        emit({"ok": True, "group": res["group"], "name": res.get("name", ""),
+              "members": res.get("members", []),
+              "delivered": res.get("delivered", 0),
+              "total": res.get("total", 0),
+              "results": res.get("results", [])}, args.json)
         return 0
     finally:
         store.close()
