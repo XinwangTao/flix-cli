@@ -6,6 +6,7 @@ where the reader put it (new messages only raise the "new messages" pill).
 from __future__ import annotations
 
 import os
+import time
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -35,6 +36,16 @@ def bubbles_for(peer: str, count: int = 40) -> list[dict]:
          "content": f"{i:02d} " + "这是一条用来撑满时间线的测试消息。" * 3}
         for i in range(count)
     ]
+
+
+def wait_until(check, timeout_ms: int = 1500) -> bool:
+    """Poll instead of guessing one fixed delay: layout lands in stages."""
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    while time.monotonic() < deadline:
+        if check():
+            return True
+        QTest.qWait(20)
+    return check()
 
 
 def make_window() -> gui.MainWindow:
@@ -139,10 +150,13 @@ class ScrollPolicyTests(unittest.TestCase):
             "id": "new-tail", "from": PEER, "to": ME, "type": 0,
             "time": 1_700_000_900_000, "groupId": "", "content": "新消息"})
         self.window.render_timeline()
-        QTest.qWait(150)
 
-        widget = self.window._timeline_rows[anchor_key]
-        self.assertEqual(widget.y() - self.bar.value(), anchor_offset)
+        def still_anchored() -> bool:
+            row = self.window._timeline_rows.get(anchor_key)
+            return row is not None and row.y() - self.bar.value() == anchor_offset
+
+        self.assertTrue(wait_until(still_anchored),
+                        f"anchor drifted: {self.bar.value()} vs {anchor_offset}")
 
     def test_status_change_remounts_only_the_changed_row(self):
         files = []

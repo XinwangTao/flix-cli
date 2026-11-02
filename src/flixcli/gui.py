@@ -711,7 +711,8 @@ class MainWindow(QMainWindow):
 
     def _sync_sidebar_for_mode(self) -> None:
         mode = getattr(self, "mode", "devices")
-        list_mode = mode in ("devices", "search", "groups", "adb")
+        list_mode = (mode in ("devices", "search", "groups", "adb")
+                     and not getattr(self, "offline_mode", False))
         self.search.setVisible(list_mode)
         self.search.setPlaceholderText(
             "搜索序列号或型号" if mode == "adb" else "搜索设备、群组或消息")
@@ -916,15 +917,18 @@ class MainWindow(QMainWindow):
         self.signal_text.style().polish(self.signal_text)
         self.signal_meta.setText(meta)
 
+    def _sync_offline_header(self) -> None:
+        self.session_title.setText("本机服务")
+        self._set_subtitle(f"尝试端口 8898 / 18998 · 当前 {self.api_port}")
+        self.session_avatar.hide()
+        self.session_search.hide()
+        for button, _name in getattr(self, "_header_icon_buttons", []):
+            button.hide()
+
     def _sync_header(self) -> None:
         """Header text follows the page, not whichever conversation was last open."""
         if getattr(self, "offline_mode", False):
-            self.session_title.setText("本机服务")
-            self._set_subtitle(f"未连接 · 正在探测 127.0.0.1:{self.api_port}")
-            self.session_avatar.hide()
-            self.session_search.hide()
-            for button, _name in getattr(self, "_header_icon_buttons", []):
-                button.hide()
+            self._sync_offline_header()
             self.search.hide()
             self.entity_list.hide()
             for chip in getattr(self, "filter_buttons", []):
@@ -936,8 +940,8 @@ class MainWindow(QMainWindow):
             "transfers": ("传输任务", "文件气泡与落盘状态由 flixd 统一记录"),
             "adb": ("Android / ADB", "USB / 无线序列号与授权状态"),
             "settings": ("设置与状态", "本机服务、存储与外观"),
-            "devices": ("选择一台设备", "从左侧列表开始协作"),
-            "groups": ("选择一个群组", "从左侧列表开始协作"),
+            "devices": ("会话", "局域网设备协作"),
+            "groups": ("群组", "群聊与 @指纹"),
             "search": ("搜索", "按名称、地址或指纹过滤"),
         }
         if not chatting:
@@ -957,6 +961,12 @@ class MainWindow(QMainWindow):
             self.session_subtitle.setObjectName(name)
             self.session_subtitle.style().unpolish(self.session_subtitle)
             self.session_subtitle.style().polish(self.session_subtitle)
+
+    def _last_known_footer(self) -> str:
+        self_info = self.payload.get("self") or {}
+        alias = self_info.get("alias") or "本机"
+        port = self_info.get("port", "—")
+        return f"最后已知 · {alias} · 通道 {port}"
 
     def _sync_signal(self) -> None:
         if not self.payload:
@@ -1144,12 +1154,12 @@ class MainWindow(QMainWindow):
         box.addSpacing(8)
         header = QWidget(); header.setObjectName("tableHeader")
         self._transfer_header = QHBoxLayout(header)
-        self._transfer_header.setContentsMargins(10, 0, 10, 0)
-        self._transfer_header.setSpacing(10)
-        for text, width, align in (("文件", 0, Qt.AlignLeft), ("方向", 52, Qt.AlignLeft),
-                                   ("对端", 110, Qt.AlignLeft), ("大小", 74, Qt.AlignRight),
-                                   ("进度", 128, Qt.AlignLeft), ("状态", 88, Qt.AlignLeft),
-                                   ("操作", 64, Qt.AlignLeft)):
+        self._transfer_header.setContentsMargins(8, 0, 8, 0)
+        self._transfer_header.setSpacing(8)
+        for text, width, align in (("文件", 0, Qt.AlignLeft), ("方向", 44, Qt.AlignLeft),
+                                   ("对端", 88, Qt.AlignLeft), ("大小", 66, Qt.AlignRight),
+                                   ("进度", 108, Qt.AlignLeft), ("状态", 76, Qt.AlignLeft),
+                                   ("操作", 56, Qt.AlignLeft)):
             label = QLabel(text)
             label.setObjectName("tableHead")
             label.setAlignment(align | Qt.AlignVCenter)
@@ -1164,6 +1174,8 @@ class MainWindow(QMainWindow):
         self.transfer_list = QListWidget()
         self.transfer_list.setObjectName("contentList")
         self.transfer_list.itemDoubleClicked.connect(self._open_transfer_item)
+        self._transfer_viewport = self.transfer_list.viewport()
+        self._transfer_viewport.installEventFilter(self)
         box.addWidget(self.transfer_list, 1)
         return page
 
@@ -1572,6 +1584,8 @@ class MainWindow(QMainWindow):
             self.workspace_stack.setCurrentIndex(4)
         else:
             self.workspace_stack.setCurrentIndex(0 if self.current is None else 1)
+        if getattr(self, "offline_mode", False):
+            self.workspace_stack.setCurrentIndex(6)
         self._sync_sidebar_for_mode()
         self.populate_sidebar()
         self._sync_header()
@@ -1596,8 +1610,6 @@ class MainWindow(QMainWindow):
         self.connection_dot.setProperty("online", True)
         self.connection_dot.style().unpolish(self.connection_dot)
         self.connection_dot.style().polish(self.connection_dot)
-        devices = payload.get("devices") or []
-        adb = (payload.get("adb") or {}).get("devices", [])
         self.sidebar_footer.setText(
             f"{(payload.get('self') or {}).get('alias') or '本机'} · "
             f"通道 {(payload.get('self') or {}).get('port', '—')}")
@@ -1632,6 +1644,9 @@ class MainWindow(QMainWindow):
             self.render_current()
         self._sync_header()
         self._sync_signal()
+        if (not self.offline_mode
+                and self.workspace_stack.currentIndex() == 6):
+            self.set_mode(getattr(self, "mode", "devices"))
         self.statusBar().clearMessage()
 
     def populate_sidebar(self):
@@ -1759,6 +1774,9 @@ class MainWindow(QMainWindow):
         self.jump_to_latest()
 
     def render_current(self):
+        if getattr(self, "offline_mode", False):
+            self.workspace_stack.setCurrentIndex(6)
+            return
         if not self.current:
             self.workspace_stack.setCurrentIndex(0)
             return
@@ -2641,6 +2659,9 @@ class MainWindow(QMainWindow):
 
     def populate_transfers(self):
         self.transfer_list.clear()
+        viewport = getattr(self, "_transfer_viewport", None)
+        width = viewport.width() if viewport is not None else 640
+        self._transfer_name_px = max(80, width - 16 - 438 - 48)
         files = [b for b in self.payload.get("bubbles") or []
                  if isinstance(b.get("content"), dict)]
         pending = 0
@@ -2659,26 +2680,27 @@ class MainWindow(QMainWindow):
             row.setObjectName("tableRow")
             row.setFixedHeight(40)
             line = QHBoxLayout(row)
-            line.setContentsMargins(10, 0, 10, 0)
-            line.setSpacing(10)
+            line.setContentsMargins(8, 0, 8, 0)
+            line.setSpacing(8)
             full_name = str(content.get("name") or "文件")
-            name = QLabel(self._elide_middle(full_name, 250, 13))
+            name_px = max(80, getattr(self, "_transfer_name_px", 220))
+            name = QLabel(self._elide_middle(full_name, name_px, 13))
             name.setObjectName("rowTitle")
             name.setToolTip(str(content.get("path") or full_name))
-            name.setMinimumWidth(120)
+            name.setMinimumWidth(0)
             line.addWidget(name, 1)
             direction = QLabel("发出" if outgoing else "接收")
             direction.setObjectName("rowSub")
-            direction.setFixedWidth(52)
+            direction.setFixedWidth(44)
             line.addWidget(direction)
-            target = QLabel(self._elide(self._device_label(peer or ""), 104, 12))
+            target = QLabel(self._elide(self._device_label(peer or ""), 82, 12))
             target.setObjectName("rowSub")
             target.setToolTip(self._device_label(peer or ""))
-            target.setFixedWidth(110)
+            target.setFixedWidth(88)
             line.addWidget(target)
             size = QLabel(self.format_size(content.get("size", 0)))
             size.setObjectName("mono")
-            size.setFixedWidth(74)
+            size.setFixedWidth(66)
             size.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             line.addWidget(size)
             pct = int(round(float(content.get("progress", 0) or 0) * 100))
@@ -2686,28 +2708,30 @@ class MainWindow(QMainWindow):
                 pct = 100
             pct = max(0, min(100, pct))
             progress_holder = QWidget()
-            progress_holder.setFixedWidth(128)
+            progress_holder.setFixedWidth(108)
             progress_line = QHBoxLayout(progress_holder)
             progress_line.setContentsMargins(0, 0, 0, 0)
-            progress_line.setSpacing(6)
+            progress_line.setSpacing(4)
             bar = QProgressBar()
             bar.setRange(0, 100)
             bar.setValue(pct)
             bar.setTextVisible(False)
-            bar.setFixedSize(88, 6)
-            progress_line.addWidget(bar)
+            bar.setFixedHeight(6)
+            bar.setMinimumWidth(40)
+            progress_line.addWidget(bar, 1)
             percent = QLabel(f"{pct}%")
             percent.setObjectName("mono")
-            percent.setFixedWidth(34)
+            percent.setFixedWidth(30)
+            percent.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             progress_line.addWidget(percent)
             line.addWidget(progress_holder)
             badge = QLabel(status)
             badge.setObjectName(chip)
-            badge.setFixedSize(88, 22)
+            badge.setFixedSize(76, 22)
             badge.setAlignment(Qt.AlignCenter)
             line.addWidget(badge, 0, Qt.AlignVCenter)
             holder = QWidget()
-            holder.setFixedWidth(64)
+            holder.setFixedWidth(56)
             hbox = QHBoxLayout(holder)
             hbox.setContentsMargins(0, 0, 0, 0)
             path = str(content.get("path") or "")
@@ -2916,8 +2940,9 @@ class MainWindow(QMainWindow):
         self._set_signal(f"● 未连接 · {reason}", "bad", "正在探测候选端口")
         self.signal_text.setToolTip("原始错误：" + str(detail))
         self.populate_sidebar()  # every cached presence dot becomes 未知
-        if not self.sidebar_footer.text().startswith("最后已知"):
-            self.sidebar_footer.setText("最后已知 · " + self.sidebar_footer.text())
+        self.sidebar_footer.setText(self._last_known_footer())
+        self.workspace_stack.setCurrentIndex(6)
+        self._sync_offline_header()
         self.statusBar().showMessage(f"无法连接本机服务：{reason}（正在探测候选端口…）")
         self._discovery_worker = ApiThread(lambda: LocalApi.discover(self.api_port))
         self._discovery_worker.result.connect(self._discovery_done)
@@ -2945,29 +2970,27 @@ class MainWindow(QMainWindow):
         self.entity_list.clear()
         self.entity_list.blockSignals(False)
         self.sidebar_title.setText("设备 · 0")
-        self.sidebar_footer.setText("本机服务未连接")
-        self.session_title.setText("本机服务")
-        self._set_subtitle("未连接 · 尝试端口 8898 / 18998")
-        self.session_avatar.hide()
-        self.session_search.hide()
-        for button, _name in getattr(self, "_header_icon_buttons", []):
-            button.hide()
+        self.sidebar_footer.setText(self._last_known_footer())
+        self._sync_header()
         self._set_signal(f"● 未连接 · 127.0.0.1:{self.api_port}", "bad", "可一键启动本机服务")
         self.statusBar().showMessage(
             "未连接本机服务，可从下方一键启动（与原生 Flix 端口共存）")
 
     def eventFilter(self, watched, event):
         if event.type() == QEvent.KeyPress:
-            if watched is getattr(self, "entity_list", None)                     and event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            if (watched is getattr(self, "entity_list", None)
+                    and event.key() in (Qt.Key_Return, Qt.Key_Enter)):
                 if self.current:
                     self.render_current()
                     self.composer.setFocus()
                 return True
-            if watched is getattr(self, "search", None)                     and event.key() == Qt.Key_Escape:
+            if (watched is getattr(self, "search", None)
+                    and event.key() == Qt.Key_Escape):
                 self.search.clear()
                 self.entity_list.setFocus()
                 return True
-        if watched is getattr(self, "composer", None)                 and event.type() == QEvent.KeyPress:
+        if (watched is getattr(self, "composer", None)
+                and event.type() == QEvent.KeyPress):
             if event.key() in (Qt.Key_Return, Qt.Key_Enter):
                 # 回车直接发送；Shift+回车换行。Ctrl+回车保留为发送的旧习惯。
                 # 输入法组词时的回车由 IME 自己消费，不会走到这里。

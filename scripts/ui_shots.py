@@ -152,7 +152,7 @@ def main() -> int:
         window._sync_signal()
         window.entity_list.clear()
         window.sidebar_title.setText("设备 · 0")
-        window.sidebar_footer.setText("本机服务未连接")
+        window.sidebar_footer.setText("最后已知 · jlc 工作站 · 通道 18991")
         window.workspace_stack.setCurrentIndex(6)
         APP.processEvents()
         shot(window, "offline", theme)
