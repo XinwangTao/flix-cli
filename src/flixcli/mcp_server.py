@@ -13,7 +13,7 @@ import asyncio
 import json
 import sys
 
-from . import DEVICE_PORT, __version__
+from . import DEVICE_PORT, __version__, is_port_text
 from .adb import AdbClient, AdbError
 from .channel import PeerError, post_bubble, post_intent
 from .config import Store, load_or_create_identity
@@ -225,7 +225,7 @@ async def _tool_call(name: str, args: dict) -> dict:
         from . import DEVICE_PORT
         target = str(args.get("target", ""))
         head, _, tail = target.rpartition(":")
-        if not tail.isdigit():
+        if not is_port_text(tail):
             target = f"{target}:{DEVICE_PORT}"
         try:
             async with aiohttp.ClientSession() as s:
@@ -245,7 +245,7 @@ async def _tool_call(name: str, args: dict) -> dict:
             port = None
             target = to
             head, _, tail = to.rpartition(":")
-            if tail.isdigit():
+            if is_port_text(tail):
                 target, port = head, int(tail)
             ip, fp = None, to
             for row in store.devices():
@@ -253,7 +253,7 @@ async def _tool_call(name: str, args: dict) -> dict:
                     ip, fp = row["ip"], row["fingerprint"]
                     port = port or (row.get("port") or None)
                     break
-            if ip is None and target.replace(".", "").isdigit():
+            if ip is None and is_port_text(target.replace(".", "")):
                 ip = target
             if ip is None:
                 return {"error": "no-device", "detail": f"unknown target {to!r}; "
@@ -273,12 +273,16 @@ async def _tool_call(name: str, args: dict) -> dict:
             store.close()
     if name == "flix_pair":
         from .channel import pair_device, ping_v2
+        peer_code = str(args.get("code") or "").strip()
+        if not peer_code:
+            return {"ok": False, "error": "pair-code-required",
+                    "detail": "pass the peer's 4-digit key (flix qrcode)"}
         store = Store()
         try:
             ident = load_or_create_identity(store)
             to = str(args.get("to", ""))
             head, _, tail = to.rpartition(":")
-            ip, port = (head, int(tail)) if tail.isdigit() else (to, DEVICE_PORT)
+            ip, port = (head, int(tail)) if is_port_text(tail) else (to, DEVICE_PORT)
             port = port or DEVICE_PORT
             modal = await ping_v2(ip, ident, port=port)
             peer_fp = modal.get("fingerprint")
@@ -288,10 +292,6 @@ async def _tool_call(name: str, args: dict) -> dict:
                                 device_model=str(modal.get("deviceModel") or ""),
                                 port=modal.get("port"), version=modal.get("version"),
                                 ip=ip, os_name=str(modal.get("os") or ""))
-            peer_code = str(args.get("code") or "").strip()
-            if not peer_code:
-                return {"ok": False, "error": "pair-code-required",
-                        "detail": "pass the peer's 4-digit key (flix qrcode)"}
             code, msg = await pair_device(ip, ident["fingerprint"], peer_fp,
                                           peer_code, port=port)
             if code == 0:
@@ -353,7 +353,7 @@ async def _tool_call(name: str, args: dict) -> dict:
             port = None
             target = to
             head, _, tail = to.rpartition(":")
-            if tail.isdigit():
+            if is_port_text(tail):
                 target, port = head, int(tail)
             ip, fp = None, to
             for row in store.devices():
@@ -361,7 +361,7 @@ async def _tool_call(name: str, args: dict) -> dict:
                     ip, fp = row["ip"], row["fingerprint"]
                     port = port or (row.get("port") or None)
                     break
-            if ip is None and target.replace(".", "").isdigit():
+            if ip is None and is_port_text(target.replace(".", "")):
                 ip = target
             if ip is None:
                 return {"ok": False, "error": "no-device",
@@ -466,11 +466,14 @@ def serve() -> int:
             msg = json.loads(line)
         except ValueError:
             continue
+        if not isinstance(msg, dict):
+            continue
         method = msg.get("method")
         mid = msg.get("id")
         if method == "initialize":
+            params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
             write({"jsonrpc": "2.0", "id": mid, "result": {
-                "protocolVersion": msg.get("params", {}).get("protocolVersion", "2025-06-18"),
+                "protocolVersion": params.get("protocolVersion", "2025-06-18"),
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION}}})
         elif method == "notifications/initialized":
@@ -480,9 +483,12 @@ def serve() -> int:
         elif method == "tools/list":
             write({"jsonrpc": "2.0", "id": mid, "result": {"tools": TOOLS}})
         elif method == "tools/call":
-            params = msg.get("params", {})
-            name = params.get("name", "")
-            args = params.get("arguments") or {}
+            # A client may send params:null or a non-object; MCP requires an
+            # error response, never a crashed stdio server.
+            params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+            name = params.get("name") or ""
+            args = params.get("arguments") if isinstance(
+                params.get("arguments"), dict) else {}
             try:
                 result = asyncio.run(_tool_call(name, args))
                 payload = {"content": [{"type": "text",

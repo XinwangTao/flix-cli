@@ -43,6 +43,16 @@ def set_local_ip_override(ip: str) -> None:
     _local_ip_override = ip.strip() if isinstance(ip, str) else ""
 
 
+def is_port_text(text: str) -> bool:
+    """True only for a non-empty ASCII run of digits.
+
+    str.isdigit() also accepts superscripts and other Unicode numerics
+    (``'²'.isdigit()`` is True) that ``int()`` then rejects, so it must never
+    guard a port conversion.
+    """
+    return isinstance(text, str) and bool(text) and text.isascii() and text.isdigit()
+
+
 def is_virtual_ip(ip: str) -> bool:
     try:
         addr = ipaddress.ip_address(ip)

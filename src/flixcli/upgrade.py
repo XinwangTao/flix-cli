@@ -152,17 +152,28 @@ def verify_package(path: str) -> dict:
             "size": size, "sha256": digest.hexdigest().upper()}
 
 
+def _ps_lit(value: str) -> str:
+    """Escape a value for a PowerShell single-quoted literal.
+
+    The template embeds names in `'...'`; a name containing a quote would end
+    the literal and let the rest run as code. PowerShell escapes a quote by
+    doubling it. Names are generated here today, but build_script is public and
+    a future caller must not be able to inject a command into the peer's shell.
+    """
+    return str(value).replace("'", "''")
+
+
 def build_script(src_name: str, stamp: str, log_name: str, port: int,
                  api_port: int, wait_s: int, *, fresh_env: bool = False,
                  sha256: str = "") -> str:
     return (SCRIPT_TEMPLATE
-            .replace("__SRC__", src_name)
+            .replace("__SRC__", _ps_lit(src_name))
             .replace("__SHA__", sha256 or ("0" * 64))
-            .replace("__STAMP__", stamp)
-            .replace("__PORT__", str(port))
-            .replace("__API__", str(api_port))
-            .replace("__TRIES__", str(max(1, wait_s // 2)))
-            .replace("__LOG__", log_name)
+            .replace("__STAMP__", _ps_lit(stamp))
+            .replace("__PORT__", str(int(port)))
+            .replace("__API__", str(int(api_port)))
+            .replace("__TRIES__", str(max(1, int(wait_s) // 2)))
+            .replace("__LOG__", _ps_lit(log_name))
             .replace("__FRESH__", "1" if fresh_env else "0"))
 
 

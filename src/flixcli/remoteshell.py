@@ -129,7 +129,11 @@ def run_command(command: str, timeout: float = DEFAULT_TIMEOUT_S) -> dict:
             kwargs["creationflags"] = _NO_WINDOW
         else:
             kwargs["start_new_session"] = True
-        proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE,
+        # shell=True is the feature: rdShell runs the caller's command line
+        # verbatim on a PAIRED peer whose source IP matches the stored one.
+        # Parsing it ourselves would change quoting the user already chose.
+        proc = subprocess.Popen(command, shell=True,  # nosec B602
+                                stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, **kwargs)
         chunks: dict[str, bytes] = {}
         readers = []

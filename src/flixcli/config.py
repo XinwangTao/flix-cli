@@ -14,7 +14,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import DEVICE_PORT, local_ipv4s
+from . import DEVICE_PORT, is_port_text, local_ipv4s
 
 APP_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "flixcli"
 # APPDATA occasionally points at the state dir itself (tests, shell exports);
@@ -251,7 +251,7 @@ class Store:
             " FROM pair_devices p LEFT JOIN persistence_devices d"
             " ON d.fingerprint = p.fingerprint", (DEVICE_PORT,)).fetchall()
         return [(fp, ip, int(port or DEVICE_PORT)) for fp, ip, port in rows
-                if ip and ip.replace('.', '').isdigit()]
+                if ip and is_port_text(ip.replace('.', ''))]
 
     def pair_code(self, fingerprint: str) -> str | None:
         row = self.con.execute(
@@ -401,7 +401,9 @@ class Store:
         self.con.commit()
 
     def agent_inbox(self, *, unread_only: bool = True, limit: int = 50) -> list[dict]:
-        sql = ("SELECT id, peer, body, reply_to, created, read_at FROM agent_messages"
+        # Only a fixed fragment is concatenated; --limit and all values are
+        # bound parameters below.
+        sql = ("SELECT id, peer, body, reply_to, created, read_at FROM agent_messages"  # nosec B608
                " WHERE direction='in'" + (" AND read_at=0" if unread_only else "")
                + " ORDER BY created ASC LIMIT ?")
         rows = self.con.execute(sql, (limit,)).fetchall()
@@ -517,8 +519,9 @@ class Store:
         if not ids:
             return 0
         marks = ",".join("?" * len(ids))
+        # `marks` is a generated run of "?" placeholders, never user text.
         cur = self.con.execute(
-            f"UPDATE agent_messages SET read_at=? WHERE id IN ({marks}) AND read_at=0",
+            f"UPDATE agent_messages SET read_at=? WHERE id IN ({marks}) AND read_at=0",  # nosec B608
             (int(time.time() * 1000), *ids))
         self.con.commit()
         return cur.rowcount

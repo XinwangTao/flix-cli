@@ -13,7 +13,7 @@ from pathlib import Path
 # 0 on non-Windows keeps Popen happy there.
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
-from . import DEVICE_PORT, local_ip, model
+from . import DEVICE_PORT, is_port_text, local_ip, model
 from .adb import AdbClient
 from .media_session import SessionManager
 from .media_transport import MediaRuntime
@@ -89,7 +89,8 @@ async def clip_sync_loop(store, ident: dict, state: dict,
         text = text.lstrip("﻿")
         if not text or text == state.get("last_set") or text == last_sent:
             continue
-        h = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
+        h = hashlib.sha1(text.encode("utf-8", "replace"),
+                         usedforsecurity=False).hexdigest()[:12]
         intent = model.clipboard_intent(ident["fingerprint"], text)
         sent = 0
         for fp, ip, port in store.paired_targets():
@@ -183,7 +184,7 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
         port = DEVICE_PORT
         target = to
         head, _, tail = to.rpartition(":")
-        if tail.isdigit():
+        if is_port_text(tail):
             target, port = head, int(tail)
         dev = devices.get(to) or devices.get(target) or {}
         if not dev:
@@ -195,7 +196,7 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
         ip = dev.get("ip") or target
         fp = dev.get("fingerprint", to)
         p = dev.get("port") or port
-        if not (ip and ip.replace(".", "").isdigit()):
+        if not (ip and is_port_text(ip.replace(".", ""))):
             return None, p, fp
         return ip, p, fp
 
@@ -373,7 +374,7 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
                 # large table cannot stall the loop or the event loop.
                 sem = asyncio.Semaphore(8)
 
-                async def probe(row) -> bool:
+                async def probe(row, sem=sem) -> bool:
                     async with sem:
                         fp = row["fingerprint"]
                         ip = row["ip"]

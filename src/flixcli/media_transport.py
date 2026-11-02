@@ -25,9 +25,11 @@ try:
     import mss
     import numpy as np
     from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
+    from aiortc.mediastreams import MediaStreamError
     MEDIA_IMPORT_ERROR = None
 except ImportError as exc:  # optional dependency
     av = mss = np = RTCConfiguration = RTCPeerConnection = RTCSessionDescription = VideoStreamTrack = None
+    MediaStreamError = None
     MEDIA_IMPORT_ERROR = str(exc)
 
 
@@ -54,7 +56,13 @@ class ScreenTrack(VideoStreamTrack if VideoStreamTrack is not None else object):
         def grab():
             with mss.MSS() as grabber:
                 return grabber.grab(self._monitor)
-        image = await asyncio.to_thread(grab)
+        try:
+            # A locked or disconnected Windows session can make the GDI capture
+            # block indefinitely. Bound it: a wedged grab would otherwise keep
+            # the worker thread and the whole PeerConnection close waiting.
+            image = await asyncio.wait_for(asyncio.to_thread(grab), timeout=3.0)
+        except asyncio.TimeoutError:
+            raise MediaStreamError("screen capture timed out") from None
         frame = av.VideoFrame.from_ndarray(np.asarray(image), format="bgra")
         longest = max(frame.width, frame.height)
         if longest > self.max_edge:

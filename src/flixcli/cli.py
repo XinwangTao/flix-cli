@@ -17,7 +17,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-from . import DEVICE_PORT, __version__, local_ip
+from . import DEVICE_PORT, __version__, is_port_text, local_ip
 from .adb import AdbClient, AdbError
 from .channel import PeerError, post_bubble, post_intent, post_json
 from .config import APP_DIR, Store, load_or_create_identity
@@ -393,7 +393,7 @@ async def cmd_send_files(args) -> int:
 async def cmd_probe(args) -> int:
     import aiohttp
     to = args.to
-    if to.rpartition(":")[2].isdigit() is False:
+    if not is_port_text(to.rpartition(":")[2]):
         to = f"{to}:{DEVICE_PORT}"
     try:
         async with aiohttp.ClientSession() as s:
@@ -414,7 +414,7 @@ async def cmd_ping(args) -> int:
     """Manual-add handshake: POST /ping_v2, report the peer's deviceModal."""
     from .channel import PeerError, ping_v2
     to = args.to
-    if to.rpartition(":")[2].isdigit() is False:
+    if not is_port_text(to.rpartition(":")[2]):
         to = f"{to}:{DEVICE_PORT}"
     ip, _, ps = to.rpartition(":")
     store = Store()
@@ -666,8 +666,16 @@ def cmd_bubbles(args) -> int:
 async def cmd_pair(args) -> int:
     """Pair with a device: ping_v2 for identity, then askPairDevice intent."""
     from .channel import PeerError, pair_device, ping_v2
+    # Fail fast: the receiver verifies verifyCode, so a code-less attempt can
+    # never succeed and should not even touch the network.
+    if not args.code:
+        emit({"error": "pair-code-required",
+              "detail": "pass --code <peer 4-digit key>; run `flix qrcode` "
+                        "on the peer or scan its pairing QR",
+              "target": args.to}, args.json)
+        return 2
     to = args.to
-    if to.rpartition(":")[2].isdigit() is False:
+    if not is_port_text(to.rpartition(":")[2]):
         to = f"{to}:{DEVICE_PORT}"
     ip, _, ps = to.rpartition(":")
     port = int(ps) if ps else DEVICE_PORT
@@ -690,15 +698,6 @@ async def cmd_pair(args) -> int:
                             port=modal.get("port"), version=modal.get("version"),
                             ip=ip, os_name=str(modal.get("os") or ""))
         own_key = store.own_pair_key()
-        # The receiver now verifies verifyCode against its own pairing key.
-        # Sending OUR key (the old fallback) cannot work; the caller must
-        # supply the peer's 4-digit code (from `flix qrcode` on that device).
-        if not args.code:
-            emit({"error": "pair-code-required",
-                  "detail": "pass --code <peer 4-digit key>; run `flix qrcode` "
-                            "on the peer or scan its pairing QR",
-                  "peer": peer_fp}, args.json)
-            return 2
         try:
             code, msg = await pair_device(ip, ident["fingerprint"], peer_fp,
                                           args.code, port=port)
@@ -830,7 +829,7 @@ def _desktop_api_request(port: int, path: str, payload: dict | None = None) -> d
     req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data,
                                  headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with urllib.request.urlopen(req, timeout=10) as response:  # nosec B310
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         try:
