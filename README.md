@@ -193,6 +193,8 @@ flix shell --pty --shell powershell 4c4ca286
 ```
 python tests/e2e.py         # 双节点 11 项：ping/pair/text/file/group/web/
                             # webrtc/qrcode/clipboard（需 18991/18995 空闲）
+python scripts/interop_check.py --my-fp <fp> --official-fp <fp> --self-test
+                            # 与原生 Flix 客户端的线格式互通（官方客户端在跑时）
 ```
 
 ## 退出码约定
