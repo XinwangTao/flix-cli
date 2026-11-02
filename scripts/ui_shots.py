@@ -109,6 +109,9 @@ def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     window = gui.MainWindow(19999)
     window.timer.stop()
+    # The constructor's probe would race the loop and flip the page offline.
+    if window.worker is not None:
+        window.worker.blockSignals(True)
     window.payload = payload()
     window.self_id = ME
     window.apply_overview(window.payload)
@@ -144,12 +147,17 @@ def main() -> int:
         shot(window, "empty", theme)
 
         window.offline_mode = True
+        window.populate_sidebar()  # cached dots must read 未知, not 在线
         window._sync_header()
         window._sync_signal()
+        window.entity_list.clear()
+        window.sidebar_title.setText("设备 · 0")
+        window.sidebar_footer.setText("本机服务未连接")
         window.workspace_stack.setCurrentIndex(6)
         APP.processEvents()
         shot(window, "offline", theme)
         window.offline_mode = False
+        window.apply_overview(window.payload)
 
     print(json.dumps({"out": str(OUT), "files": sorted(p.name for p in OUT.glob("*.png"))},
                      ensure_ascii=False))

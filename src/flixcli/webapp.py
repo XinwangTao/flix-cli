@@ -25,19 +25,19 @@ PAGE = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Flix 网页版</title>
 <style>
-body{font-family:system-ui;background:#111;color:#eee;margin:0;display:flex;
+body{font-family:"Segoe UI Variable Text","Microsoft YaHei UI",system-ui,sans-serif;background:#0e1116;color:#e8edf2;margin:0;display:flex;
 flex-direction:column;height:100vh}
 .chat{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:8px}
 .bubble{max-width:70%;padding:8px 12px;border-radius:10px;word-break:break-all}
-.left{background:#2a2a2a;align-self:flex-start}
-.right{background:#0a84ff;align-self:flex-end}
+.left{background:#1a202a;border:1px solid #232a34;align-self:flex-start}
+.right{background:#f26b1f;color:#101317;align-self:flex-end}
 .meta{font-size:11px;opacity:.6;margin-bottom:2px}
-.footer{display:flex;gap:8px;padding:12px;border-top:1px solid #333;flex-wrap:wrap}
+.footer{display:flex;gap:8px;padding:12px;border-top:1px solid #232a34;flex-wrap:wrap}
 .footer input[type=text]{flex:1;min-width:140px;padding:10px;border-radius:5px;
-border:1px solid #ccc;background:#1c1c1c;color:#eee;font-size:16px}
-select,input[type=file]{padding:8px;border-radius:5px;background:#1c1c1c;color:#eee}
-button{padding:10px 20px;border:none;border-radius:5px;background:#007bff;
-color:#fff;font-size:15px;cursor:pointer}
+border:1px solid #333d49;background:#1a202a;color:#e8edf2;font-size:16px}
+select,input[type=file]{padding:8px;border-radius:5px;background:#1a202a;color:#e8edf2}
+button{padding:10px 20px;border:none;border-radius:5px;background:#f26b1f;
+color:#101317;font-size:15px;cursor:pointer}
 </style></head><body>
 <div class="chat" id="chat"></div>
 <div class="footer">
@@ -48,7 +48,7 @@ color:#fff;font-size:15px;cursor:pointer}
 <button id="send">发送</button>
 </div>
 <p style="text-align:center;margin:6px 0"><a id="glink" href="#"
-style="color:#7ab8ff">群聊视图 →</a></p>
+style="color:#ffb27a">群聊视图 →</a></p>
 <script>
 document.getElementById('glink').href =
   '/group?pin=' + location.pathname.slice(1);
@@ -96,13 +96,13 @@ document.getElementById('file').addEventListener('change', async e=>{
 
 INDEX = """<!doctype html>
 <html lang="zh"><head><meta charset="utf-8"><title>Flix 网页版</title>
-<style>body{font-family:system-ui;background:#111;color:#eee;display:flex;
+<style>body{font-family:"Segoe UI Variable Text","Microsoft YaHei UI",system-ui,sans-serif;background:#0e1116;color:#e8edf2;display:flex;
 flex-direction:column;align-items:center;justify-content:center;height:100vh;margin:0}
 h1{margin-bottom:24px}.row{display:flex;gap:10px}
 input{width:64px;height:76px;font-size:40px;text-align:center;border-radius:8px;
-border:1px solid #444;background:#1c1c1c;color:#eee}
+border:1px solid #333d49;background:#1a202a;color:#e8edf2}
 button{margin-top:28px;padding:12px 48px;border:none;border-radius:8px;
-background:#007bff;color:#fff;font-size:18px;cursor:pointer}</style></head>
+background:#f26b1f;color:#101317;font-size:18px;cursor:pointer}</style></head>
 <body onload="document.getElementById('i0').focus()">
 <h1>输入连接码</h1>
 <form onsubmit="return go(event)"><div class="row">
@@ -110,7 +110,7 @@ background:#007bff;color:#fff;font-size:18px;cursor:pointer}</style></head>
     f'<input id="i{i}" type="text" inputmode="numeric" maxlength="1" '
     f'oninput="next({i})" onkeydown="back(event,{i})">' for i in range(4)
 ) + """</div><button type="submit">连接</button></form>
-<p id="err" style="color:#f66"></p>
+<p id="err" style="color:#ff6b6b"></p>
 <script>
 function next(i){const e=document.getElementById('i'+i);
 if(e.value.length===1&&i<3)document.getElementById('i'+(i+1)).focus();
@@ -131,9 +131,9 @@ return false;}
 
 GROUP_LIST = """<!doctype html>
 <html lang="zh"><head><meta charset="utf-8"><title>Flix 群聊</title>
-<style>body{font-family:system-ui;background:#111;color:#eee;max-width:720px;
-margin:0 auto;padding:24px}a{color:#7ab8ff;text-decoration:none;font-size:18px;
-display:block;padding:10px 14px;background:#1c1c1c;border-radius:8px;margin:8px 0}
+<style>body{font-family:"Segoe UI Variable Text","Microsoft YaHei UI",system-ui,sans-serif;background:#0e1116;color:#e8edf2;max-width:720px;
+margin:0 auto;padding:24px}a{color:#ffb27a;text-decoration:none;font-size:18px;
+display:block;padding:10px 14px;background:#1a202a;border-radius:8px;margin:8px 0}
 </style></head><body><h2>群聊视图</h2><div id="gs">加载中…</div>
 <script>
 const PIN = new URLSearchParams(location.search).get('pin');
@@ -150,18 +150,18 @@ GROUP_PAGE = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Flix 群聊</title>
 <style>
-body{font-family:system-ui;background:#111;color:#eee;margin:0;display:flex;
+body{font-family:"Segoe UI Variable Text","Microsoft YaHei UI",system-ui,sans-serif;background:#0e1116;color:#e8edf2;margin:0;display:flex;
 flex-direction:column;height:100vh}
 .chat{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:8px}
 .bubble{max-width:75%;padding:8px 12px;border-radius:10px;word-break:break-all}
-.left{background:#2a2a2a;align-self:flex-start}
-.right{background:#0a84ff;align-self:flex-end}
+.left{background:#1a202a;border:1px solid #232a34;align-self:flex-start}
+.right{background:#f26b1f;color:#101317;align-self:flex-end}
 .meta{font-size:11px;opacity:.6;margin-bottom:2px}
-.footer{display:flex;gap:8px;padding:12px;border-top:1px solid #333}
-.footer input[type=text]{flex:1;padding:10px;border-radius:5px;border:1px solid #ccc;
-background:#1c1c1c;color:#eee;font-size:16px}
-button{padding:10px 20px;border:none;border-radius:5px;background:#007bff;
-color:#fff;font-size:15px;cursor:pointer}
+.footer{display:flex;gap:8px;padding:12px;border-top:1px solid #232a34}
+.footer input[type=text]{flex:1;padding:10px;border-radius:5px;border:1px solid #333d49;
+background:#1a202a;color:#e8edf2;font-size:16px}
+button{padding:10px 20px;border:none;border-radius:5px;background:#f26b1f;
+color:#101317;font-size:15px;cursor:pointer}
 </style></head><body>
 <div class="chat" id="chat"></div>
 <div class="footer">
