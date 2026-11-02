@@ -187,7 +187,8 @@ flix shell <设备> --timeout 120 -- "ping -n 5 127.0.0.1"
 
 - **返回**：`stdout` / `stderr` / `exit` / `truncated` / `durationMs`；CLI 的退出码就是远端命令的退出码。
 - **上限**：输出超过 256 KB 截断并置 `truncated`；超时默认 30 s、最大 300 s，到点杀整个进程树。
-- **授权**：配对即授权（两端都查 `pair_devices`），未配对一律 403，不执行、不落库。
+- **授权**：配对即授权（两端都查 `pair_devices`），且请求来源 IP 必须与该设备记录一致；
+  未配对或来源不符一律 403，不执行、不落库。
 - **审计**：目标端 `shell_audit` 表记录发起方、命令摘要、退出码、耗时；`stdout` 不回写数据库。
 - **MCP**：`flix_shell{to, command, timeout?}` 与 CLI 共用同一实现。
 
