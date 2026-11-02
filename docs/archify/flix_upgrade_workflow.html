@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>flix upgrade：异地升级 with 健康检查与回退（L2 新流程）</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #2b3040; --text: #e7eaf0;
+    --muted: #98a0b3; --cyan: #37c2d8; --emerald: #3fbf7f; --rose: #e0646d;
+    --amber: #d9a13b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 36px 56px; background: var(--bg); color: var(--text);
+    font: 14px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  h1 { font-size: 20px; margin: 0 0 6px; letter-spacing: .2px; }
+  .meta { color: var(--muted); font-size: 12px; margin-bottom: 24px; }
+  .board { position: relative; background: var(--panel); border: 1px solid var(--line);
+           border-radius: 12px; padding: 18px 22px 22px; }
+  .lanes { display: flex; flex-direction: column; gap: 12px; }
+  .lane { display: flex; align-items: center; gap: 14px; }
+  .lane-label { width: 118px; flex: none; color: var(--muted); font-size: 12px;
+                text-align: right; letter-spacing: .3px; }
+  .lane-track { flex: 1; display: grid; grid-template-columns: repeat(5, 1fr);
+                gap: 12px; align-items: center; min-height: 78px; }
+  .node { position: relative; z-index: 2; background: #1e222c; border: 1px solid var(--line);
+          border-left: 3px solid var(--cyan); border-radius: 8px; padding: 9px 11px;
+          min-height: 56px; }
+  .node .label { font-weight: 600; font-size: 13px; }
+  .node .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .node.security { border-left-color: var(--rose); }
+  .node.external { border-left-color: var(--amber); }
+  .node.backend { border-left-color: var(--emerald); }
+  .node.messagebus { border-left-color: var(--cyan); }
+  .edge-layer { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+           gap: 14px; margin-top: 26px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+          padding: 14px 16px; }
+  .card h2 { font-size: 13px; margin: 0 0 8px; display: flex; align-items: center; gap: 8px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .dot.cyan { background: var(--cyan); } .dot.rose { background: var(--rose); }
+  .dot.emerald { background: var(--emerald); } .dot.amber { background: var(--amber); }
+  .card li { color: var(--muted); font-size: 12px; margin: 3px 0; }
+  .legend { margin-top: 18px; color: var(--muted); font-size: 11px; }
+  .legend span { margin-right: 16px; }
+</style>
+</head>
+<body>
+<h1 id="title"></h1>
+<div class="meta" id="meta"></div>
+<div class="board">
+  <div class="lanes" id="lanes"></div>
+  <svg class="edge-layer" id="edges"></svg>
+</div>
+<div class="cards" id="cards"></div>
+<div class="legend">
+  <span>粗线 = 主路径</span><span>虚线 = 旁路/告警</span><span>红线 = 丢弃/失败</span>
+</div>
+
+<script type="application/json" id="spec">
+{
+ "schema_version": 2,
+ "diagram_type": "workflow",
+ "meta": {
+  "title": "flix upgrade：异地升级 with 健康检查与回退（L2 新流程）",
+  "locale": "zh-CN",
+  "level": "L2",
+  "status": "已确认",
+  "date": "2026-10-31",
+  "quality_profile": "minimal",
+  "confirmed_by": "用户 2026-10-31「继续」；健康检查=/api/devices，超时 60s，允许 --file 指向 .prev 降级"
+ },
+ "scope": {
+  "in": [
+   "`flix upgrade <设备> --file <exe>`：把本地 exe 安全换到已配对的对端并重启守护",
+   "替换前校验本地包（大小 + SHA256），记录旧包备份名",
+   "按 PID 停 serve、清 PyInstaller 解包目录变量、启动新进程",
+   "启动后 30 秒健康检查（18991 监听 + /api/devices 可用）",
+   "健康检查失败自动回退旧 exe 并重启",
+   "每次升级写审计：设备、旧/新哈希、结果、是否回退"
+  ],
+  "out": [
+   "跨版本数据迁移（配置/数据库结构升级）",
+   "多台设备批量升级",
+   "非配对设备、公网升级",
+   "升级 exe 之外的其它文件（由文件通道自行发送）",
+   "自动下载新版本（仍由人指定 --file）"
+  ]
+ },
+ "canvas": {
+  "width": 1240,
+  "height": 720
+ },
+ "lanes": [
+  {
+   "id": "a",
+   "label": "发起端 A（CLI）"
+  },
+  {
+   "id": "wire",
+   "label": "文件 + 命令通道"
+  },
+  {
+   "id": "b",
+   "label": "目标端 B（守护进程）"
+  },
+  {
+   "id": "ex",
+   "label": "失败与人工出口",
+   "variant": "exception"
+  }
+ ],
+ "mainPath": [
+  "call",
+  "verify",
+  "push",
+  "script",
+  "swap",
+  "start",
+  "audit"
+ ],
+ "nodes": [
+  {
+   "id": "call",
+   "lane": "a",
+   "col": 0,
+   "type": "frontend",
+   "label": "flix upgrade",
+   "sublabel": "<设备> --file <exe>",
+   "width": 168
+  },
+  {
+   "id": "verify",
+   "lane": "a",
+   "col": 1,
+   "type": "security",
+   "label": "本地包校验",
+   "sublabel": "大小 + SHA256 + 扩展名",
+   "width": 166
+  },
+  {
+   "id": "push",
+   "lane": "wire",
+   "col": 2,
+   "type": "messagebus",
+   "label": "文件通道上传",
+   "sublabel": "改名为不冲突的文件名",
+   "width": 168
+  },
+  {
+   "id": "script",
+   "lane": "wire",
+   "col": 3,
+   "type": "messagebus",
+   "label": "下发升级脚本",
+   "sublabel": "固定模板，不含任意命令",
+   "width": 172
+  },
+  {
+   "id": "swap",
+   "lane": "b",
+   "col": 3,
+   "type": "backend",
+   "label": "改名旧包 + 复制新包",
+   "sublabel": "运行中的 exe 只能改名",
+   "width": 176
+  },
+  {
+   "id": "start",
+   "lane": "b",
+   "col": 4,
+   "type": "backend",
+   "label": "清环境启动 + 健康检查",
+   "sublabel": "默认沿用环境；--fresh-env 才清解包变量；验 18991",
+   "width": 186
+  },
+  {
+   "id": "rollback",
+   "lane": "b",
+   "col": 4,
+   "type": "security",
+   "label": "回退旧 exe",
+   "sublabel": "还原备份并重启",
+   "width": 160
+  },
+  {
+   "id": "audit",
+   "lane": "b",
+   "col": 4,
+   "type": "backend",
+   "label": "审计记录",
+   "sublabel": "旧/新哈希 + 结果",
+   "width": 158
+  },
+  {
+   "id": "badpkg",
+   "lane": "ex",
+   "col": 1,
+   "type": "security",
+   "label": "包不合规",
+   "sublabel": "拒绝上传，不动对端",
+   "width": 156
+  },
+  {
+   "id": "unhealthy",
+   "lane": "ex",
+   "col": 4,
+   "type": "security",
+   "label": "30 秒未就绪",
+   "sublabel": "触发回退",
+   "width": 150
+  },
+  {
+   "id": "manual",
+   "lane": "ex",
+   "col": 4,
+   "type": "external",
+   "label": "人工介入",
+   "sublabel": "回退也失败：本机启动",
+   "width": 160
+  }
+ ],
+ "edges": [
+  {
+   "from": "call",
+   "to": "verify",
+   "label": "本地 exe",
+   "variant": "emphasis",
+   "role": "main"
+  },
+  {
+   "from": "verify",
+   "to": "push",
+   "label": "通过",
+   "role": "main"
+  },
+  {
+   "from": "verify",
+   "to": "badpkg",
+   "label": "哈希/大小不符",
+   "variant": "security",
+   "role": "error"
+  },
+  {
+   "from": "push",
+   "to": "script",
+   "label": "落盘完成",
+   "role": "main"
+  },
+  {
+   "from": "script",
+   "to": "swap",
+   "label": "执行",
+   "role": "main"
+  },
+  {
+   "from": "swap",
+   "to": "start",
+   "label": "新包就位",
+   "role": "main"
+  },
+  {
+   "from": "start",
+   "to": "audit",
+   "label": "监听正常",
+   "role": "main"
+  },
+  {
+   "from": "start",
+   "to": "unhealthy",
+   "label": "30s 内无监听",
+   "variant": "security",
+   "role": "error"
+  },
+  {
+   "from": "unhealthy",
+   "to": "rollback",
+   "label": "自动回退",
+   "variant": "dashed"
+  },
+  {
+   "from": "rollback",
+   "to": "audit",
+   "label": "记录回退",
+   "variant": "dashed"
+  },
+  {
+   "from": "rollback",
+   "to": "manual",
+   "label": "仍不可用",
+   "variant": "dashed"
+  }
+ ],
+ "cards": [
+  {
+   "dot": "cyan",
+   "title": "输入契约",
+   "items": [
+    "flix upgrade <设备> --file <新exe> [--timeout 30]",
+    "只接受 .exe；校验本地 SHA256 与大小并在回执里原样报告",
+    "传输走现有文件通道，落 Downloads，文件名带日期避免 409"
+   ]
+  },
+  {
+   "dot": "rose",
+   "title": "安全边界",
+   "items": [
+    "仅已配对设备；来源 IP 校验沿用文件通道",
+    "升级脚本是固定模板，不接受对端回传的命令",
+    "旧包保留为 .prev-<date>，回退可用"
+   ]
+  },
+  {
+   "dot": "emerald",
+   "title": "已知风险",
+   "items": [
+    "默认不清 PyInstaller 解包变量：实测该机器清掉后新进程起不来",
+    "发布带新原生依赖的版本时加 --fresh-env，并准备人工兜底",
+    "停 serve 会短暂断开命令通道，重启后自动恢复"
+   ]
+  }
+ ]
+}
+</script>
+
+<script>
+(function () {
+  var spec = JSON.parse(document.getElementById('spec').textContent);
+  document.getElementById('title').textContent = spec.meta.title;
+  document.getElementById('meta').textContent =
+    spec.diagram_type + ' · ' + spec.meta.locale + ' · ' +
+    spec.nodes.length + ' 节点 / ' + spec.edges.length + ' 边 · ' +
+    (spec.meta.status || '');
+
+  var laneOrder = spec.lanes.map(function (l) { return l.id; });
+  var lanesEl = document.getElementById('lanes');
+  var nodeEls = {};
+
+  spec.lanes.forEach(function (lane) {
+    var row = document.createElement('div');
+    row.className = 'lane';
+    var lab = document.createElement('div');
+    lab.className = 'lane-label';
+    lab.textContent = lane.label;
+    var track = document.createElement('div');
+    track.className = 'lane-track';
+    row.appendChild(lab);
+    row.appendChild(track);
+    lanesEl.appendChild(row);
+    lane.track = track;
+  });
+
+  spec.nodes.forEach(function (n) {
+    var el = document.createElement('div');
+    el.className = 'node ' + n.type;
+    el.style.gridColumn = (n.col + 1);
+    el.innerHTML = '<div class="label"></div><div class="sub"></div>';
+    el.querySelector('.label').textContent = n.label;
+    el.querySelector('.sub').textContent = n.sublabel || '';
+    var lane = spec.lanes.filter(function (l) { return l.id === n.lane; })[0];
+    lane.track.appendChild(el);
+    nodeEls[n.id] = el;
+  });
+
+  var svg = document.getElementById('edges');
+  function draw() {
+    var board = document.querySelector('.board').getBoundingClientRect();
+    svg.setAttribute('width', board.width);
+    svg.setAttribute('height', board.height);
+    svg.setAttribute('viewBox', '0 0 ' + board.width + ' ' + board.height);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    spec.edges.forEach(function (e) {
+      var a = nodeEls[e.from], b = nodeEls[e.to];
+      if (!a || !b) return;
+      var ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+      var x1 = ra.left - board.left, y1 = ra.top - board.top;
+      var x2 = rb.left - board.left, y2 = rb.top - board.top;
+      var down = Math.abs(y2 - y1) > 20;
+      var sx = x1 + ra.width / 2, sy = y1 + (y2 > y1 ? ra.height : 0);
+      var ex = x2 + rb.width / 2, ey = y2 + (y2 > y1 ? 0 : rb.height);
+      var mx = (sx + ex) / 2, my = (sy + ey) / 2;
+      var d = down
+        ? 'M' + sx + ',' + sy + ' C' + sx + ',' + my + ' ' + ex + ',' + my + ' ' + ex + ',' + ey
+        : 'M' + (x1 + ra.width) + ',' + (y1 + ra.height / 2) + ' C' + mx + ',' + (y1 + ra.height / 2) +
+          ' ' + mx + ',' + (y2 + rb.height / 2) + ' ' + x2 + ',' + (y2 + rb.height / 2);
+      var color = e.variant === 'security' ? 'var(--rose)'
+                : e.variant === 'dashed' ? 'var(--muted)' : 'var(--cyan)';
+      var p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      p.setAttribute('d', d);
+      p.setAttribute('fill', 'none');
+      p.setAttribute('stroke', color);
+      p.setAttribute('stroke-width', e.variant === 'emphasis' ? 2.4 : 1.4);
+      p.setAttribute('stroke-dasharray', e.variant === 'dashed' ? '5 4' : 'none');
+      p.setAttribute('marker-end', 'url(#arrow)');
+      svg.appendChild(p);
+
+      var t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      t.setAttribute('x', down ? ex + 6 : mx);
+      t.setAttribute('y', down ? ey - 6 : my - 6);
+      t.setAttribute('fill', '#98a0b3');
+      t.setAttribute('font-size', '10');
+      t.textContent = e.label;
+      svg.appendChild(t);
+    });
+
+    var defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+    defs.innerHTML = '<marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" ' +
+      'markerWidth="6" markerHeight="6" orient="auto-start-reverse">' +
+      '<path d="M0,0 L10,5 L0,10 z" fill="#98a0b3"></path></marker>';
+    svg.appendChild(defs);
+  }
+
+  var cards = document.getElementById('cards');
+  spec.cards.forEach(function (c) {
+    var el = document.createElement('div');
+    el.className = 'card';
+    var h = document.createElement('h2');
+    h.innerHTML = '<span class="dot ' + c.dot + '"></span>';
+    h.appendChild(document.createTextNode(c.title));
+    el.appendChild(h);
+    var ul = document.createElement('ul');
+    ul.style.margin = '0'; ul.style.paddingLeft = '18px';
+    c.items.forEach(function (i) {
+      var li = document.createElement('li'); li.textContent = i; ul.appendChild(li);
+    });
+    el.appendChild(ul);
+    cards.appendChild(el);
+  });
+
+  window.addEventListener('load', draw);
+  window.addEventListener('resize', draw);
+})();
+</script>
+</body>
+</html>

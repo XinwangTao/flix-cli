@@ -328,6 +328,27 @@ async def cmd_clipboard(args) -> int:
         store.close()
 
 
+async def cmd_upgrade(args) -> int:
+    """Ship a new exe to a paired device, restart it, and verify it came up."""
+    from .upgrade import upgrade
+    store = Store()
+    try:
+        ident = load_or_create_identity(store)
+        try:
+            result = await upgrade(store, ident, args.to, args.file,
+                                   wait_s=args.wait, port_arg=args.port,
+                                   fresh_env=args.fresh_env)
+        except ValueError as exc:
+            emit({"ok": False, "error": "bad-package", "detail": str(exc)}, True)
+            return 2
+    finally:
+        store.close()
+    emit(result, args.json)
+    if result.get("ok"):
+        return 0
+    return 4 if result.get("error") == "not-paired" else 3
+
+
 async def cmd_send_files(args) -> int:
     from .files import send_file
     store = Store()
@@ -932,6 +953,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--port", type=int, default=DEVICE_PORT)
     p.add_argument("command", nargs=argparse.REMAINDER,
                    help="command to run; put '--' before it")
+
+    p = add("upgrade", "replace a paired device's RelayDesk.exe "
+                       "(SHA256 check, health check, automatic rollback)",
+            cmd_upgrade)
+    p.add_argument("to")
+    p.add_argument("--file", required=True, help="local RelayDesk.exe to ship")
+    p.add_argument("--wait", type=int, default=60,
+                   help="seconds to wait for the device port (default 60)")
+    p.add_argument("--fresh-env", action="store_true",
+                   help="clear PyInstaller's extraction-dir variables before "
+                        "restart (needed for new native deps, but on some hosts "
+                        "the fresh unpack never comes up)")
+    p.add_argument("--port", type=int, default=DEVICE_PORT)
 
     p = add("send", "send file(s) to a device (bubble + POST /file)", cmd_send_files)
     p.add_argument("to")
