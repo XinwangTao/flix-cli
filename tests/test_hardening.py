@@ -234,12 +234,15 @@ class InterfaceAndVersionTests(unittest.TestCase):
                     ("10.37.73.198", "255.255.255.0")]
 
         orig_table, orig_routed = flixcli._win_ipv4_table, flixcli._routed_ip
+        orig_gw = flixcli._gateway_ifindexes
         flixcli._win_ipv4_table = fake_table
         flixcli._routed_ip = lambda: "198.18.0.1"
+        flixcli._gateway_ifindexes = lambda: set()
         try:
             self.assertEqual(default_iface_ip(), "10.37.73.198")
         finally:
-            flixcli._win_ipv4_table, flixcli._routed_ip = orig_table, orig_routed
+            (flixcli._win_ipv4_table, flixcli._routed_ip,
+             flixcli._gateway_ifindexes) = orig_table, orig_routed, orig_gw
 
 
 if __name__ == "__main__":

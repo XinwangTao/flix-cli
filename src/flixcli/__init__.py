@@ -53,8 +53,8 @@ def is_virtual_ip(ip: str) -> bool:
 
 
 
-def _win_ipv4_table() -> list[tuple[str, str]]:
-    """[(address, netmask)] from iphlpapi GetIpAddrTable (empty off-Windows)."""
+def _win_ipv4_rows() -> list[tuple[str, str, int]]:
+    """[(address, netmask, ifIndex)] from iphlpapi (empty off-Windows)."""
     if sys.platform != "win32":
         return []
     try:
@@ -83,10 +83,65 @@ def _win_ipv4_table() -> list[tuple[str, str]]:
         count = ctypes.cast(buf, ctypes.POINTER(wintypes.DWORD)).contents.value
         rows = ctypes.cast(ctypes.byref(buf, 4), ctypes.POINTER(_Row))
         return [(socket.inet_ntoa(struct.pack("<I", rows[i].dwAddr)),
-                 socket.inet_ntoa(struct.pack("<I", rows[i].dwMask)))
+                 socket.inet_ntoa(struct.pack("<I", rows[i].dwMask)),
+                 int(rows[i].dwIndex))
                 for i in range(count)]
     except Exception:  # noqa: BLE001 - best effort, fall back to the route trick
         return []
+
+
+def _win_ipv4_table() -> list[tuple[str, str]]:
+    """[(address, netmask)] from iphlpapi GetIpAddrTable (empty off-Windows)."""
+    return [(ip, mask) for ip, mask, _idx in _win_ipv4_rows()]
+
+
+def _gateway_ifindexes() -> set[int]:
+    """Interfaces that own a real default route (nextHop != 0.0.0.0).
+
+    On a multi-NIC Windows box the first "10." address is not necessarily the
+    LAN: Ethernet 3 here is 10.10.200.41 with no gateway, while the usable LAN
+    is 10.37.73.198/24 behind 10.37.73.254. Pick the one that can actually
+    route off-link. Point-to-point TUN routes usually carry nextHop 0 and are
+    excluded (they are also filtered by _usable).
+    """
+    if sys.platform != "win32":
+        return set()
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _Fwd(ctypes.Structure):
+            _fields_ = [
+                ("dwForwardDest", wintypes.DWORD),
+                ("dwForwardMask", wintypes.DWORD),
+                ("dwForwardPolicy", wintypes.DWORD),
+                ("dwForwardNextHop", wintypes.DWORD),
+                ("dwForwardIfIndex", wintypes.DWORD),
+                ("dwForwardType", wintypes.DWORD),
+                ("dwForwardProto", wintypes.DWORD),
+                ("dwForwardAge", wintypes.DWORD),
+                ("dwForwardNextHopAS", wintypes.DWORD),
+                ("dwForwardMetric1", wintypes.DWORD),
+                ("dwForwardMetric2", wintypes.DWORD),
+                ("dwForwardMetric3", wintypes.DWORD),
+                ("dwForwardMetric4", wintypes.DWORD),
+                ("dwForwardMetric5", wintypes.DWORD),
+            ]
+
+        fn = ctypes.windll.iphlpapi.GetIpForwardTable
+        size = wintypes.ULONG(0)
+        if fn(None, ctypes.byref(size), False) not in (0, 122):
+            return set()
+        buf = ctypes.create_string_buffer(size.value)
+        if fn(buf, ctypes.byref(size), False) != 0:
+            return set()
+        count = ctypes.cast(buf, ctypes.POINTER(wintypes.DWORD)).contents.value
+        rows = ctypes.cast(ctypes.byref(buf, 4), ctypes.POINTER(_Fwd))
+        return {int(rows[i].dwForwardIfIndex) for i in range(count)
+                if rows[i].dwForwardDest == 0
+                and rows[i].dwForwardNextHop != 0}
+    except Exception:  # noqa: BLE001
+        return set()
 
 
 def _routed_ip() -> str:
@@ -161,10 +216,16 @@ def default_iface_ip() -> str:
     if _usable(routed, rows.get(routed)):
         return routed
     candidates = [ip for ip, mask in rows.items() if _usable(ip, mask)]
-    for prefix in ("192.168.", "10.", "172."):
-        for ip in candidates:
-            if ip.startswith(prefix):
-                return ip
+    # Prefer an interface that owns a real default route: on multi-NIC hosts
+    # the first "10." address may sit on an isolated switch with no gateway.
+    gateways = _gateway_ifindexes()
+    gateway_ips = [ip for ip, mask, idx in _win_ipv4_rows()
+                   if idx in gateways and _usable(ip, mask)]
+    for pool in (gateway_ips, candidates):
+        for prefix in ("192.168.", "10.", "172."):
+            for ip in pool:
+                if ip.startswith(prefix):
+                    return ip
     return candidates[0] if candidates else routed
 
 

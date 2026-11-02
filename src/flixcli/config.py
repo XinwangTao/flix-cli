@@ -565,13 +565,50 @@ class Store:
             print(f"[flixcli] prefs unreadable, moved to {bad}", file=sys.stderr)
             return {}
 
+    @contextlib.contextmanager
+    def _prefs_lock(self):
+        """Cross-process exclusive lock for prefs read-modify-write.
+
+        GUI, daemon and one-shot CLI commands all share this file. Without a
+        lock two processes could each mint an identity (last writer wins) or
+        drop a key written by the other.
+        """
+        lock_path = self.prefs_path.with_suffix(".lock")
+        fh = open(lock_path, "a+b")
+        try:
+            if os.name == "nt":
+                import msvcrt
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                if os.name == "nt":
+                    import msvcrt
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            fh.close()
+
+    def update_prefs(self, fn) -> dict:
+        with self._prefs_lock():
+            data = fn(dict(self.prefs()))
+            tmp = self.prefs_path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1),
+                           encoding="utf-8")
+            os.replace(tmp, self.prefs_path)
+            return data
+
     def set_pref(self, key: str, value) -> None:
-        p = self.prefs()
-        p[key] = value
-        tmp = self.prefs_path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(p, ensure_ascii=False, indent=1),
-                       encoding="utf-8")
-        os.replace(tmp, self.prefs_path)
+        def apply(p: dict) -> dict:
+            p[key] = value
+            return p
+        self.update_prefs(apply)
 
     def close(self) -> None:
         with contextlib.suppress(Exception):
@@ -654,20 +691,27 @@ def load_or_create_identity(store: Store) -> dict:
     ident = p.get("identity")
     if _valid_identity(ident):
         return ident
-    adopted = _adopt_legacy_identity()
-    if adopted:
-        store.set_pref("identity", adopted)
-        return adopted
-    ident = {
-        "fingerprint": str(uuid.uuid4()),
-        "alias": os.environ.get("COMPUTERNAME", "flixd"),
-        "deviceModel": "Windows",
-        "deviceType": "desktop",
-        "os": "windows",
-        "created_at": int(time.time() * 1000),
-    }
-    store.set_pref("identity", ident)
-    return ident
+
+    def ensure(prefs: dict) -> dict:
+        # Re-check under the lock: another process may have just created it.
+        current = prefs.get("identity")
+        if _valid_identity(current):
+            return prefs
+        adopted = _adopt_legacy_identity()
+        if adopted:
+            prefs["identity"] = adopted
+            return prefs
+        prefs["identity"] = {
+            "fingerprint": str(uuid.uuid4()),
+            "alias": os.environ.get("COMPUTERNAME", "flixd"),
+            "deviceModel": "Windows",
+            "deviceType": "desktop",
+            "os": "windows",
+            "created_at": int(time.time() * 1000),
+        }
+        return prefs
+
+    return store.update_prefs(ensure)["identity"]
 
 
 def _fresher(row: dict, current: dict) -> bool:

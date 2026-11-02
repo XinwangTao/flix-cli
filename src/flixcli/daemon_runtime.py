@@ -113,12 +113,55 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
                      announce: bool = True, clip_sync: bool = True,
                      web_port: int = 0, multicast_if: str | None = None) -> int:
     devices: dict[str, dict] = {}
+    verify_pending: set[str] = set()
+
+    async def _verify_moved_device(dev: dict) -> None:
+        """An announce may not move an already-known peer on its own.
+
+        Announce datagrams are unsigned: anyone can claim a paired
+        fingerprint and redirect routing (and outbox retries) to themselves.
+        A new address is accepted only after ping_v2 proves the fingerprint
+        really answers there.
+        """
+        fp = dev["fingerprint"]
+        ip = dev.get("ip", "")
+        port = int(dev.get("port") or DEVICE_PORT)
+        try:
+            modal = await ping_v2(ip, ident, port=port,
+                                  device_port=device_port, timeout=3.0)
+        except Exception:
+            return
+        finally:
+            verify_pending.discard(fp)
+        if modal.get("fingerprint") != fp:
+            print(f"[discover] ignored IP move for {fp[:8]}: identity mismatch",
+                  file=sys.stderr, flush=True)
+            return
+        devices[fp] = dev
+        store.upsert_device(fp, alias=dev.get("alias", ""),
+                            device_model=dev.get("deviceModel", ""),
+                            port=dev.get("port"), version=dev.get("version"),
+                            ip=ip, os_name=dev.get("os", ""))
+        print(f"[discover] {dev.get('alias')} ({fp[:8]}) moved to "
+              f"{ip}:{port}", file=sys.stderr, flush=True)
 
     def on_device(dev: dict) -> None:
         fp = dev.get("fingerprint")
         if not fp or fp == ident["fingerprint"]:
             return
         if devices.get(fp) == dev:
+            return
+        old_ip = store.device_ip(fp)[0]
+        new_ip = dev.get("ip", "")
+        if old_ip and new_ip and old_ip != new_ip:
+            if fp not in verify_pending:
+                verify_pending.add(fp)
+                try:
+                    asyncio.get_running_loop().create_task(
+                        _verify_moved_device(dev))
+                except RuntimeError:  # callback outside the loop
+                    verify_pending.discard(fp)
+                    devices[fp] = dev
             return
         devices[fp] = dev
         try:
