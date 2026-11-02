@@ -32,8 +32,11 @@ async def set_clipboard_text(text: str) -> None:
         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         creationflags=NO_WINDOW)
     data = text.encode("utf-16-le")
-    with contextlib.suppress(Exception):
-        await proc.communicate(b"\xff\xfe" + data)
+    try:
+        await asyncio.wait_for(proc.communicate(b"\xff\xfe" + data), timeout=3)
+    except (asyncio.TimeoutError, Exception):
+        with contextlib.suppress(Exception):
+            proc.kill()
 
 
 def read_clipboard() -> str | None:
@@ -86,7 +89,6 @@ async def clip_sync_loop(store, ident: dict, state: dict,
         text = text.lstrip("﻿")
         if not text or text == state.get("last_set") or text == last_sent:
             continue
-        last_sent = text
         h = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
         intent = model.clipboard_intent(ident["fingerprint"], text)
         sent = 0
@@ -99,6 +101,10 @@ async def clip_sync_loop(store, ident: dict, state: dict,
             except (PeerError, Exception):
                 continue
         if sent:
+            # Only mark as sent after a success: previously last_sent was set
+            # before the loop, so a clipboard change made while every peer was
+            # offline was silently dropped forever.
+            last_sent = text
             print(f"[clip-sync] {h} -> {sent} paired device(s)",
                   file=sys.stderr, flush=True)
 
@@ -314,30 +320,41 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
         try:
             while True:
                 await asyncio.sleep(3)
-                refreshed = 0
-                for row in store.devices():
-                    fp = row.get("fingerprint") or ""
-                    ip = row.get("ip") or ""
-                    port = row.get("port")
-                    if (not fp or not ip or not port
-                            or fp == ident["fingerprint"]):
-                        continue
-                    try:
-                        modal = await ping_v2(ip, ident, port=int(port),
-                                              device_port=device_port,
-                                              timeout=3.0)
-                    except Exception:
-                        continue
-                    try:
-                        store.upsert_device(
-                            fp, alias=modal.get("alias", ""),
-                            device_model=modal.get("deviceModel", ""),
-                            port=modal.get("port") or port,
-                            version=modal.get("version"), ip=ip,
-                            os_name=modal.get("os", ""))
-                        refreshed += 1
-                    except Exception as e:
-                        print(f"[presence] {e}", file=sys.stderr, flush=True)
+                peers = [row for row in store.devices()
+                         if row.get("fingerprint") and row.get("ip")
+                         and row.get("port")
+                         and row.get("fingerprint") != ident["fingerprint"]]
+                # Probes used to run serially (3 s each): with ~10 unreachable
+                # history rows one pass exceeded the 90 s presence TTL and
+                # flipped *online* devices to offline. Bound concurrency so a
+                # large table cannot stall the loop or the event loop.
+                sem = asyncio.Semaphore(8)
+
+                async def probe(row) -> bool:
+                    async with sem:
+                        fp = row["fingerprint"]
+                        ip = row["ip"]
+                        port = int(row["port"])
+                        try:
+                            modal = await ping_v2(ip, ident, port=port,
+                                                  device_port=device_port,
+                                                  timeout=3.0)
+                        except Exception:
+                            return False
+                        try:
+                            store.upsert_device(
+                                fp, alias=modal.get("alias", ""),
+                                device_model=modal.get("deviceModel", ""),
+                                port=modal.get("port") or port,
+                                version=modal.get("version"), ip=ip,
+                                os_name=modal.get("os", ""))
+                            return True
+                        except Exception as e:
+                            print(f"[presence] {e}", file=sys.stderr, flush=True)
+                            return False
+
+                refreshed = sum(await asyncio.gather(
+                    *(probe(row) for row in peers))) if peers else 0
                 if refreshed:
                     print(f"[presence] refreshed {refreshed} device(s)",
                           file=sys.stderr, flush=True)

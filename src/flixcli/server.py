@@ -671,19 +671,19 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
 
 
     def _wire_log_file() -> Path | None:
-        """Where the verbatim wire capture goes.
+        """Where the diagnostic wire capture goes (opt-in only).
 
-        ``FLIX_WIRE_LOG`` overrides the path (``off`` disables it); the default
-        lives in the app state dir so the server is portable — an absolute
-        reverse-engineering path used to make every request 500 off-Windows.
+        v2.2.1 wrote every request body to ``%APPDATA%/flixcli/wire_capture.log``
+        by default, which meant clipboard text, chat messages and rdShell
+        commands were persisted in plaintext forever. Now only an explicit
+        ``FLIX_WIRE_LOG`` path enables capture.
         """
         raw = os.environ.get("FLIX_WIRE_LOG", "").strip()
-        if raw.lower() in {"off", "0", "none"}:
+        if not raw or raw.lower() in {"off", "0", "none"}:
             return None
-        if raw:
-            return Path(raw)
-        from .config import APP_DIR
-        return APP_DIR / "wire_capture.log"
+        return Path(raw)
+
+    WIRE_LOG_MAX_BYTES = 5 * 1024 * 1024
 
     @web.middleware
     async def _wire_log(request, handler):
@@ -697,19 +697,25 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
                 body = await request.read()
             except Exception:
                 body = b"?"
-            if request.path.startswith("/webrtc/v1/"):
-                import hashlib as _hashlib
-                digest = _hashlib.sha256(body).hexdigest()[:16]
-                body_repr = f"<redacted media envelope bytes={len(body)} sha256={digest}>"
-            else:
-                body_repr = repr(body[:2000])
-        rec = (f"[{_t.strftime('%H:%M:%S')}] {request.method} {request.path_qs}\n"
+            # Never persist message/clipboard/command content: a digest is
+            # enough to correlate a capture with a repro.
+            import hashlib as _hashlib
+            digest = _hashlib.sha256(body).hexdigest()[:16]
+            body_repr = f"<redacted bytes={len(body)} sha256={digest}>"
+        raw_qs = request.path_qs
+        if "pin=" in raw_qs:
+            import re as _re
+            raw_qs = _re.sub(r"pin=[^&]*", "pin=***", raw_qs)
+        rec = (f"[{_t.strftime('%H:%M:%S')}] {request.method} {raw_qs}\n"
                f"headers={dict(request.headers)}\n"
                f"body={body_repr}\n----\n")
         target = _wire_log_file()
         if target is not None:
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
+                if target.exists() and target.stat().st_size > WIRE_LOG_MAX_BYTES:
+                    with contextlib.suppress(OSError):
+                        target.replace(target.with_suffix(target.suffix + ".1"))
                 with open(target, "ab") as f:
                     f.write(rec.encode("utf-8", "replace"))
             except OSError:

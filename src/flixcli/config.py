@@ -481,8 +481,13 @@ class Store:
         return dict(zip(cols, row))
 
     def outbox_retry(self, oid: str) -> bool:
+        # Reset `created` too: flush() expires queued rows older than the 7-day
+        # TTL before sending, so retrying an expired row used to mark it
+        # expired again and never deliver it.
         cur = self.con.execute(
-            "UPDATE outbox SET state='queued', last_error='' WHERE id=?", (oid,))
+            "UPDATE outbox SET state='queued', last_error='', attempts=0,"
+            " created=? WHERE id=?",
+            (int(time.time() * 1000), oid))
         self.con.commit()
         return cur.rowcount > 0
 

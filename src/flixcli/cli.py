@@ -26,6 +26,22 @@ from .model import clipboard_intent, shell_intent, text_bubble
 from .routing import resolve_target
 
 
+def _join_remote_command(parts: list[str]) -> str:
+    """Rebuild one command line without losing the caller's argument quoting.
+
+    `" ".join(parts)` turned `python -c "print('a b')"` into
+    `python -c print('a b')` on the peer. Quote for the platform the command
+    will run on (both flixcli ends are the same OS in practice).
+    """
+    if not parts:
+        return ""
+    if sys.platform == "win32":
+        import subprocess
+        return subprocess.list2cmdline(parts)
+    import shlex
+    return shlex.join(parts)
+
+
 def emit(payload, as_json: bool) -> None:
     if as_json:
         print(json.dumps(payload, ensure_ascii=False, indent=1))
@@ -129,7 +145,7 @@ async def cmd_shell(args) -> int:
     parts = list(args.command)
     if parts and parts[0] == "--":
         parts = parts[1:]
-    command = " ".join(parts).strip()
+    command = _join_remote_command(parts)
     if not command and not getattr(args, "pty", False):
         emit({"error": "usage",
               "detail": "nothing to run; use: flix shell <device> -- <command>"}, True)

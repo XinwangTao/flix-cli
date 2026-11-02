@@ -12,6 +12,7 @@ import contextlib
 import io
 import json
 import time
+import uuid
 from fractions import Fraction
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -185,7 +186,13 @@ class MediaRuntime:
         self.peers: dict[str, PeerMedia] = {}
 
     async def _save_frame(self, call_id: str, data: bytes) -> None:
-        path = self.snapshot_dir / f"{call_id}.jpg"
+        try:
+            safe = str(uuid.UUID(str(call_id)))
+        except (ValueError, TypeError, AttributeError):
+            return
+        path = (self.snapshot_dir / f"{safe}.jpg").resolve()
+        if path.parent != self.snapshot_dir.resolve():
+            return
         tmp = path.with_suffix(".jpg.tmp")
         await asyncio.to_thread(tmp.write_bytes, data)
         await asyncio.to_thread(tmp.replace, path)
@@ -197,6 +204,11 @@ class MediaRuntime:
 
     def create(self, call_id: str) -> PeerMedia:
         self.require_available()
+        # Repeated offers used to build a fresh RTCPeerConnection every time
+        # and orphan the previous one (sockets/tasks leaking until revoke).
+        existing = self.peers.get(call_id)
+        if existing is not None:
+            return existing
         peer = PeerMedia(call_id, self.manager, self._save_frame)
         self.peers[call_id] = peer
         self.manager.media[call_id] = peer
@@ -209,5 +221,11 @@ class MediaRuntime:
         return peer
 
     def snapshot(self, call_id: str) -> Path | None:
-        path = self.snapshot_dir / f"{call_id}.jpg"
+        try:
+            safe = str(uuid.UUID(str(call_id)))
+        except (ValueError, TypeError, AttributeError):
+            return None
+        path = (self.snapshot_dir / f"{safe}.jpg").resolve()
+        if path.parent != self.snapshot_dir.resolve():
+            return None
         return path if path.is_file() else None
