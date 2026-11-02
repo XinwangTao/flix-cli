@@ -54,3 +54,6 @@ build_new_flixd/
 build_*/
 dist_*/
 .pytest_cache/
+.hypothesis/
+.coverage
+coverage.json
