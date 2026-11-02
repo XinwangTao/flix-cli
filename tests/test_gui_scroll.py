@@ -168,6 +168,9 @@ class ScrollPolicyTests(unittest.TestCase):
         self.window.render_timeline()
         QTest.qWait(150)
         before = {key: id(row) for key, row in self.window._timeline_rows.items()}
+        self.assertIn("msg:f3", before,
+                      f"rows={sorted(before)} sel={self.window.timeline_selection()!r} "
+                      f"rebuild={self.window._timeline_rebuilding}")
 
         files[3]["content"]["progress"] = 0.7
         self.window.payload = {"bubbles": list(reversed(files)),

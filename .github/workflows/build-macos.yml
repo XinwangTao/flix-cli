@@ -41,6 +41,19 @@ jobs:
           pip install -e ".[gui]" pyinstaller
           pip install pytest
 
+      - name: Qt selection probe
+        run: |
+          QT_QPA_PLATFORM=offscreen python - <<'PY'
+          from PySide6.QtWidgets import QApplication, QLabel
+          from PySide6.QtCore import Qt
+          app = QApplication([])
+          lab = QLabel("hello")
+          lab.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+          lab.show()
+          print("PROBE selectedText=", repr(lab.selectedText()),
+                "hasSelected=", lab.hasSelectedText())
+          PY
+
       - name: Unit tests
         run: pytest tests -q --ignore=tests/e2e.py
 

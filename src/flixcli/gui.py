@@ -1648,6 +1648,10 @@ class MainWindow(QMainWindow):
         for label in self.timeline_widget.findChildren(QLabel):
             if label.textInteractionFlags() & (
                     Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard):
+                # selectedText() can report text on some platforms even when
+                # nothing is selected; hasSelectedText() is the reliable gate.
+                if not label.hasSelectedText():
+                    continue
                 text = (label.selectedText()
                         .replace(chr(0x2028), chr(10))
                         .replace(chr(0x2029), chr(10)).strip())
