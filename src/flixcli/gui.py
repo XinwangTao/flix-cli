@@ -417,6 +417,7 @@ class MainWindow(QMainWindow):
         self._timeline_row_sig = {}
         self._anchor_target = None
         self._pending_anchor = None
+        self._setting_scroll = False
         self._pixmap_cache = {}
         self._render_seq = 0
         # True only when the reader moved the timeline themselves; layout
@@ -1559,8 +1560,16 @@ class MainWindow(QMainWindow):
         bar = self.timeline.verticalScrollBar()
         target = max(0, widget.y() - offset)
         self._anchor_target = target
-        bar.setValue(target)
+        self._set_scroll(target)
         return True
+
+    def _set_scroll(self, value: int) -> None:
+        """Programmatic scroll: never let it be mistaken for the reader moving."""
+        self._setting_scroll = True
+        try:
+            self.timeline.verticalScrollBar().setValue(value)
+        finally:
+            self._setting_scroll = False
 
     def _reassert_anchor(self, anchor) -> None:
         if self._timeline_rebuilding or self._follow_tail or self._user_scrolled:
@@ -1584,7 +1593,7 @@ class MainWindow(QMainWindow):
             return
         if not self._restore_anchor(anchor):
             self._anchor_target = None
-            bar.setValue(min(saved_scroll, max(0, bar.maximum())))
+            self._set_scroll(min(saved_scroll, max(0, bar.maximum())))
         self._pending_anchor = anchor
         # Layout activation timing differs per platform; re-assert a few beats
         # later so a late layout pass cannot leave the reader on a stale row.
@@ -1599,7 +1608,7 @@ class MainWindow(QMainWindow):
         self._anchor_target = None
         self._pending_anchor = None
         bar = self.timeline.verticalScrollBar()
-        bar.setValue(bar.maximum())
+        self._set_scroll(bar.maximum())
         QTimer.singleShot(0, self._reassert_bottom)
         QTimer.singleShot(80, self._reassert_bottom)
 
@@ -1607,7 +1616,7 @@ class MainWindow(QMainWindow):
         if self._timeline_rebuilding or not self._follow_tail:
             return
         bar = self.timeline.verticalScrollBar()
-        bar.setValue(bar.maximum())
+        self._set_scroll(bar.maximum())
 
     def jump_to_latest(self) -> None:
         self._follow_tail = True
@@ -1616,7 +1625,7 @@ class MainWindow(QMainWindow):
 
     def _on_timeline_scroll(self, value: int) -> None:
         """Remember whether the reader is at the tail, and hide the pill there."""
-        if self._timeline_rebuilding:
+        if self._timeline_rebuilding or self._setting_scroll:
             return
         if self._user_scrolled:
             self._pending_anchor = None
@@ -1633,7 +1642,7 @@ class MainWindow(QMainWindow):
             return
         if self._follow_tail:
             bar = self.timeline.verticalScrollBar()
-            bar.setValue(bar.maximum())
+            self._set_scroll(bar.maximum())
             return
         if self._pending_anchor and not self._user_scrolled:
             self._restore_anchor(self._pending_anchor)

@@ -23,6 +23,11 @@ import flixcli.gui as gui  # noqa: E402
 
 APP = QApplication.instance() or QApplication([])
 
+# Isolate the window from any daemon running on the host: discovery would find
+# it and asynchronously replace the fake payload in the middle of an assertion.
+gui.LocalApi.discover = staticmethod(lambda port=0: None)
+gui.MainWindow.start_local_daemon = lambda self: None
+
 ME = "fp-me"
 PEER = "fp-peer"
 OTHER = "fp-other"
@@ -40,6 +45,8 @@ def bubbles_for(peer: str, count: int = 40) -> list[dict]:
 def make_window() -> gui.MainWindow:
     window = gui.MainWindow(19999)  # nothing listening: refresh just fails
     window.timer.stop()
+    window.offline_mode = True
+    window._auto_start_tried = True
     window.resize(1000, 620)
     window.self_id = ME
     window.payload = {
@@ -178,6 +185,8 @@ class ScrollPolicyTests(unittest.TestCase):
         self.window.render_timeline()
         QTest.qWait(450)
         after = {key: id(row) for key, row in self.window._timeline_rows.items()}
+        self.assertIn("msg:f3", after,
+                      f"after={sorted(after)} sel={self.window.timeline_selection()!r}")
 
         self.assertNotEqual(after["msg:f3"], before["msg:f3"])
         for key in before:

@@ -21,6 +21,10 @@ import flixcli.gui as gui  # noqa: E402
 
 APP = QApplication.instance() or QApplication([])
 
+# Keep the host's real daemon out of the test window (it would replace payload).
+gui.LocalApi.discover = staticmethod(lambda port=0: None)
+gui.MainWindow.start_local_daemon = lambda self: None
+
 PEER = "fp-peer"
 ME = "fp-me"
 BUBBLES = [
@@ -34,6 +38,8 @@ BUBBLES = [
 def make_window() -> gui.MainWindow:
     window = gui.MainWindow(19999)  # nothing listening: refresh just fails
     window.timer.stop()
+    window.offline_mode = True
+    window._auto_start_tried = True
     window.self_id = ME
     window.payload = {"bubbles": BUBBLES, "devices": [{"fingerprint": PEER, "alias": "TABLET"}]}
     window.current = {"kind": "device", "key": PEER}
