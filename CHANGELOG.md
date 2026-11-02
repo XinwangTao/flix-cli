@@ -3,6 +3,32 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号与 GitHub Release 标签一致。
 可执行产物见 [Releases](https://github.com/XinwangTao/flix-cli/releases)。
 
+## [Unreleased] - 2026-11-02
+
+### 安全
+- 收紧局域网信任边界：`/bubble`、剪贴板、rdShell、rdAgent、群快照只接受已配对且来源 IP
+  与设备记录一致的发送方；未配对/来源不符返回 403 且不落库。
+- 配对必须携带对端 4 位配对码（常量时间比较）；`flix pair` / MCP `flix_pair` 在联网前拒绝无码调用。
+- Web 上传文件名只取 basename 并校验最终父目录，阻断 `../../` 路径穿越；Web PIN 所有入口共享限流。
+- Desktop API 校验 `Host`/`Origin` 与 JSON Content-Type，阻断 CSRF/DNS rebinding。
+- 线日志改为显式 `FLIX_WIRE_LOG` 开启，正文哈希化、PIN 打码、5 MB 轮转。
+
+### 修复
+- 同一 `APPDATA` 可启动多个 flixd 并争抢端口/偏好文件：新增单实例锁，第二个实例退出码 5。
+- 偏好文件跨进程写入丢键；升级脚本硬编码路径、哈希缺失；发现投毒可改写已配对设备 IP
+  （现在先 `ping_v2` 校验身份再接受变更）。
+- `flix ui` 跨线程使用 SQLite；MCP `flix_pair` 崩溃；CLI/MCP 建群未推送群快照；shell 参数引号丢失。
+- 远端执行输出无上限、超时不杀进程树；outbox 重试沿用旧 `created` 导致刚重试即过期。
+- TUN/虚拟网卡被当成局域网接口（现在按默认网关与私网前缀选路，跳过 198.18/100.64/169.254/127）。
+- 媒体轨道屏幕抓取可能永久阻塞：单帧抓取 3 秒超时后结束轨道。
+- MCP/路由器对 Unicode 数字（`²`.isdigit() 为真但 `int()` 会抛）做端口判断导致崩溃；
+  统一改为 ASCII 数字校验。
+- 依赖安全升级：`cryptography>=50,<51`、`Pillow>=13,<14`（清除 pip-audit 报告的 46 个已知漏洞）。
+
+### 测试
+- 新增 100 轮审计驱动 `scripts/audit_rounds.py`（修复回归、CLI/MCP 矩阵、模糊、A/B 基线、工具链）。
+- 新增 `tests/test_fuzz_props.py`（Hypothesis：发现报文、二维码、意图回复、升级脚本转义）。
+
 ## [v2.2.1] - 2026-10-30
 
 ### 修复

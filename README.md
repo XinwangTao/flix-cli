@@ -57,7 +57,7 @@ announce，因此 flixd 每 60s 对库内设备做一次 `/ping_v2` 探活并刷
 | 探测 | `flix probe <ip[:port]>` | flix_probe | ✅ 404 "Route not found" |
 | 局域网诊断（网卡/组播/防火墙/端口可达） | `flix netcheck [--json]` | — | — |
 | 手动添加（ping_v2 握手） | `flix ping <ip[:port]>` | — | ✅ 官方 UI 添加成功 |
-| 配对（askPairDevice/confirmPairDevice） | `flix pair [--code]` | flix_pair | ✅ 双侧 pair_devices 落库 |
+| 配对（askPairDevice/confirmPairDevice，`--code` 必填：对端 4 位配对码） | `flix pair <ip[:port]> --code <码>` | flix_pair | ✅ 双侧 pair_devices 落库 |
 | 文本气泡（type 0） | `flix send-text` | flix_send_text | ✅ |
 | 文本持久投递（离线排队 → 30s 重投 → TTL 7 天） | `flix outbox` | — | 线格式不变 |
 | 剪贴板投递（TransIntent clipboard） | `flix clipboard` | flix_send_clipboard | ✅ |
@@ -207,6 +207,18 @@ flix shell --pty --shell powershell 4c4ca286
 
 流程真源：`docs/archify/flix_shell_pty_workflow.html`（旁路 `.json`）。
 
+## 安全边界（2026-11 加固）
+
+- **配对是信任边界**：`/bubble`、`/intent`（剪贴板、rdShell、rdAgent、群快照）只接受
+  `pair_devices` 里已配对的发送方，且数据报来源 IP 必须与该设备记录一致；未配对或来源不符一律 403。
+- **配对需要验证码**：`askPairDevice` 的 `verifyCode` 必须等于本机 4 位配对码（常量时间比较），
+  无码请求在联网前就被拒绝（`pair-code-required`）。旧版官方客户端不看这个字段，但 flixcli 两端都校验。
+- **Web PIN 限流**：4 位 PIN 在所有入口（`GET /<pin>`、`/validate-code`、上传、WebSocket）共享
+  同一来源计数；10 次/5 分钟后限流，成功登录清零。
+- **单实例**：同一 `APPDATA` 只允许一个 flixd；第二个实例以退出码 5 退出，不再抢端口/锁冲突。
+- **Desktop API** 只监听 127.0.0.1，并校验 `Host`/`Origin` 与 JSON Content-Type，阻断浏览器 CSRF 与 DNS rebinding。
+- **线日志默认关闭**：只有设置 `FLIX_WIRE_LOG` 才落盘，正文只记哈希，`pin=` 参数打码，单文件 5 MB 轮转。
+
 ## 回归测试
 
 ```
@@ -214,6 +226,13 @@ python tests/e2e.py         # 双节点 11 项：ping/pair/text/file/group/web/
                             # webrtc/qrcode/clipboard（需 18991/18995 空闲）
 python scripts/interop_check.py --my-fp <fp> --official-fp <fp> --self-test
                             # 与原生 Flix 客户端的线格式互通（官方客户端在跑时）
+
+# 100 轮审计（修复/回归/模糊/A-B/工具链）
+python scripts/audit_rounds.py core   # R01-R50
+python scripts/audit_rounds.py cli    # R51-R73
+python scripts/audit_rounds.py fuzz   # R74-R83
+python scripts/audit_rounds.py ab     # R84-R93（基线 worktree D:\UserData\Temp\flix-baseline）
+python scripts/audit_rounds.py tools  # R94-R100
 ```
 
 ## 退出码约定
