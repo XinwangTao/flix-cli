@@ -262,6 +262,23 @@ powershell -File scripts\build_exe.ps1     # 产物：dist\flix.exe、dist\flixd
 （发现/配对/群/文件/剪贴板同步 + 网页界面）；`flix.exe` 含全部 CLI 子命令、
 `mcp`（AI 插件）与 `agent`（AI 自动应答）。状态仍在 `%APPDATA%\flixcli`。
 
+## macOS .app
+
+GitHub Actions 在 `macos-14`（Apple Silicon）和 `macos-15-intel`（Intel）上构建
+`RelayDesk-macos-<arch>.zip`，workflow 为 `.github/workflows/build-macos.yml`。
+本地构建：
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -e ".[gui]" pyinstaller
+pyinstaller RelayDesk-macos.spec --noconfirm --clean
+open dist/RelayDesk.app
+```
+
+应用未签名、未公证。首次打开若提示「无法验证开发者」：右键 → 打开，或执行
+`xattr -dr com.apple.quarantine /Applications/RelayDesk.app`。
+状态目录为 `~/Library/Application Support/flixcli`。
+
 ## 许可与反馈
 
 本项目以 [MIT](LICENSE) 许可发布。版本变更见 [CHANGELOG.md](CHANGELOG.md)，
