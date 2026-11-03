@@ -23,12 +23,66 @@ OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(r"D:\UserData\Temp\flix-u
 
 sys.path.insert(0, str(ROOT / "src"))
 
+from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtGui import QColor, QImage, QLinearGradient, QPainter, QRadialGradient
 from PySide6.QtWidgets import QApplication
 
 from flixcli import gui
 
+# Shots must not rewrite the user's real theme/material preferences.
+gui.PREFS_FILE = Path(os.environ.get("TEMP", ".")) / "flixcli-shot-prefs.json"
+
 APP = QApplication.instance() or QApplication([])
 NOW = int(time.time() * 1000)
+
+
+def wallpaper() -> QImage:
+    """A stand-in desktop so the frosted material is visible in the shots."""
+    image = QImage(1920, 1200, QImage.Format_ARGB32_Premultiplied)
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.Antialiasing)
+    gradient = QLinearGradient(0, 0, image.width(), image.height())
+    gradient.setColorAt(0.0, QColor("#1b2233"))
+    gradient.setColorAt(0.45, QColor("#26384a"))
+    gradient.setColorAt(1.0, QColor("#141a26"))
+    painter.fillRect(image.rect(), gradient)
+    for x, y, radius, color in ((260, 240, 420, "#3f6fa8"),
+                                (1500, 300, 380, "#8a5b7a"),
+                                (900, 1000, 460, "#2f6b5f"),
+                                (1540, 1000, 300, "#6a6a8f")):
+        blob = QRadialGradient(x, y, radius)
+        inner = QColor(color)
+        inner.setAlpha(150)
+        blob.setColorAt(0.0, inner)
+        outer = QColor(color)
+        outer.setAlpha(0)
+        blob.setColorAt(1.0, outer)
+        painter.fillRect(image.rect(), blob)
+
+    # Mock application windows give the blur something to chew on; a flat
+    # gradient would make the material impossible to judge in a still.
+    for rect, bar, body in (((120, 150, 760, 520), "#e8e8ea", "#fbfbfc"),
+                            ((900, 380, 860, 620), "#20242e", "#2b303c"),
+                            ((380, 760, 620, 300), "#f2ede6", "#fffaf2")):
+        x, y, w, h = rect
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(body))
+        painter.drawRoundedRect(QRect(x, y, w, h), 10, 10)
+        painter.setBrush(QColor(bar))
+        painter.drawRoundedRect(QRect(x, y, w, 44), 10, 10)
+        painter.drawRect(QRect(x, y + 22, w, 22))
+        painter.setBrush(QColor("#8b94a6"))
+        for i in range(3):
+            painter.drawEllipse(QRect(x + 16 + i * 22, y + 16, 12, 12))
+        dark_body = QColor(body).lightness() < 128
+        painter.setBrush(QColor("#5b6678") if dark_body else QColor("#c9ccd2"))
+        for i in range(6):
+            painter.drawRect(QRect(x + 28, y + 80 + i * 46, w - 140 - i * 24, 12))
+            painter.drawRect(QRect(x + 28, y + 100 + i * 46, w - 240, 9))
+        painter.setBrush(QColor("#3f6fa8") if not dark_body else QColor("#4b8ed0"))
+        painter.drawRect(QRect(x + 28, y + 68, w - 56, 2))
+    painter.end()
+    return image
 
 ME = "3f9c2a8e-6d14-4b7a-9c2e-51a0b7d4e111"
 PEER = "8b1d5c7a-2e93-4f60-a8d1-77c4e9b2a222"
@@ -107,7 +161,7 @@ def shot(window, name: str, theme: str) -> None:
 
 def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
-    window = gui.MainWindow(19999)
+    window = gui.MainWindow(19999, snapshot=(wallpaper(), QPoint(0, 0)))
     window.timer.stop()
     # The constructor's probe would race the loop and flip the page offline.
     if window.worker is not None:
@@ -117,7 +171,9 @@ def main() -> int:
     window.apply_overview(window.payload)
     window.offline_mode = False
     window._sync_signal()
-    window.move(-5000, -5000)  # park it; fonts still enumerate on this platform
+    # On screen, because the material crops the still by the window's global
+    # position; grab() still renders without reading the actual framebuffer.
+    window.move(120, 90)
     window.show()
     APP.processEvents()
 

@@ -1,8 +1,10 @@
-"""RelayDesk desktop client — dark, frameless, three-column.
+"""RelayDesk desktop client — native Windows window, three-column layout.
 
-Presentation layer targets a modern Windows 11 look: frameless window with a
-custom title bar, native rounded corners, device avatars, layered surfaces.
-All state comes from flixd's loopback API; functional behavior is unchanged.
+Presentation follows Windows 11 desktop conventions: the system title bar,
+neutral surfaces and a status-bar readout. An optional frosted-glass material
+blurs a desktop snapshot behind the panes, in the spirit of Apple's Liquid
+Glass: translucency, saturation control and a soft top highlight, never a
+decorative hero page. All state comes from flixd's loopback API.
 """
 from __future__ import annotations
 
@@ -23,6 +25,7 @@ from PySide6.QtCore import (
     QPoint,
     QPropertyAnimation,
     QRect,
+    QRectF,
     QSize,
     Qt,
     QThread,
@@ -34,6 +37,8 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QFontMetrics,
+    QImage,
+    QLinearGradient,
     QPainter,
     QPalette,
     QPen,
@@ -45,6 +50,9 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QFrame,
+    QGraphicsBlurEffect,
+    QGraphicsPixmapItem,
+    QGraphicsScene,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -421,13 +429,241 @@ class TitleBar(QFrame):
         self._toggle_max()
 
 
+def system_transparency_enabled() -> bool:
+    """Windows' accessibility switch for transparency in the UI."""
+    if sys.platform != "win32":
+        return True
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as key:
+            value, _ = winreg.QueryValueEx(key, "EnableTransparency")
+        return bool(value)
+    except OSError:
+        return True
+
+
+def desktop_snapshot():
+    """Grab the composited desktop before our own window is mapped.
+
+    Returns ``(image, origin)`` in logical screen coordinates. The material is
+    rendered from this still rather than from DWM: on Windows the Mica/acrylic
+    attribute call succeeds for a Qt top-level window, but the surface stays
+    opaque (Qt's window is layered), so the backdrop never shows through.
+    """
+    app = QApplication.instance()
+    if app is None:
+        return None
+    screens = app.screens()
+    if not screens:
+        return None
+    union = QRect()
+    for screen in screens:
+        union = union.united(screen.geometry())
+    if union.isEmpty():
+        return None
+    image = QImage(union.size(), QImage.Format_ARGB32_Premultiplied)
+    image.fill(Qt.black)
+    painter = QPainter(image)
+    drawn = False
+    for screen in screens:
+        pixmap = screen.grabWindow(0)
+        if pixmap.isNull():
+            continue
+        geometry = screen.geometry()
+        painter.drawImage(QRect(geometry.topLeft() - union.topLeft(), geometry.size()),
+                          pixmap.toImage())
+        drawn = True
+    painter.end()
+    return (image, union.topLeft()) if drawn else None
+
+
+def blur_image(image: QImage, radius: float) -> QImage:
+    scene = QGraphicsScene()
+    item = QGraphicsPixmapItem(QPixmap.fromImage(image))
+    effect = QGraphicsBlurEffect()
+    effect.setBlurRadius(radius)
+    effect.setBlurHints(QGraphicsBlurEffect.BlurHint.QualityHint)
+    item.setGraphicsEffect(effect)
+    scene.addItem(item)
+    out = QImage(image.size(), QImage.Format_ARGB32_Premultiplied)
+    out.fill(Qt.transparent)
+    painter = QPainter(out)
+    scene.render(painter, QRectF(out.rect()), QRectF(image.rect()))
+    painter.end()
+    return out
+
+
+class GlassBackdrop(QWidget):
+    """The window's backdrop: a blurred desktop still, tinted per theme.
+
+    Liquid-glass cues are kept restrained: a wide blur, a theme tint for
+    contrast, a saturation lift and a faint top highlight. No gradients as
+    decoration and no floating cards — the panes above stay flat and
+    functional.
+    """
+
+    SHRINK = 4  # blur at quarter resolution; the upscale hides the loss
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("glassRoot")
+        self._source: QImage | None = None
+        self._origin = QPoint(0, 0)
+        self._tint = QColor("#202020")
+        self._tint_alpha = 150
+        self._enabled = False
+        self._cache: QPixmap | None = None
+        self._cache_key = None
+        # Blurring a maximized window costs tens of milliseconds; do it once
+        # the resize/move settles instead of on every paint.
+        self._rebuild = QTimer(self)
+        self._rebuild.setSingleShot(True)
+        self._rebuild.setInterval(80)
+        self._rebuild.timeout.connect(self._rebuild_cache)
+
+    def has_source(self) -> bool:
+        return self._source is not None and not self._source.isNull()
+
+    def set_snapshot(self, snapshot) -> None:
+        if snapshot:
+            self._source, self._origin = snapshot
+        self._invalidate()
+
+    def set_material(self, tint: QColor, alpha: int, enabled: bool) -> None:
+        self._tint = QColor(tint)
+        self._tint_alpha = int(alpha)
+        self._enabled = bool(enabled)
+        self._invalidate()
+
+    def _invalidate(self) -> None:
+        self._cache_key = None
+        self._cache = None
+        self.update()
+
+    def _crop(self):
+        if not self._enabled or not self.has_source():
+            return None
+        size = self.size()
+        if size.isEmpty():
+            return None
+        offset = self.mapToGlobal(QPoint(0, 0)) - self._origin
+        canvas = QImage(size, QImage.Format_ARGB32_Premultiplied)
+        canvas.fill(self._tint)
+        painter = QPainter(canvas)
+        painter.drawImage(QPoint(0, 0), self._source, QRect(offset, size))
+        painter.end()
+        return canvas
+
+    def _render(self):
+        crop = self._crop()
+        if crop is None:
+            return None
+        width, height = crop.width(), crop.height()
+        small = crop.scaled(max(1, width // self.SHRINK), max(1, height // self.SHRINK),
+                            Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        small = blur_image(small, 9.0)
+        canvas = small.scaled(width, height, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        base = canvas.copy()
+        # Bleed a grayscale copy into the blur so the desktop reads as a
+        # material instead of a picture competing with the text. Qt has no
+        # HSL saturation blend mode; this is the cheap equivalent.
+        gray = canvas.convertToFormat(QImage.Format_Grayscale8).convertToFormat(
+            QImage.Format_ARGB32_Premultiplied)
+        painter = QPainter(canvas)
+        # HIG asks for a 1.2-1.5x saturation boost so colors stay lively
+        # through the material; overlay with the blur is the cheap Qt
+        # approximation. Only enough gray to keep text from fighting the
+        # wallpaper bleeds in.
+        painter.setOpacity(0.15)
+        painter.drawImage(0, 0, gray)
+        painter.setOpacity(0.2)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Overlay)
+        painter.drawImage(0, 0, base)
+        painter.setOpacity(0.35)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SoftLight)
+        painter.drawImage(0, 0, base)
+        tint = QColor(self._tint)
+        if tint.lightness() < 128:
+            # A dark desktop under a dark tint is otherwise a flat sheet;
+            # screen-blend the blur back so the material keeps its glow.
+            painter.setOpacity(0.35)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Screen)
+            painter.drawImage(0, 0, base)
+        painter.setOpacity(1.0)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        dark = tint.lightness() < 128
+        alpha = self._tint_alpha
+        if dark:
+            # A bright window behind a dark theme would otherwise turn the
+            # rail and sidebar into a washed-out sheet. Deepen the tint in
+            # proportion to how bright the desktop actually is, so the
+            # material looks the same whatever is behind the window.
+            probe = small.scaled(8, 8, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            samples = [probe.pixelColor(x, y).lightness()
+                       for y in range(probe.height()) for x in range(probe.width())]
+            mean = sum(samples) / max(1, len(samples))
+            alpha = min(255, int(alpha + max(0.0, (mean - 70) * 0.6)))
+        tint.setAlpha(alpha)
+        painter.fillRect(canvas.rect(), tint)
+        highlight = QLinearGradient(0, 0, 0, height * 0.7)
+        highlight.setColorAt(0.0, QColor(255, 255, 255, 40 if dark else 48))
+        highlight.setColorAt(1.0, QColor(255, 255, 255, 0))
+        painter.fillRect(canvas.rect(), highlight)
+        # A single soft specular band: the one liquid-glass cue that still
+        # reads when the desktop behind is dark and low-contrast.
+        sheen = QLinearGradient(0, 0, width * 0.9, height)
+        sheen.setColorAt(0.0, QColor(255, 255, 255, 0))
+        sheen.setColorAt(0.38, QColor(255, 255, 255, 0))
+        sheen.setColorAt(0.5, QColor(255, 255, 255, 16 if dark else 24))
+        sheen.setColorAt(0.62, QColor(255, 255, 255, 0))
+        sheen.setColorAt(1.0, QColor(255, 255, 255, 0))
+        painter.fillRect(canvas.rect(), sheen)
+        painter.end()
+        return QPixmap.fromImage(canvas)
+
+    def _cache_signature(self):
+        return (self.size(), self.mapToGlobal(QPoint(0, 0)), self._enabled,
+                self._tint.rgba(), self._tint_alpha)
+
+    def _rebuild_cache(self):
+        self._cache_key = self._cache_signature()
+        try:
+            self._cache = self._render()
+        except Exception:
+            # An exception escaping a paint handler aborts the process;
+            # a flat tint is always an acceptable fallback.
+            self._cache = None
+        self.update()
+
+    def paintEvent(self, event):
+        key = self._cache_signature()
+        if key != self._cache_key:
+            if self._cache is None:
+                self._rebuild_cache()
+            elif not self._rebuild.isActive():
+                self._rebuild.start()
+        painter = QPainter(self)
+        if self._cache is not None:
+            if self._cache.size() == self.size():
+                painter.drawPixmap(0, 0, self._cache)
+            else:
+                # The old material stretched reads better than a blank frame
+                # while the debounced rebuild waits for the drag to settle.
+                painter.drawPixmap(self.rect(), self._cache)
+        else:
+            painter.fillRect(self.rect(), self._tint)
+
+
 class MainWindow(QMainWindow):
     HOT_MARGIN = 6
 
-    def __init__(self, api_port: int = 8898):
+    def __init__(self, api_port: int = 8898, *, snapshot=None):
         super().__init__()
         self.api = LocalApi(api_port)
         self.api_port = api_port
+        self._snapshot = snapshot
+        self.glass = self._load_glass()
         self.worker: ApiThread | None = None
         self.action_worker: ApiThread | None = None
         self.payload: dict = {}
@@ -517,8 +753,9 @@ class MainWindow(QMainWindow):
     def _build(self):
         self._apply_app_font()
         self.theme = self._load_theme()
-        central = QWidget()
-        central.setObjectName("rootWindow")
+        central = GlassBackdrop()
+        self.glass_root = central
+        central.set_snapshot(self._snapshot)
         outer = QVBoxLayout(central)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -1238,8 +1475,10 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(20, 12, 20, 12)
         outer.setSpacing(8)
         scroll = QScrollArea()
+        scroll.setObjectName("settingsScroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
+        scroll.viewport().setAutoFillBackground(False)
         scroll.setMaximumWidth(860)
         canvas = QWidget()
         canvas.setObjectName("page")
@@ -1300,12 +1539,32 @@ class MainWindow(QMainWindow):
             theme_row.addWidget(button)
         theme_row.addStretch()
         body.addLayout(theme_row)
+
+        glass_row = QHBoxLayout()
+        glass_row.setSpacing(8)
+        caption = QLabel("窗口材质")
+        caption.setObjectName("settingsKey")
+        caption.setFixedWidth(104)
+        glass_row.addWidget(caption)
+        self.glass_buttons = {}
+        for enabled, label in ((False, "标准"), (True, "毛玻璃")):
+            button = QPushButton(label)
+            button.setObjectName("themeChoice")
+            button.setCheckable(True)
+            button.setCursor(Qt.PointingHandCursor)
+            button.clicked.connect(lambda _c=False, on=enabled: self.set_glass(on))
+            self.glass_buttons[enabled] = button
+            glass_row.addWidget(button)
+        glass_row.addStretch()
+        body.addLayout(glass_row)
+
         self.notify_check = QCheckBox("桌面提醒：收到新消息时弹出提示")
         self.notify_check.setChecked(self._load_prefs().get("notify", True) is not False)
         self.notify_check.toggled.connect(self._toggle_notify)
         body.addWidget(self.notify_check)
-        hint = QLabel("主题立即应用到整个窗口，下次启动沿用")
+        hint = QLabel("主题和材质立即应用，下次启动沿用；毛玻璃会模糊窗口后面的桌面")
         hint.setObjectName("muted")
+        hint.setWordWrap(True)
         body.addWidget(hint)
         column.addWidget(card)
         column.addStretch()
@@ -1316,6 +1575,7 @@ class MainWindow(QMainWindow):
         self.settings_text.hide()
         column.addWidget(self.settings_text)
         self._sync_theme_button()
+        self._sync_glass_button()
         return page
 
     def _load_prefs(self) -> dict:
@@ -1350,9 +1610,31 @@ class MainWindow(QMainWindow):
                 pass
         return "dark"
 
+    def _load_glass(self) -> bool:
+        saved = self._load_prefs().get("glass")
+        if isinstance(saved, bool):
+            return saved
+        # Windows is the only platform where we can snapshot the desktop
+        # before the window maps. HIG accessibility: respect the system's
+        # "Reduce transparency" switch when the user has not chosen yet.
+        return sys.platform == "win32" and system_transparency_enabled()
+
+    def _glass_visible(self) -> bool:
+        root = getattr(self, "glass_root", None)
+        return bool(self.glass and root is not None and root.has_source())
+
     def apply_theme(self, theme: str):
         self.theme = "light" if theme == "light" else "dark"
-        self.setStyleSheet(styles_for(self.theme))
+        self._restyle()
+        self._save_prefs(theme=self.theme)
+
+    def set_glass(self, enabled: bool):
+        self.glass = bool(enabled)
+        self._restyle()
+        self._save_prefs(glass=self.glass)
+
+    def _restyle(self):
+        self.setStyleSheet(styles_for(self.theme, self._glass_visible()))
         # Widgets the sheet does not reach (menus, scroll viewports, dialogs)
         # follow the palette, so flip it too or they keep the old theme.
         app = QApplication.instance()
@@ -1367,10 +1649,19 @@ class MainWindow(QMainWindow):
             QWidget.update(widget)
         self._refresh_icons()
         self._sync_theme_button()
+        self._sync_glass_button()
+        self._sync_glass()
         self.update()
         self.repaint()
         self._sync_native_frame()
-        self._save_prefs(theme=self.theme)
+
+    def _sync_glass(self) -> None:
+        root = getattr(self, "glass_root", None)
+        if root is None:
+            return
+        colors = PALETTES[self.theme]
+        alpha = 40 if self.theme == "dark" else 52
+        root.set_material(QColor(colors["bg"]), alpha, self._glass_visible())
 
     def _refresh_icons(self) -> None:
         """Icons are baked pixmaps: redraw them from the active palette."""
@@ -1499,6 +1790,10 @@ class MainWindow(QMainWindow):
     def _sync_theme_button(self):
         for theme, button in getattr(self, "theme_buttons", {}).items():
             button.setChecked(theme == getattr(self, "theme", "dark"))
+
+    def _sync_glass_button(self):
+        for enabled, button in getattr(self, "glass_buttons", {}).items():
+            button.setChecked(bool(getattr(self, "glass", False)) == enabled)
 
     def _build_remote(self):
         page = QWidget(); page.setObjectName("page")
@@ -3046,7 +3341,9 @@ def main(argv: list[str] | None = None, *, api_port: int = 8898) -> int:
     app.setWindowIcon(logo_icon())
     app.setStyle("Fusion")
     app.setFont(QFont("Microsoft YaHei UI", 9))
-    window = MainWindow(api_port)
+    # Snapshot before the window maps, or the material would contain itself.
+    snapshot = desktop_snapshot() if sys.platform == "win32" else None
+    window = MainWindow(api_port, snapshot=snapshot)
     window.setWindowIcon(logo_icon())
     window.show()
     return app.exec()
@@ -3070,6 +3367,7 @@ PALETTES = {
         "info": "#7fb2e5", "focus": "#9cc2e8",
         "ok_soft": "#223229", "warn_soft": "#332d22", "danger_soft": "#3a2528",
         "menu_bg": "#2b2b2b", "header_bg": "#202020",
+        "status_bg": "#1f1f1f", "glass_bar": "#1f1f1f",
         "scroll": "#4a4a4a", "scroll_hi": "#6a6a6a",
         "icon": "#b0b0b0", "avatar_bg": "#3a4550", "avatar_fg": "#f0f0f0",
         "chip_bg": "#303030",
@@ -3088,11 +3386,31 @@ PALETTES = {
         "info": "#1f6fbf", "focus": "#2f6fa8",
         "ok_soft": "#e8f2ec", "warn_soft": "#f7f0df", "danger_soft": "#fbe9ea",
         "menu_bg": "#ffffff", "header_bg": "#f3f3f3",
+        "status_bg": "#eeeeee", "glass_bar": "#eeeeee",
         "scroll": "#c2c2c2", "scroll_hi": "#9a9a9a",
         "icon": "#5f5f5f", "avatar_bg": "#d8dde3", "avatar_fg": "#2b3540",
         "chip_bg": "#ececec",
     },
 }
+
+# Apple HIG liquid-glass layering: only the functional layer (rail, sidebar,
+# title/toolbar, status bar) is glass. Content surfaces stay opaque. The fill
+# runs 60-80% so text on the material keeps its contrast; larger panes such as
+# the sidebar sit at the opaque end.
+GLASS_ALPHA = {
+    "dark": {
+        "bg_rail": 140, "bg_side": 184, "glass_bar": 160, "surface_hi": 150,
+    },
+    "light": {
+        "bg_rail": 172, "bg_side": 202, "glass_bar": 184, "surface_hi": 168,
+    },
+}
+
+
+def _rgba(color: str, alpha: int) -> str:
+    value = QColor(color)
+    return (f"rgba({value.red()}, {value.green()}, {value.blue()}, "
+            f"{max(0, min(255, alpha)) / 255:.3f})")
 
 
 def palette_for(theme: str) -> QPalette:
@@ -3138,16 +3456,22 @@ def check_icon_path(color: str) -> str:
     return _CHECK_CACHE[color]
 
 
-def styles_for(theme: str) -> str:
+def styles_for(theme: str, glass: bool = False) -> str:
     """One authored sheet for both themes, filled from explicit tokens."""
-    tokens = dict(PALETTES["light" if theme == "light" else "dark"])
+    name = "light" if theme == "light" else "dark"
+    tokens = dict(PALETTES[name])
+    if glass:
+        for key, alpha in GLASS_ALPHA[name].items():
+            tokens[key] = _rgba(tokens[key], alpha)
     tokens["check_icon"] = check_icon_path(tokens["on_accent"])
     return Template(STYLES).substitute(tokens)
 
 
 STYLES = """
 * { font-family: "Segoe UI Variable Text", "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI"; }
-QWidget#rootWindow, QWidget#page { background: $bg; color: $text; }
+QMainWindow#rootWindow { background: $bg; color: $text; }
+QWidget#glassRoot { background: transparent; }
+QWidget#page { background: $bg; color: $text; }
 QWidget { color: $text; }
 QWidget:disabled { color: $muted; }
 QLabel { background: transparent; }
@@ -3209,7 +3533,7 @@ QLabel#unknownText { color: $warn; font-size: 10.5px; font-weight: 600; }
 QLabel#staleText { color: $muted; font-size: 10.5px; font-weight: 600; }
 
 QFrame#workspace { background: $bg; }
-QFrame#sessionHeader { background: $bg; border-bottom: 1px solid $border; }
+QFrame#sessionHeader { background: $glass_bar; border-bottom: 1px solid $border; }
 QLabel#sessionTitle { color: $text; font-size: 14px; font-weight: 600; }
 QLabel#muted { color: $muted; font-size: 11.5px; }
 QLabel#sectionLabel { color: $muted; font-size: 11.5px; font-weight: 600; }
@@ -3226,7 +3550,9 @@ QLabel#signalText[state="warn"] { color: $warn; }
 QLabel#signalMeta { color: $muted; font-family: "Cascadia Mono", "Consolas";
     font-size: 10.5px; padding-left: 14px; padding-right: 8px; }
 
-QScrollArea#timeline { background: transparent; border: 0; }
+QScrollArea#timeline, QScrollArea#settingsScroll { background: transparent; border: 0; }
+QScrollArea#timeline > QWidget > QWidget,
+QScrollArea#settingsScroll > QWidget > QWidget { background: transparent; }
 QWidget#timelineCanvas { background: transparent; }
 QWidget#timelineRow { background: transparent; }
 QWidget#dayRow { background: transparent; }
@@ -3325,7 +3651,7 @@ QMenu { background: $menu_bg; color: $text; border: 1px solid $border_hi; border
     padding: 4px; }
 QMenu::item { padding: 6px 18px; border-radius: 2px; }
 QMenu::item:selected { background: $accent_soft; color: $text; }
-QStatusBar { background: $bg_rail; color: $muted; border-top: 1px solid $border;
+QStatusBar { background: $glass_bar; color: $muted; border-top: 1px solid $border;
     font-size: 11px; }
 QStatusBar::item { border: 0; }
 QScrollBar:vertical { background: transparent; width: 12px; margin: 0; }
