@@ -3,6 +3,12 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号与 GitHub Release 标签一致。
 可执行产物见 [Releases](https://github.com/XinwangTao/flix-cli/releases)。
 
+## [未发布]
+
+### 修复
+- `__version__` 一直停在 `0.1.0`，导致 `flix --version`、`flix self`、MCP `serverInfo` 都报错版本；
+  现与 `pyproject.toml` 对齐（`tests/test_version.py` 防止再漂移）。
+
 ## [v2.2.1] - 2026-10-30
 
 ### 修复
