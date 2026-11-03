@@ -208,8 +208,15 @@ class StylesheetTests(unittest.TestCase):
                  ("r_xs", "r_sm", "r_md", "r_lg", "r_xl")]
         self.assertEqual(radii, sorted(radii))
         sizes = [float(scale[name][:-2]) for name in
-                 ("fs_xs", "fs_sm", "fs_md", "fs_base", "fs_lg", "fs_xl")]
+                 ("fs_xs", "fs_sm", "fs_md", "fs_base", "fs_lg", "fs_display",
+                  "fs_xl")]
         self.assertEqual(sizes, sorted(sizes))
+
+    def test_type_sizes_come_from_the_ramp(self):
+        # A stray "font-size: 19px" is how a type scale quietly stops being a
+        # scale; the sheet is expected to reference tokens only.
+        strays = re.findall(r"font-size:\s*([\d.]+px)", gui_module.STYLES)
+        self.assertEqual(strays, [], f"literal font sizes in the sheet: {strays}")
 
 
 if __name__ == "__main__":

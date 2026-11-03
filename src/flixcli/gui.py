@@ -2541,7 +2541,8 @@ SCALE = {
     "r_xs": "6px", "r_sm": "8px", "r_md": "10px", "r_lg": "14px",
     "r_xl": "18px", "r_pill": "999px",
     "fs_xs": "10.5px", "fs_sm": "11.5px", "fs_md": "12.5px",
-    "fs_base": "13px", "fs_lg": "15px", "fs_xl": "20px",
+    "fs_base": "13px", "fs_lg": "15px", "fs_display": "19px",
+    "fs_xl": "20px",
 }
 
 
@@ -2662,12 +2663,12 @@ QPushButton#railButton:checked {
     background: $accent_soft; border-color: $accent_line;
 }
 QPushButton#railButton:focus { border-color: $accent; }
-QLabel#connectionDot { color: $offline; font-size: 10px; }
+QLabel#connectionDot { color: $offline; font-size: $fs_xs; }
 QLabel#connectionDot[online="true"] { color: $online; }
 
 /* --------------------------------------------------------------- sidebar */
 QFrame#sidebar { background: $bg_side; border-right: 1px solid $border; }
-QLabel#brand { color: $text; font-size: 16px; font-weight: 700; }
+QLabel#brand { color: $text; font-size: $fs_lg; font-weight: 700; }
 QLabel#brandSub { color: $muted; font-size: $fs_sm; }
 QLabel#sidebarTitle {
     color: $muted; font-size: $fs_xs; font-weight: 700; padding: 6px 2px 0 2px;
@@ -2703,8 +2704,8 @@ QListWidget#entityList::item:selected {
 QFrame#entityCard { background: transparent; }
 QLabel#entityName { color: $text; font-size: $fs_base; font-weight: 600; }
 QLabel#entitySub { color: $muted; font-size: $fs_sm; }
-QLabel#onlineDot { color: $online; font-size: 10px; }
-QLabel#offlineDot { color: $offline; font-size: 10px; }
+QLabel#onlineDot { color: $online; font-size: $fs_xs; }
+QLabel#offlineDot { color: $offline; font-size: $fs_xs; }
 
 /* ------------------------------------------------------------- workspace */
 QFrame#workspace { background: $bg; }
@@ -2712,7 +2713,7 @@ QFrame#sessionHeader { background: $bg; border-bottom: 1px solid $border; }
 QLabel#sessionTitle { color: $text; font-size: $fs_lg; font-weight: 600; }
 QLabel#muted { color: $muted; font-size: $fs_sm; }
 QLabel#pageTitle { color: $text; font-size: $fs_xl; font-weight: 700; }
-QLabel#emptyTitle { color: $text; font-size: 19px; font-weight: 600; }
+QLabel#emptyTitle { color: $text; font-size: $fs_display; font-weight: 600; }
 QLabel#emptyNote { color: $muted; font-size: $fs_md; }
 QFrame#haloBadge {
     background: qradialgradient(cx:0.5, cy:0.5, radius:0.72, fx:0.5, fy:0.5,
@@ -2759,7 +2760,7 @@ QFrame#bubbleOut QLabel#bubbleMeta { color: $on_accent_meta; }
 QFrame#composer {
     background: $surface; border: 1px solid $border; border-radius: $r_lg;
 }
-QFrame#composer[active="true"] { border-color: $accent_line; }
+QFrame#composer[active="true"] { border-color: $accent; }
 QTextEdit#composerEdit {
     background: transparent; border: 0; color: $text; font-size: $fs_base;
     selection-background-color: $accent; selection-color: $on_accent;
