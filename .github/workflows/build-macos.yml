@@ -65,6 +65,10 @@ jobs:
       - name: Build .app
         run: pyinstaller RelayDesk-macos.spec --noconfirm --clean
 
+      - name: Smoke test .app
+        run: |
+          QT_QPA_PLATFORM=offscreen ./dist/RelayDesk.app/Contents/MacOS/RelayDesk --version
+
       - name: Package
         run: |
           ditto -c -k --sequesterRsrc --keepParent dist/RelayDesk.app \
