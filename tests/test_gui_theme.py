@@ -65,6 +65,20 @@ def flatten(color: str, background: str) -> str:
     return "#%02x%02x%02x" % tuple(over)
 
 
+def _glyph_ink(button) -> str:
+    """Dominant opaque colour of a button icon, as the eye would read it."""
+    from PySide6.QtGui import QColor
+
+    image = button.icon().pixmap(16, 16).toImage()
+    counts: dict[str, int] = {}
+    for y in range(image.height()):
+        for x in range(image.width()):
+            colour = QColor(image.pixelColor(x, y))
+            if colour.alpha() > 200:
+                counts[colour.name()] = counts.get(colour.name(), 0) + 1
+    return max(counts, key=counts.get) if counts else ""
+
+
 @unittest.skipIf(gui_module is None, "PySide6 is not installed")
 class PaletteTests(unittest.TestCase):
     AA_TEXT = 4.5
@@ -175,6 +189,7 @@ class PaletteTests(unittest.TestCase):
 
 @unittest.skipIf(gui_module is None, "PySide6 is not installed")
 class StylesheetTests(unittest.TestCase):
+    AA_TEXT = 4.5
     def test_every_token_resolves(self):
         for theme in ("dark", "light"):
             with self.subTest(theme=theme):
@@ -211,6 +226,38 @@ class StylesheetTests(unittest.TestCase):
                  ("fs_xs", "fs_sm", "fs_md", "fs_base", "fs_lg", "fs_display",
                   "fs_xl")]
         self.assertEqual(sizes, sorted(sizes))
+
+    def test_close_button_ink_survives_its_red_hover(self):
+        """The title bar close button paints $danger on hover.
+
+        Its glyph is a baked pixmap, so QSS cannot recolour it: if the resting
+        grey is left in place it disappears against the red.
+        """
+        try:
+            from PySide6.QtGui import QColor, QEnterEvent
+            from PySide6.QtCore import QEvent, QPointF
+            from PySide6.QtWidgets import QApplication
+        except ImportError:  # pragma: no cover
+            self.skipTest("PySide6 widgets unavailable")
+        app = QApplication.instance() or QApplication([])  # noqa: F841
+        window = gui_module.MainWindow()
+        button = window.title_bar.btn_close
+        point = QPointF(1, 1)
+
+        for theme in ("dark", "light"):
+            window.apply_theme(theme)
+            tokens = gui_module.PALETTES[theme]
+            resting = _glyph_ink(button)
+            with self.subTest(theme=theme, state="resting"):
+                self.assertEqual(resting, tokens["muted"])
+            button.enterEvent(QEnterEvent(point, point, point))
+            with self.subTest(theme=theme, state="hover"):
+                self.assertEqual(_glyph_ink(button), tokens["on_accent"])
+                self.assertGreaterEqual(
+                    contrast(tokens["on_accent"], tokens["danger"]), self.AA_TEXT)
+            button.leaveEvent(QEvent(QEvent.Leave))
+            with self.subTest(theme=theme, state="restored"):
+                self.assertEqual(_glyph_ink(button), resting)
 
     def test_type_sizes_come_from_the_ramp(self):
         # A stray "font-size: 19px" is how a type scale quietly stops being a

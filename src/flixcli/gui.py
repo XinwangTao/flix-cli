@@ -312,6 +312,35 @@ class Avatar(QLabel):
         self.setPixmap(pm)
 
 
+class _HoverIconButton(QPushButton):
+    """A window button whose glyph changes ink while it is hovered.
+
+    QSS can restyle a background on :hover but cannot recolour an icon, and the
+    close button turns red on hover, where the resting grey would disappear.
+    """
+
+    def __init__(self, name: str, normal: str, size: int, hover: str):
+        super().__init__()
+        self._icon_size = size
+        self.set_icon(name, normal, hover)
+        self.setIconSize(QSize(size, size))
+
+    def set_icon(self, name: str, normal: str, hover: str) -> None:
+        """Redraw both inks: the palette was just swapped or the state changed."""
+        self._name = name
+        self._normal_color = normal
+        self._hover_color = hover
+        self.setIcon(icon(name, normal, self._icon_size))
+
+    def enterEvent(self, event):  # noqa: N802 - Qt naming
+        self.setIcon(icon(self._name, self._hover_color, self._icon_size))
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):  # noqa: N802 - Qt naming
+        self.setIcon(icon(self._name, self._normal_color, self._icon_size))
+        super().leaveEvent(event)
+
+
 class TitleBar(QFrame):
     """Custom title bar: drag, double-click maximize, window buttons."""
 
@@ -343,9 +372,15 @@ class TitleBar(QFrame):
             row.addWidget(b)
 
     def _win_button(self, icon_name: str, fn, danger: bool = False) -> QPushButton:
-        b = QPushButton()
+        if danger:
+            # Hover paints the frame with $danger, so the glyph has to flip to
+            # the ink that survives it (dark ink in dark mode, white in light).
+            b = _HoverIconButton(icon_name, self._icon_color, 15,
+                                 PALETTES[self.window.theme]["on_accent"])
+        else:
+            b = QPushButton()
+            b.setIcon(icon(icon_name, self._icon_color, 15))
         b.setObjectName("closeBtn" if danger else "winBtn")
-        b.setIcon(icon(icon_name, self._icon_color, 15))
         b.setIconSize(QSize(15, 15))
         b.setFixedSize(44, 42)
         b.setCursor(Qt.PointingHandCursor)
@@ -355,10 +390,11 @@ class TitleBar(QFrame):
     def refresh_icons(self, color: str) -> None:
         """Window buttons are pixmaps, so a theme switch must redraw them."""
         self._icon_color = color
+        hover = PALETTES[self.window.theme]["on_accent"]
         self.btn_min.setIcon(icon("min", color, 15))
         self.btn_max.setIcon(
             icon("restore" if self.window.isMaximized() else "max", color, 15))
-        self.btn_close.setIcon(icon("close", color, 15))
+        self.btn_close.set_icon("close", color, hover)
 
     def _minimize(self):
         self.window.showMinimized()
