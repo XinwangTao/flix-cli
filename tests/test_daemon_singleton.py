@@ -23,7 +23,9 @@ def _free_port() -> int:
 
 class DaemonSingletonTests(unittest.TestCase):
     def test_second_daemon_refuses_to_share_the_app_dir(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        # Windows can hold daemon.lock for a moment after the process ends;
+        # the temp dir is disposable, so a cleanup race must not fail the test.
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             appdata = Path(tmp) / "appdata"
             appdata.mkdir()
             dev_port, api_port = _free_port(), _free_port()
