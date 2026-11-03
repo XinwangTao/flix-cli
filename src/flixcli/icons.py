@@ -51,6 +51,9 @@ ICONS: dict[str, str] = {
     "restore": f'<rect x="5" y="8" width="11" height="11" rx="1.5" {_M}/>'
                f'<path d="M9 5h9a1.5 1.5 0 0 1 1.5 1.5V15" {_M}/>',
     "close": f'<path d="M6.5 6.5l11 11M17.5 6.5l-11 11" {_M}/>',
+    "refresh": f'<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" {_M}/>'
+               f'<path d="M21 3v5h-5" {_M}/>',
+    "plus": f'<path d="M12 5v14M5 12h14" {_M}/>',
 }
 
 LOGO_MARK = (
