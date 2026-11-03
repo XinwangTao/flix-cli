@@ -131,18 +131,19 @@ class Toast(QWidget):
         card.setGeometry(0, 0, TOAST_W, TOAST_H)
         card.setStyleSheet(
             f"#toastCard {{ background: {colors['menu_bg']};"
-            f" border: 1px solid {border}; border-radius: 14px; }}")
+            f" border: 1px solid {border}; border-radius: {SCALE['r_lg']}; }}")
         inner = QVBoxLayout(card)
         inner.setContentsMargins(16, 12, 16, 12)
         inner.setSpacing(4)
         head = QLabel(title)
-        head.setStyleSheet(f"color: {accent}; font-size: 12px; font-weight: 600;")
+        head.setStyleSheet(f"color: {accent}; font-size: {SCALE['fs_md']};"
+                           " font-weight: 600;")
         text = QLabel(body)
-        text.setStyleSheet(f"color: {fg}; font-size: 13px;")
+        text.setStyleSheet(f"color: {fg}; font-size: {SCALE['fs_base']};")
         text.setWordWrap(True)
         text.setMaximumHeight(40)
         hint = QLabel("点击打开 RelayDesk")
-        hint.setStyleSheet(f"color: {sub}; font-size: 11px;")
+        hint.setStyleSheet(f"color: {sub}; font-size: {SCALE['fs_sm']};")
         inner.addWidget(head)
         inner.addWidget(text, 1)
         inner.addWidget(hint)
