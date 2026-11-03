@@ -65,11 +65,12 @@ def flatten(color: str, background: str) -> str:
     return "#%02x%02x%02x" % tuple(over)
 
 
-def _glyph_ink(button) -> str:
-    """Dominant opaque colour of a button icon, as the eye would read it."""
+def _glyph_ink(widget) -> str:
+    """Dominant opaque colour of an icon, as the eye would read it."""
     from PySide6.QtGui import QColor
 
-    image = button.icon().pixmap(16, 16).toImage()
+    image = widget.icon().pixmap(16, 16).toImage() if hasattr(widget, "icon") \
+        else widget.pixmap().toImage()
     counts: dict[str, int] = {}
     for y in range(image.height()):
         for x in range(image.width()):
@@ -77,6 +78,12 @@ def _glyph_ink(button) -> str:
             if colour.alpha() > 200:
                 counts[colour.name()] = counts.get(colour.name(), 0) + 1
     return max(counts, key=counts.get) if counts else ""
+
+
+def _channel_distance(left: str, right: str) -> int:
+    """Largest per-channel gap; anti-aliased icons round by a unit or two."""
+    a, b = rgb(left), rgb(right)
+    return int(max(abs(x - y) for x, y in zip(a, b)))
 
 
 @unittest.skipIf(gui_module is None, "PySide6 is not installed")
@@ -258,6 +265,39 @@ class StylesheetTests(unittest.TestCase):
             button.leaveEvent(QEvent(QEvent.Leave))
             with self.subTest(theme=theme, state="restored"):
                 self.assertEqual(_glyph_ink(button), resting)
+
+    def test_file_glyph_follows_the_theme(self):
+        """A mounted file bubble bakes its glyph; a theme flip must recolour it.
+
+        Rebuilding the whole transcript would work too, but it fights the
+        scroll anchoring, so _refresh_icons repaints just those labels.
+        """
+        try:
+            from PySide6.QtGui import QColor
+            from PySide6.QtWidgets import QApplication, QLabel
+        except ImportError:  # pragma: no cover
+            self.skipTest("PySide6 widgets unavailable")
+        app = QApplication.instance() or QApplication([])  # noqa: F841
+        window = gui_module.MainWindow()
+        window.self_id = "me"
+        window.current = {"kind": "device", "key": "peer"}
+        window.payload = {"bubbles": [{
+            "id": "m1", "from": "peer", "to": "me", "type": 1,
+            "time": 1_740_000_000_000, "content": {"name": "a.log",
+                                                       "size": 12,
+                                                       "path": "/nope/a.log"},
+        }]}
+        window._timeline_signature = None
+        window.apply_theme("dark")
+        window.render_timeline()
+
+        glyphs = window._timeline_rows["msg:m1"].findChildren(QLabel, "fileGlyph")
+        self.assertEqual(len(glyphs), 1)
+        dark = _glyph_ink(glyphs[0])
+        window.apply_theme("light")
+        light = _glyph_ink(glyphs[0])
+        self.assertNotEqual(dark, light, "the glyph kept the old ink")
+        self.assertLess(_channel_distance(light, gui_module.PALETTES["light"]["icon"]), 4)
 
     def test_type_sizes_come_from_the_ramp(self):
         # A stray "font-size: 19px" is how a type scale quietly stops being a

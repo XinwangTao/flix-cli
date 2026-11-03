@@ -1083,11 +1083,6 @@ class MainWindow(QMainWindow):
             QWidget.update(widget)
         self._refresh_icons()
         self._apply_surfaces()
-        # Bubbles bake their file glyph at mount time, so drop the transcript
-        # cache: the next poll remounts the rows in the new palette.
-        self._timeline_signature = None
-        if getattr(self, "timeline", None) is not None:
-            self.render_timeline()
         self._sync_theme_button()
         self.update()
         self.repaint()
@@ -1121,6 +1116,12 @@ class MainWindow(QMainWindow):
         title = getattr(self, "title_bar", None)
         if title is not None:
             title.refresh_icons(colors["muted"])
+        # File bubbles bake their glyph when mounted. Recolouring just those
+        # labels beats rebuilding the transcript, which would fight the scroll
+        # anchoring for a purely cosmetic change.
+        for row in getattr(self, "_timeline_rows", {}).values():
+            for glyph in row.findChildren(QLabel, "fileGlyph"):
+                glyph.setPixmap(icon("file", colors["icon"], 16).pixmap(16, 16))
 
     def copy_settings_info(self):
         QApplication.clipboard().setText(self.settings_text.text())
@@ -1926,6 +1927,7 @@ class MainWindow(QMainWindow):
         head = QHBoxLayout()
         head.setSpacing(7)
         glyph = QLabel()
+        glyph.setObjectName("fileGlyph")
         glyph.setPixmap(icon("file", PALETTES[self.theme]["icon"], 16).pixmap(16, 16))
         glyph.setAlignment(Qt.AlignTop)
         head.addWidget(glyph, 0)

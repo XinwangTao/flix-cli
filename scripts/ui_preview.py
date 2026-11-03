@@ -32,17 +32,25 @@ NOW = 1_740_000_000_000
 def demo_payload() -> dict:
     bubbles = []
 
-    def add(sender: str, text: str, offset: int) -> None:
+    def add(sender: str, text: str, offset: int, kind: int = 0,
+            content=None) -> None:
         bubbles.append({
             "id": f"b{len(bubbles)}", "from": sender,
-            "to": PEER if sender == ME else ME, "type": 0,
-            "time": NOW + offset, "groupId": "", "content": text,
+            "to": PEER if sender == ME else ME, "type": kind,
+            "time": NOW + offset, "groupId": "",
+            "content": text if content is None else content,
         })
 
     add(PEER, "在吗？昨天那个 relay 的改动合并了吗", 0)
     add(ME, "合并了，刚推上去。", 60_000)
     add(PEER, "好，我这边拉一下。顺便问一下，群组同步的边界情况你测过没有？", 120_000)
     add(ME, "测过了，包括成员离线、重复投递和乱序到达三种情况。", 180_000)
+    # Same side, same type, inside the grouping window: these two must render
+    # as one group, which only a screenshot proves.
+    add(ME, "日志在这里：", 186_000)
+    add(ME, "", 190_000, kind=1,
+        content={"name": "relay-2025-02-20.log", "size": 48_231,
+                 "path": "/nonexistent/relay-2025-02-20.log"})
     add(PEER, "👍 那我看一下今天的构建产物。", 240_000)
     add(ME, "dist 里有两个，macOS 那个还在跑。", 300_000)
     return {
