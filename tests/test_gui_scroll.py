@@ -23,6 +23,12 @@ import flixcli.gui as gui  # noqa: E402
 
 APP = QApplication.instance() or QApplication([])
 
+# Isolate the window from any daemon running on the host: discovery would find
+# it and asynchronously replace the fake payload in the middle of an assertion.
+gui.LocalApi.discover = staticmethod(lambda port=0: None)
+gui.MainWindow.start_local_daemon = lambda self: None
+gui.MainWindow._discovery_done = lambda self, found: None
+
 ME = "fp-me"
 PEER = "fp-peer"
 OTHER = "fp-other"
@@ -37,9 +43,19 @@ def bubbles_for(peer: str, count: int = 40) -> list[dict]:
     ]
 
 
+def settle(window, ms: int = 150) -> None:
+    """Compute geometry first, then let the anchor re-assert timers run."""
+    layout = window.timeline_widget.layout()
+    if layout is not None:
+        layout.activate()
+    QTest.qWait(ms)
+
+
 def make_window() -> gui.MainWindow:
     window = gui.MainWindow(19999)  # nothing listening: refresh just fails
     window.timer.stop()
+    window.offline_mode = True
+    window._auto_start_tried = True
     window.resize(1000, 620)
     window.self_id = ME
     window.payload = {
@@ -52,7 +68,7 @@ def make_window() -> gui.MainWindow:
     window._timeline_signature = None
     window.show()
     window.render_current()   # puts the chat page on the stack, then renders
-    QTest.qWait(150)
+    settle(window, 200)
     return window
 
 
@@ -76,7 +92,7 @@ class ScrollPolicyTests(unittest.TestCase):
         QTest.qWait(30)
         self.window.current = {"kind": "device", "key": OTHER}
         self.window.render_current()
-        QTest.qWait(150)
+        settle(self.window)
         self.assert_at_tail()
 
     def test_scroll_up_is_not_yanked_by_new_message(self):
@@ -87,10 +103,14 @@ class ScrollPolicyTests(unittest.TestCase):
             {"id": "new-1", "from": PEER, "to": ME, "type": 0,
              "time": 1_700_000_900_000, "groupId": "", "content": "新消息"})
         self.window.render_timeline()
-        QTest.qWait(150)
+        settle(self.window)
         self.assertEqual(self.bar.value(), before)
         self.assertLess(self.bar.value(), self.bar.maximum())
-        self.assertTrue(self.window.new_msg_btn.isVisible())
+        self.assertTrue(
+            self.window.new_msg_btn.isVisible(),
+            f"value={self.bar.value()} max={self.bar.maximum()} "
+            f"follow={self.window._follow_tail} user={self.window._user_scrolled} "
+            f"text={self.window.new_msg_btn.text()!r}")
         self.assertIn("新消息", self.window.new_msg_btn.text())
 
     def test_reclick_open_conversation_returns_to_newest(self):
@@ -102,7 +122,7 @@ class ScrollPolicyTests(unittest.TestCase):
                 return {"kind": "device", "key": PEER}
 
         self.window._on_entity_clicked(Item())
-        QTest.qWait(150)
+        settle(self.window)
         self.assert_at_tail()
         self.assertFalse(self.window.new_msg_btn.isVisible())
 
@@ -117,14 +137,14 @@ class ScrollPolicyTests(unittest.TestCase):
 
         QTest.mouseClick(self.window.entity_list.viewport(), Qt.LeftButton,
                          pos=rect.center())
-        QTest.qWait(150)
+        settle(self.window)
         self.assert_at_tail()
 
         self.bar.setValue(0)
         QTest.qWait(30)
         QTest.mouseClick(self.window.entity_list.viewport(), Qt.LeftButton,
                          pos=rect.center())
-        QTest.qWait(150)
+        settle(self.window)
         self.assert_at_tail()
 
 
@@ -133,16 +153,24 @@ class ScrollPolicyTests(unittest.TestCase):
         QTest.qWait(30)
         anchor_key, anchor_offset = self.window._scroll_anchor()
         widget = self.window._timeline_rows[anchor_key]
-        self.assertEqual(widget.y() - self.bar.value(), anchor_offset)
+        self.assertEqual(
+            widget.y() - self.bar.value(), anchor_offset,
+            f"anchor={anchor_key} y={widget.y()} value={self.bar.value()} "
+            f"max={self.bar.maximum()} follow={self.window._follow_tail} "
+            f"user={self.window._user_scrolled}")
 
         self.window.payload["bubbles"].insert(0, {
             "id": "new-tail", "from": PEER, "to": ME, "type": 0,
             "time": 1_700_000_900_000, "groupId": "", "content": "新消息"})
         self.window.render_timeline()
-        QTest.qWait(150)
+        settle(self.window, 450)
 
         widget = self.window._timeline_rows[anchor_key]
-        self.assertEqual(widget.y() - self.bar.value(), anchor_offset)
+        self.assertEqual(
+            widget.y() - self.bar.value(), anchor_offset,
+            f"anchor={anchor_key} y={widget.y()} value={self.bar.value()} "
+            f"max={self.bar.maximum()} follow={self.window._follow_tail} "
+            f"user={self.window._user_scrolled}")
 
     def test_status_change_remounts_only_the_changed_row(self):
         files = []
@@ -158,15 +186,20 @@ class ScrollPolicyTests(unittest.TestCase):
                                "devices": [{"fingerprint": PEER, "alias": "TABLET"}]}
         self.window._timeline_signature = None
         self.window.render_timeline()
-        QTest.qWait(150)
+        settle(self.window)
         before = {key: id(row) for key, row in self.window._timeline_rows.items()}
+        self.assertIn("msg:f3", before,
+                      f"rows={sorted(before)} sel={self.window.timeline_selection()!r} "
+                      f"rebuild={self.window._timeline_rebuilding}")
 
         files[3]["content"]["progress"] = 0.7
         self.window.payload = {"bubbles": list(reversed(files)),
                                "devices": self.window.payload["devices"]}
         self.window.render_timeline()
-        QTest.qWait(150)
+        settle(self.window, 450)
         after = {key: id(row) for key, row in self.window._timeline_rows.items()}
+        self.assertIn("msg:f3", after,
+                      f"after={sorted(after)} sel={self.window.timeline_selection()!r}")
 
         self.assertNotEqual(after["msg:f3"], before["msg:f3"])
         for key in before:
@@ -183,7 +216,7 @@ class ScrollPolicyTests(unittest.TestCase):
         self.window.payload = {"bubbles": bubbles, "devices": devices}
         self.window._timeline_signature = None
         self.window.render_timeline()
-        QTest.qWait(150)
+        settle(self.window)
         before = {key: id(row) for key, row in self.window._timeline_rows.items()}
 
         self.bar.setValue(self.bar.maximum() // 2)
@@ -195,7 +228,7 @@ class ScrollPolicyTests(unittest.TestCase):
         self.window.payload = {"bubbles": [newest] + bubbles[:-1],
                                "devices": devices}
         self.window.render_timeline()
-        QTest.qWait(150)
+        settle(self.window, 450)
         after = {key: id(row) for key, row in self.window._timeline_rows.items()}
 
         self.assertNotIn("msg:m99", after)
@@ -205,7 +238,11 @@ class ScrollPolicyTests(unittest.TestCase):
                 self.assertEqual(after[key], before[key],
                                  f"{key} must keep its widget")
         widget = self.window._timeline_rows[anchor_key]
-        self.assertEqual(widget.y() - self.bar.value(), anchor_offset)
+        self.assertEqual(
+            widget.y() - self.bar.value(), anchor_offset,
+            f"anchor={anchor_key} y={widget.y()} value={self.bar.value()} "
+            f"max={self.bar.maximum()} follow={self.window._follow_tail} "
+            f"user={self.window._user_scrolled}")
 
 
 if __name__ == "__main__":

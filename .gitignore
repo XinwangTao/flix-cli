@@ -53,4 +53,5 @@ build_new_flixd/
 # 打包变体与临时产物（build_vNNN/、dist_rd_new/ 等一次性构建目录）
 build_*/
 dist_*/
+dist-macos/
 .pytest_cache/

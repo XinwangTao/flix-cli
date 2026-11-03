@@ -16,7 +16,17 @@ from pathlib import Path
 
 from . import DEVICE_PORT, is_port_text, local_ipv4s
 
-APP_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / "flixcli"
+def _default_app_dir() -> Path:
+    """Per-user state dir: APPDATA on Windows, Application Support on macOS."""
+    appdata = os.environ.get("APPDATA", "").strip()
+    if appdata:
+        return Path(appdata) / "flixcli"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "flixcli"
+    return Path.home() / "flixcli"
+
+
+APP_DIR = _default_app_dir()
 # APPDATA occasionally points at the state dir itself (tests, shell exports);
 # appending "flixcli" again would mint a second identity under flixcli/flixcli.
 if APP_DIR.parent.name.lower() == "flixcli":
@@ -683,6 +693,17 @@ def _adopt_legacy_identity() -> dict | None:
     return adopted
 
 
+def _platform_identity_fields() -> dict:
+    if sys.platform == "darwin":
+        return {"alias": os.environ.get("USER") or "RelayDesk",
+                "deviceModel": "Mac", "os": "macos"}
+    if os.name == "nt":
+        return {"alias": os.environ.get("COMPUTERNAME", "flixd"),
+                "deviceModel": "Windows", "os": "windows"}
+    return {"alias": os.environ.get("HOSTNAME") or os.environ.get("USER") or "flixd",
+            "deviceModel": "Linux", "os": "linux"}
+
+
 def load_or_create_identity(store: Store) -> dict:
     """fingerprint (uuid4) + alias; mirrors deviceModal fields.
 
@@ -694,7 +715,6 @@ def load_or_create_identity(store: Store) -> dict:
     ident = p.get("identity")
     if _valid_identity(ident):
         return ident
-
     def ensure(prefs: dict) -> dict:
         # Re-check under the lock: another process may have just created it.
         current = prefs.get("identity")
@@ -706,11 +726,9 @@ def load_or_create_identity(store: Store) -> dict:
             return prefs
         prefs["identity"] = {
             "fingerprint": str(uuid.uuid4()),
-            "alias": os.environ.get("COMPUTERNAME", "flixd"),
-            "deviceModel": "Windows",
             "deviceType": "desktop",
-            "os": "windows",
             "created_at": int(time.time() * 1000),
+            **_platform_identity_fields(),
         }
         return prefs
 

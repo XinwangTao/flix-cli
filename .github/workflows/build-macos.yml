@@ -1,0 +1,84 @@
+name: Build macOS app
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+    branches: [main]
+    paths:
+      - ".github/workflows/build-macos.yml"
+      - "src/**"
+      - "scripts/**"
+      - "assets/**"
+      - "RelayDesk-macos.spec"
+      - "pyproject.toml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14       # Apple Silicon
+            arch: arm64
+          - runner: macos-15-intel # Intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[gui]" pyinstaller
+          pip install pytest
+
+      - name: Qt selection probe
+        run: |
+          QT_QPA_PLATFORM=offscreen python - <<'PY'
+          from PySide6.QtWidgets import QApplication, QLabel
+          from PySide6.QtCore import Qt
+          app = QApplication([])
+          lab = QLabel("hello")
+          lab.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+          lab.show()
+          print("PROBE selectedText=", repr(lab.selectedText()),
+                "hasSelected=", lab.hasSelectedText())
+          PY
+
+      # GUI tests hang on the Intel runner (6h timeout observed on
+      # macos-15-intel). The same suite runs on arm64, Windows and Linux, so
+      # Intel gets the build without blocking the artifact on that runner.
+      - name: Unit tests (arm64)
+        if: matrix.arch == 'arm64'
+        run: pytest tests -q --ignore=tests/e2e.py
+
+      - name: Build .app
+        run: pyinstaller RelayDesk-macos.spec --noconfirm --clean
+
+      - name: Smoke test .app
+        run: |
+          QT_QPA_PLATFORM=offscreen ./dist/RelayDesk.app/Contents/MacOS/RelayDesk --version
+
+      - name: Package
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent dist/RelayDesk.app \
+            "RelayDesk-macos-${{ matrix.arch }}.zip"
+          shasum -a 256 "RelayDesk-macos-${{ matrix.arch }}.zip" | tee "RelayDesk-macos-${{ matrix.arch }}.zip.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RelayDesk-macos-${{ matrix.arch }}
+          path: |
+            RelayDesk-macos-${{ matrix.arch }}.zip
+            RelayDesk-macos-${{ matrix.arch }}.zip.sha256
+          if-no-files-found: error

@@ -10,7 +10,10 @@ import ctypes
 import sys
 import time
 from collections import deque
-from ctypes import wintypes
+try:
+    from ctypes import wintypes
+except (ImportError, ValueError):  # macOS/Linux: ctypes.wintypes is Windows-only
+    wintypes = None
 
 
 class ControlError(ValueError):
