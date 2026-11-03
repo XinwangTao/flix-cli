@@ -10,6 +10,7 @@ import ctypes
 import json
 import os
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -22,16 +23,17 @@ from pathlib import Path
 from string import Template
 
 from PySide6.QtCore import (
-    QEasingCurve, QEvent, QPoint, QPropertyAnimation, QSize, QThread, QTimer, Qt, QUrl, Signal,
+    QEasingCurve, QEvent, QPoint, QPointF, QPropertyAnimation, QSize, QThread,
+    QTimer, Qt, QUrl, Signal,
 )
 from PySide6.QtGui import (
-    QAction, QColor, QDesktopServices, QFont, QPainter, QPalette, QPixmap,
+    QAction, QColor, QDesktopServices, QFont, QPainter, QPalette, QPen, QPixmap,
 )
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QPushButton,
-    QScrollArea, QSizePolicy, QStackedWidget, QStatusBar, QSystemTrayIcon, QTextEdit,
-    QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QDialog, QFileDialog, QFrame, QGraphicsDropShadowEffect,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
+    QMenu, QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QStatusBar,
+    QSystemTrayIcon, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from .icons import icon, logo_icon, logo_pixmap
@@ -116,29 +118,32 @@ class Toast(QWidget):
         self.setFixedSize(TOAST_W, TOAST_H)
         self._on_click = on_click
         self._closing = False
-        bg = "rgba(22,29,26,0.97)" if dark else "rgba(255,255,255,0.98)"
-        border = "rgba(255,255,255,0.10)" if dark else "rgba(27,34,30,0.10)"
-        fg = "#e9eeeb" if dark else "#1b221e"
-        sub = "#8a978f" if dark else "#5f6c66"
-        accent = "#4fc38f" if dark else "#1f7a5c"
+        # Toast shares the design tokens with the main window so a theme flip
+        # never leaves a mismatched card floating over the app.
+        colors = PALETTES["dark" if dark else "light"]
+        border = colors["border_hi"]
+        fg = colors["text"]
+        sub = colors["muted"]
+        accent = colors["accent"]
 
         card = QFrame(self)
         card.setObjectName("toastCard")
         card.setGeometry(0, 0, TOAST_W, TOAST_H)
         card.setStyleSheet(
-            f"#toastCard {{ background: {bg}; border: 1px solid {border};"
-            " border-radius: 12px; }")
+            f"#toastCard {{ background: {colors['menu_bg']};"
+            f" border: 1px solid {border}; border-radius: {SCALE['r_lg']}; }}")
         inner = QVBoxLayout(card)
         inner.setContentsMargins(16, 12, 16, 12)
         inner.setSpacing(4)
         head = QLabel(title)
-        head.setStyleSheet(f"color: {accent}; font-size: 12px; font-weight: 600;")
+        head.setStyleSheet(f"color: {accent}; font-size: {SCALE['fs_md']};"
+                           " font-weight: 600;")
         text = QLabel(body)
-        text.setStyleSheet(f"color: {fg}; font-size: 13px;")
+        text.setStyleSheet(f"color: {fg}; font-size: {SCALE['fs_base']};")
         text.setWordWrap(True)
         text.setMaximumHeight(40)
         hint = QLabel("点击打开 RelayDesk")
-        hint.setStyleSheet(f"color: {sub}; font-size: 11px;")
+        hint.setStyleSheet(f"color: {sub}; font-size: {SCALE['fs_sm']};")
         inner.addWidget(head)
         inner.addWidget(text, 1)
         inner.addWidget(hint)
@@ -261,11 +266,15 @@ class ApiThread(QThread):
             self.failed.emit(str(exc))
 
 
+# Avatar discs are intentionally dark in both themes so the white glyph stays
+# legible; they are not part of the light/dark token swap.
+AVATAR_TONES = ("#33473e", "#42574d", "#2a3b33")
+
+
 def avatar_color(key: str) -> QColor:
     # Three ink tones from the product's neutral family. Variation comes from
     # lightness, not a rainbow wheel: the list stays one palette.
-    tones = ("#33473e", "#42574d", "#2a3b33")
-    return QColor(tones[sum(key.encode()) % len(tones)])
+    return QColor(AVATAR_TONES[sum(key.encode()) % len(AVATAR_TONES)])
 
 
 class Avatar(QLabel):
@@ -304,6 +313,35 @@ class Avatar(QLabel):
         self.setPixmap(pm)
 
 
+class _HoverIconButton(QPushButton):
+    """A window button whose glyph changes ink while it is hovered.
+
+    QSS can restyle a background on :hover but cannot recolour an icon, and the
+    close button turns red on hover, where the resting grey would disappear.
+    """
+
+    def __init__(self, name: str, normal: str, size: int, hover: str):
+        super().__init__()
+        self._icon_size = size
+        self.set_icon(name, normal, hover)
+        self.setIconSize(QSize(size, size))
+
+    def set_icon(self, name: str, normal: str, hover: str) -> None:
+        """Redraw both inks: the palette was just swapped or the state changed."""
+        self._name = name
+        self._normal_color = normal
+        self._hover_color = hover
+        self.setIcon(icon(name, normal, self._icon_size))
+
+    def enterEvent(self, event):  # noqa: N802 - Qt naming
+        self.setIcon(icon(self._name, self._hover_color, self._icon_size))
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):  # noqa: N802 - Qt naming
+        self.setIcon(icon(self._name, self._normal_color, self._icon_size))
+        super().leaveEvent(event)
+
+
 class TitleBar(QFrame):
     """Custom title bar: drag, double-click maximize, window buttons."""
 
@@ -312,7 +350,7 @@ class TitleBar(QFrame):
         self.window = window
         self.setFixedHeight(42)
         self.setObjectName("titleBar")
-        self._icon_color = "#8fa39a"
+        self._icon_color = PALETTES["dark"]["muted"]
 
         row = QHBoxLayout(self)
         row.setContentsMargins(14, 0, 0, 0)
@@ -335,9 +373,15 @@ class TitleBar(QFrame):
             row.addWidget(b)
 
     def _win_button(self, icon_name: str, fn, danger: bool = False) -> QPushButton:
-        b = QPushButton()
+        if danger:
+            # Hover paints the frame with $danger, so the glyph has to flip to
+            # the ink that survives it (dark ink in dark mode, white in light).
+            b = _HoverIconButton(icon_name, self._icon_color, 15,
+                                 PALETTES[self.window.theme]["on_accent"])
+        else:
+            b = QPushButton()
+            b.setIcon(icon(icon_name, self._icon_color, 15))
         b.setObjectName("closeBtn" if danger else "winBtn")
-        b.setIcon(icon(icon_name, self._icon_color, 15))
         b.setIconSize(QSize(15, 15))
         b.setFixedSize(44, 42)
         b.setCursor(Qt.PointingHandCursor)
@@ -347,10 +391,11 @@ class TitleBar(QFrame):
     def refresh_icons(self, color: str) -> None:
         """Window buttons are pixmaps, so a theme switch must redraw them."""
         self._icon_color = color
+        hover = PALETTES[self.window.theme]["on_accent"]
         self.btn_min.setIcon(icon("min", color, 15))
         self.btn_max.setIcon(
             icon("restore" if self.window.isMaximized() else "max", color, 15))
-        self.btn_close.setIcon(icon("close", color, 15))
+        self.btn_close.set_icon("close", color, hover)
 
     def _minimize(self):
         self.window.showMinimized()
@@ -592,9 +637,9 @@ class MainWindow(QMainWindow):
     def _build_sidebar(self):
         panel = QFrame()
         panel.setObjectName("sidebar")
-        panel.setFixedWidth(312)
+        panel.setFixedWidth(320)
         box = QVBoxLayout(panel)
-        box.setContentsMargins(20, 20, 16, 14)
+        box.setContentsMargins(20, 18, 16, 12)
         box.setSpacing(12)
         title_row = QHBoxLayout()
         brand_box = QVBoxLayout()
@@ -606,20 +651,26 @@ class MainWindow(QMainWindow):
         brand_box.addWidget(brand_sub)
         title_row.addLayout(brand_box)
         title_row.addStretch()
-        refresh = QPushButton("↻")
+        refresh = QPushButton()
         refresh.setObjectName("roundBtn")
         refresh.setToolTip("重新广播并刷新")
         refresh.setAccessibleName("刷新设备列表")
-        refresh.setFixedSize(36, 36)
+        refresh.setFixedSize(32, 32)
+        refresh.setIconSize(QSize(15, 15))
+        refresh.setIcon(icon("refresh", PALETTES[self.theme]["icon"], 15))
         refresh.setCursor(Qt.PointingHandCursor)
         refresh.clicked.connect(lambda: (self.refresh(), toast_hint(self, "已刷新")))
-        add = QPushButton("＋")
+        add = QPushButton()
         add.setObjectName("roundBtn")
         add.setToolTip("新建群组 / 添加设备")
         add.setAccessibleName("新建群组或添加设备")
-        add.setFixedSize(36, 36)
+        add.setFixedSize(32, 32)
+        add.setIconSize(QSize(15, 15))
+        add.setIcon(icon("plus", PALETTES[self.theme]["icon"], 15))
         add.setCursor(Qt.PointingHandCursor)
         add.clicked.connect(self.show_add_menu)
+        self._round_icon_buttons = [(refresh, "refresh"), (add, "plus")]
+        title_row.setSpacing(6)
         title_row.addWidget(refresh)
         title_row.addWidget(add)
         box.addLayout(title_row)
@@ -670,12 +721,18 @@ class MainWindow(QMainWindow):
         logo = QLabel()
         logo.setPixmap(logo_pixmap(88))
         logo.setAlignment(Qt.AlignCenter)
+        badge = QFrame()
+        badge.setObjectName("haloBadge")
+        badge.setFixedSize(124, 124)
+        badge_box = QVBoxLayout(badge)
+        badge_box.setContentsMargins(0, 0, 0, 0)
+        badge_box.addWidget(logo)
         wrap = QHBoxLayout()
         wrap.addStretch()
-        wrap.addWidget(logo)
+        wrap.addWidget(badge)
         wrap.addStretch()
         box.addLayout(wrap)
-        box.addSpacing(16)
+        box.addSpacing(18)
         self.offline_title = QLabel("未连接本机服务")
         self.offline_title.setObjectName("emptyTitle")
         self.offline_title.setAlignment(Qt.AlignCenter)
@@ -683,7 +740,7 @@ class MainWindow(QMainWindow):
         self.offline_detail = QLabel(
             "默认端口 8898 可能被原生 Flix 占用。\n"
             "可一键启动本机服务（端口 18991/18998，与 Flix 共存）。")
-        self.offline_detail.setObjectName("muted")
+        self.offline_detail.setObjectName("emptyNote")
         self.offline_detail.setAlignment(Qt.AlignCenter)
         box.addWidget(self.offline_detail)
         box.addSpacing(18)
@@ -751,9 +808,9 @@ class MainWindow(QMainWindow):
     def _build_header(self):
         header = QFrame()
         header.setObjectName("sessionHeader")
-        header.setFixedHeight(72)
+        header.setFixedHeight(68)
         row = QHBoxLayout(header)
-        row.setContentsMargins(24, 10, 20, 10)
+        row.setContentsMargins(24, 8, 20, 8)
         row.setSpacing(12)
         self.session_avatar = Avatar("◉", "relaydesk", 40)
         row.addWidget(self.session_avatar)
@@ -771,12 +828,18 @@ class MainWindow(QMainWindow):
         self.session_search.setObjectName("sessionSearch")
         self.session_search.setPlaceholderText("在会话中搜索")
         self.session_search.setClearButtonEnabled(True)
-        self.session_search.setFixedWidth(220)
+        self.session_search.setFixedWidth(208)
         self.session_search.textChanged.connect(lambda _t: self.render_timeline())
         row.addWidget(self.session_search)
-        self.header_actions = QHBoxLayout()
-        self.header_actions.setSpacing(6)
-        row.addLayout(self.header_actions)
+        # One sealed container for the icon actions: four loose 1px borders in
+        # a row read as clutter, one segmented control reads as a tool bar.
+        toolbar = QFrame()
+        toolbar.setObjectName("headerToolbar")
+        self.header_toolbar = toolbar
+        self.header_actions = QHBoxLayout(toolbar)
+        self.header_actions.setContentsMargins(3, 3, 3, 3)
+        self.header_actions.setSpacing(2)
+        row.addWidget(toolbar)
         self._header_icon_buttons = []
         for glyph, tip, fn, icon_name in (
             ("▣", "发送文件", self.choose_files, "file"),
@@ -788,9 +851,9 @@ class MainWindow(QMainWindow):
             button.setObjectName("headerBtn")
             button.setToolTip(tip)
             button.setAccessibleName(tip)
-            button.setFixedSize(36, 36)
-            button.setIcon(icon(icon_name, PALETTES[self.theme]["icon"], 17))
-            button.setIconSize(QSize(17, 17))
+            button.setFixedSize(32, 32)
+            button.setIcon(icon(icon_name, PALETTES[self.theme]["icon"], 16))
+            button.setIconSize(QSize(16, 16))
             button.setCursor(Qt.PointingHandCursor)
             button.clicked.connect(fn)
             self._header_icon_buttons.append((button, icon_name))
@@ -802,21 +865,27 @@ class MainWindow(QMainWindow):
         page.setObjectName("page")
         box = QVBoxLayout(page)
         box.addStretch()
+        badge = QFrame()
+        badge.setObjectName("haloBadge")
+        badge.setFixedSize(124, 124)
+        badge_box = QVBoxLayout(badge)
+        badge_box.setContentsMargins(0, 0, 0, 0)
         halo = QLabel()
-        halo.setPixmap(logo_pixmap(96))
+        halo.setPixmap(logo_pixmap(88))
         halo.setAlignment(Qt.AlignCenter)
+        badge_box.addWidget(halo)
         wrap = QHBoxLayout()
         wrap.addStretch()
-        wrap.addWidget(halo)
+        wrap.addWidget(badge)
         wrap.addStretch()
         box.addLayout(wrap)
-        box.addSpacing(18)
+        box.addSpacing(20)
         title = QLabel("选择一台设备开始协作")
         title.setObjectName("emptyTitle")
         title.setAlignment(Qt.AlignCenter)
         box.addWidget(title)
         note = QLabel("发送文本、图片、文件，或发起经过批准的远程会话")
-        note.setObjectName("muted")
+        note.setObjectName("emptyNote")
         note.setAlignment(Qt.AlignCenter)
         box.addWidget(note)
         box.addStretch()
@@ -826,8 +895,8 @@ class MainWindow(QMainWindow):
         page = QWidget()
         page.setObjectName("page")
         box = QVBoxLayout(page)
-        box.setContentsMargins(24, 10, 24, 16)
-        box.setSpacing(0)
+        box.setContentsMargins(28, 12, 28, 18)
+        box.setSpacing(10)
         day_holder = QVBoxLayout()
         self.timeline = QScrollArea()
         self.timeline.setObjectName("timeline")
@@ -835,8 +904,8 @@ class MainWindow(QMainWindow):
         self.timeline_widget = QWidget()
         self.timeline_widget.setObjectName("timelineCanvas")
         self.timeline_layout = QVBoxLayout(self.timeline_widget)
-        self.timeline_layout.setContentsMargins(10, 16, 10, 16)
-        self.timeline_layout.setSpacing(10)
+        self.timeline_layout.setContentsMargins(14, 18, 14, 18)
+        self.timeline_layout.setSpacing(2)
         self.timeline_layout.addStretch()
         self.timeline.setWidget(self.timeline_widget)
         # Right-clicking the empty space of the transcript still offers copy:
@@ -866,6 +935,8 @@ class MainWindow(QMainWindow):
             widget.installEventFilter(self)
         composer = QFrame()
         composer.setObjectName("composer")
+        # Kept: apply_theme() re-shades this frame and flips the focus border.
+        self.composer_frame = composer
         cbox = QVBoxLayout(composer)
         cbox.setContentsMargins(14, 12, 14, 10)
         self.composer = QTextEdit()
@@ -939,6 +1010,8 @@ class MainWindow(QMainWindow):
         title = QLabel("设置与状态"); title.setObjectName("pageTitle"); box.addWidget(title)
         box.addSpacing(6)
         card = QFrame(); card.setObjectName("settingsCard")
+        card.setMaximumWidth(760)
+        self.settings_card = card
         card_box = QVBoxLayout(card); card_box.setContentsMargins(20, 18, 20, 18)
         self.settings_text = QLabel("等待服务配置")
         self.settings_text.setObjectName("settingsText")
@@ -1009,10 +1082,23 @@ class MainWindow(QMainWindow):
             # QListWidget/QListView override update(index); call the base one.
             QWidget.update(widget)
         self._refresh_icons()
+        self._apply_surfaces()
         self._sync_theme_button()
         self.update()
         self.repaint()
         self._save_prefs(theme=self.theme)
+
+    def _apply_surfaces(self) -> None:
+        """Re-shade the raised surfaces for the active theme.
+
+        Elevation is a QGraphicsEffect, not a stylesheet property, so a theme
+        flip has to rebuild it: light mode wants a soft warm grey, dark mode a
+        deeper black at a higher alpha.
+        """
+        for widget, blur, dy in ((getattr(self, "composer_frame", None), 24, 7),
+                                 (getattr(self, "settings_card", None), 18, 4)):
+            if widget is not None:
+                apply_shadow(widget, blur=blur, dy=dy, theme=self.theme)
 
     def _refresh_icons(self) -> None:
         """Icons are baked pixmaps: redraw them from the active palette."""
@@ -1022,12 +1108,20 @@ class MainWindow(QMainWindow):
             button.setIcon(icon(name, colors["icon"], 17))
         for button, name in getattr(self, "_chip_icon_buttons", []):
             button.setIcon(icon(name, colors["icon"], 16))
+        for button, name in getattr(self, "_round_icon_buttons", []):
+            button.setIcon(icon(name, colors["icon"], 15))
         send = getattr(self, "send_button", None)
         if send is not None:
             send.setIcon(icon("send", colors["on_accent"], 15))
         title = getattr(self, "title_bar", None)
         if title is not None:
             title.refresh_icons(colors["muted"])
+        # File bubbles bake their glyph when mounted. Recolouring just those
+        # labels beats rebuilding the transcript, which would fight the scroll
+        # anchoring for a purely cosmetic change.
+        for row in getattr(self, "_timeline_rows", {}).values():
+            for glyph in row.findChildren(QLabel, "fileGlyph"):
+                glyph.setPixmap(icon("file", colors["icon"], 16).pixmap(16, 16))
 
     def copy_settings_info(self):
         QApplication.clipboard().setText(self.settings_text.text())
@@ -1428,25 +1522,45 @@ class MainWindow(QMainWindow):
     # now mounted once and keyed by message id; each poll diffs the desired key
     # list against the mounted one and touches only what actually changed.
 
+    # Consecutive messages from the same side inside this window read as one
+    # group: only the tail bubble keeps a timestamp and the tail corner.
+    GROUP_WINDOW_MS = 3 * 60 * 1000
+
     def _timeline_items(self, messages: list[dict], query: str) -> list[tuple]:
         """Desired rows in display order: (key, kind, payload, signature)."""
         if not messages:
             text = ("没有匹配的消息" if query
                     else "还没有消息。发送一条文本或文件开始会话。")
             return [("empty", "empty", text, ("empty", text))]
+        prepared = [(bubble, datetime.fromtimestamp((bubble.get("time") or 0) / 1000))
+                    for bubble in messages]
+
+        def joined(previous, current) -> bool:
+            (before, before_ts), (after, after_ts) = previous, current
+            if before.get("from") != after.get("from"):
+                return False
+            if (before.get("type") or 0) != (after.get("type") or 0):
+                return False
+            if before_ts.date() != after_ts.date():
+                return False
+            gap = (after_ts - before_ts).total_seconds() * 1000
+            return 0 <= gap <= self.GROUP_WINDOW_MS
+
         items = []
         last_day = None
-        for bubble in messages:
-            ts = datetime.fromtimestamp((bubble.get("time") or 0) / 1000)
+        for index, (bubble, ts) in enumerate(prepared):
             if ts.date() != last_day:
                 last_day = ts.date()
                 items.append(("day:" + last_day.isoformat(), "day", last_day,
                               ("day", last_day)))
+            first = index == 0 or not joined(prepared[index - 1], prepared[index])
             content = bubble.get("content", "")
             signature = (bubble.get("id"), bubble.get("status"),
                          bubble.get("time"), self._search_text(bubble),
-                         repr(content) if isinstance(content, dict) else content)
-            items.append(("msg:" + str(bubble.get("id")), "msg", bubble,
+                         repr(content) if isinstance(content, dict) else content,
+                         first)
+            items.append(("msg:" + str(bubble.get("id")), "msg",
+                          {"bubble": bubble, "first": first},
                           signature))
         return items
 
@@ -1478,20 +1592,35 @@ class MainWindow(QMainWindow):
         key, kind, payload, signature = item
         if kind == "empty":
             widget = QLabel(payload)
-            widget.setObjectName("muted")
+            widget.setObjectName("timelineEmpty")
             widget.setAlignment(Qt.AlignCenter)
         elif kind == "day":
-            widget = QLabel(payload.strftime("%m 月 %d 日"))
-            widget.setObjectName("daySeparator")
-            widget.setAlignment(Qt.AlignCenter)
+            widget = QWidget()
+            row = QHBoxLayout(widget)
+            row.setContentsMargins(0, 12, 0, 12)
+            row.setSpacing(12)
+            pill = QLabel(payload.strftime("%m 月 %d 日"))
+            pill.setObjectName("daySeparator")
+            pill.setAlignment(Qt.AlignCenter)
+            left = QFrame()
+            left.setObjectName("dayRule")
+            left.setFixedHeight(1)
+            right = QFrame()
+            right.setObjectName("dayRule")
+            right.setFixedHeight(1)
+            row.addWidget(left, 1)
+            row.addWidget(pill, 0)
+            row.addWidget(right, 1)
         else:
-            bubble = payload
+            bubble = payload["bubble"]
             ts = datetime.fromtimestamp((bubble.get("time") or 0) / 1000)
             raw = bubble.get("content", "")
             outgoing = bubble.get("from") == self.self_id
             widget = QWidget()
             line = QHBoxLayout(widget)
-            line.setContentsMargins(4, 0, 4, 0)
+            # A little extra air above the first bubble of a group does the
+            # work a per-message timestamp used to do.
+            line.setContentsMargins(2, 9 if payload["first"] else 1, 2, 2)
             image = self._image_path(raw) if isinstance(raw, dict) else ""
             if image:
                 inner = self._image_bubble(image, outgoing, ts)
@@ -1768,7 +1897,8 @@ class MainWindow(QMainWindow):
         frame = QFrame()
         frame.setObjectName("bubbleOut" if outgoing else "bubbleIn")
         box = QVBoxLayout(frame)
-        box.setContentsMargins(6, 6, 6, 6)
+        box.setContentsMargins(5, 5, 5, 5)
+        box.setSpacing(2)
         picture = QLabel()
         pixmap = self._pixmap_for(path)
         if pixmap.isNull():
@@ -1784,7 +1914,7 @@ class MainWindow(QMainWindow):
         stamp.setObjectName("bubbleMeta")
         stamp.setAlignment(Qt.AlignRight)
         box.addWidget(stamp)
-        frame.setMaximumWidth(300)
+        frame.setMaximumWidth(320)
         return frame
 
     def _file_bubble(self, content: dict, outgoing: bool, ts: datetime) -> QFrame:
@@ -1797,7 +1927,8 @@ class MainWindow(QMainWindow):
         head = QHBoxLayout()
         head.setSpacing(7)
         glyph = QLabel()
-        glyph.setPixmap(icon("file", "#8a978f", 16).pixmap(16, 16))
+        glyph.setObjectName("fileGlyph")
+        glyph.setPixmap(icon("file", PALETTES[self.theme]["icon"], 16).pixmap(16, 16))
         glyph.setAlignment(Qt.AlignTop)
         head.addWidget(glyph, 0)
         name = QLabel(str(content.get("name") or "文件"))
@@ -1821,7 +1952,7 @@ class MainWindow(QMainWindow):
         stamp.setObjectName("bubbleMeta")
         stamp.setAlignment(Qt.AlignRight)
         box.addWidget(stamp)
-        frame.setMaximumWidth(320)
+        frame.setMaximumWidth(340)
         return frame
 
     def open_path(self, path: str):
@@ -1835,6 +1966,7 @@ class MainWindow(QMainWindow):
         frame.setObjectName("bubbleOut" if outgoing else "bubbleIn")
         box = QVBoxLayout(frame)
         box.setContentsMargins(14, 9, 14, 7)
+        box.setSpacing(2)
         text = QLabel(content)
         text.setWordWrap(True)
         text.setTextInteractionFlags(
@@ -1849,7 +1981,7 @@ class MainWindow(QMainWindow):
         stamp.setObjectName("bubbleMeta")
         stamp.setAlignment(Qt.AlignRight)
         box.addWidget(stamp)
-        frame.setMaximumWidth(560)
+        frame.setMaximumWidth(520)
         return frame
 
     # ---------- actions ----------
@@ -2312,6 +2444,13 @@ class MainWindow(QMainWindow):
                 # 输入法组词时的回车由 IME 自己消费，不会走到这里。
                 if not (event.modifiers() & Qt.ShiftModifier):
                     self.send_message(); return True
+        if watched is self.composer and event.type() in (QEvent.FocusIn, QEvent.FocusOut):
+            # QSS has no :focus-within, so the composer shell is flagged by hand.
+            frame = getattr(self, "composer_frame", None)
+            if frame is not None:
+                frame.setProperty("active", event.type() == QEvent.FocusIn)
+                frame.style().unpolish(frame)
+                frame.style().polish(frame)
         if watched is getattr(self, "remote_preview", None):
             session = self.selected_remote()
             allowed = bool(session and session.get("state") == "active" and
@@ -2390,34 +2529,59 @@ PREFS_FILE = Path.home() / ".relaydesk_gui.json"
 
 
 PALETTES = {
+    # Restrained jade-tinted neutrals with a five-step depth ladder
+    # (bg -> bg_side -> surface -> surface_hi -> surface_2). Text tones are
+    # chosen so every QSS pair clears WCAG AA; tests/test_gui_theme.py holds
+    # that line.
     "dark": {
-        "bg": "#0e1211", "bg_rail": "#121715", "bg_side": "#141a18",
-        "surface": "#1a211e", "surface_hi": "#202824",
-        "border": "#2a332f", "border_hi": "#3a463f",
-        "text": "#e9eeeb", "text_dim": "#b6c2bc", "muted": "#8a978f",
-        "accent": "#3fa27b", "accent_hi": "#4ab68b", "accent_press": "#348a69",
-        "accent_soft": "rgba(63,162,123,0.14)",
-        "on_accent": "#06110c", "on_accent_meta": "rgba(6,17,12,0.62)",
-        "danger": "#d96157", "danger_hi": "#e57369",
-        "online": "#4fc38f", "offline": "#5c6b64",
-        "menu_bg": "#161d1a", "header_bg": "rgba(18,23,21,0.92)",
-        "scroll": "#33413a", "scroll_hi": "#46564d",
-        "icon": "#8fa39a",
+        "bg": "#0b0f0e", "bg_deep": "#070b0a",
+        "bg_rail": "#0e1312", "bg_side": "#101615",
+        "surface": "#161d1b", "surface_hi": "#1c2422",
+        "surface_2": "#212a27", "surface_3": "#263230",
+        "border": "#232d2a", "border_soft": "#1b2321", "border_hi": "#33403b",
+        "text": "#edf3f0", "text_dim": "#bcc9c3", "muted": "#94a49d",
+        "accent": "#35b98d", "accent_hi": "#43cfa0", "accent_press": "#2aa17a",
+        "bubble_end": "#31b087",
+        "accent_soft": "rgba(53,185,141,0.13)",
+        "accent_line": "rgba(53,185,141,0.34)",
+        "accent_edge": "rgba(255,255,255,0.09)",
+        "on_accent": "#05130e", "on_accent_meta": "rgba(5,19,14,0.76)",
+        "danger": "#e2665b", "danger_hi": "#ef7b70",
+        "online": "#4fd3a3", "offline": "#61716a",
+        "menu_bg": "#18201e", "header_bg": "rgba(11,15,14,0.88)",
+        "scroll": "#2d3a35", "scroll_hi": "#3f4e48",
+        "icon": "#93a69d", "glow": "rgba(53,185,141,0.38)",
+        "shadow": "#000000", "shadow_alpha": "70",
     },
     "light": {
-        "bg": "#f1f0ea", "bg_rail": "#e9e7df", "bg_side": "#f7f6f1",
-        "surface": "#ffffff", "surface_hi": "#f0efe8",
-        "border": "#d9d5ca", "border_hi": "#c3bfb2",
-        "text": "#1b221e", "text_dim": "#43514a", "muted": "#5f6c66",
-        "accent": "#1f7a5c", "accent_hi": "#186a4f", "accent_press": "#145a43",
-        "accent_soft": "rgba(31,122,92,0.10)",
-        "on_accent": "#ffffff", "on_accent_meta": "rgba(255,255,255,0.78)",
-        "danger": "#b4483f", "danger_hi": "#9e3c34",
-        "online": "#1f7a5c", "offline": "#8a948e",
-        "menu_bg": "#ffffff", "header_bg": "rgba(247,246,241,0.92)",
-        "scroll": "#cfcabf", "scroll_hi": "#b8b3a6",
-        "icon": "#5f6c66",
+        "bg": "#f3f2ee", "bg_deep": "#eae8e2",
+        "bg_rail": "#eeece7", "bg_side": "#f8f7f3",
+        "surface": "#ffffff", "surface_hi": "#f5f3ee",
+        "surface_2": "#ece9e2", "surface_3": "#e4e0d8",
+        "border": "#dedad1", "border_soft": "#eae7df", "border_hi": "#c8c3b7",
+        "text": "#191f1c", "text_dim": "#3f4c46", "muted": "#5d6a64",
+        "accent": "#12795b", "accent_hi": "#0f6b50", "accent_press": "#0a5a43",
+        "bubble_end": "#117556",
+        "accent_soft": "rgba(18,121,91,0.10)",
+        "accent_line": "rgba(18,121,91,0.26)",
+        "accent_edge": "rgba(0,0,0,0.05)",
+        "on_accent": "#ffffff", "on_accent_meta": "rgba(255,255,255,0.90)",
+        "danger": "#b44a41", "danger_hi": "#a03e36",
+        "online": "#12795b", "offline": "#79837d",
+        "menu_bg": "#ffffff", "header_bg": "rgba(243,242,238,0.90)",
+        "scroll": "#cfcac0", "scroll_hi": "#b4afa2",
+        "icon": "#5d6a64", "glow": "rgba(18,121,91,0.22)",
+        "shadow": "#3a3a2e", "shadow_alpha": "46",
     },
+}
+
+# Radius and type ramps: QSS has no variables, so styles_for() injects these.
+SCALE = {
+    "r_xs": "6px", "r_sm": "8px", "r_md": "10px", "r_lg": "14px",
+    "r_xl": "18px", "r_pill": "999px",
+    "fs_xs": "10.5px", "fs_sm": "11.5px", "fs_md": "12.5px",
+    "fs_base": "13px", "fs_lg": "15px", "fs_display": "19px",
+    "fs_xl": "20px",
 }
 
 
@@ -2432,127 +2596,325 @@ def palette_for(theme: str) -> QPalette:
     pal.setColor(QPalette.Text, QColor(t["text"]))
     pal.setColor(QPalette.Button, QColor(t["surface"]))
     pal.setColor(QPalette.ButtonText, QColor(t["text"]))
-    pal.setColor(QPalette.ToolTipBase, QColor(t["surface"]))
+    pal.setColor(QPalette.ToolTipBase, QColor(t["menu_bg"]))
     pal.setColor(QPalette.ToolTipText, QColor(t["text"]))
     pal.setColor(QPalette.PlaceholderText, QColor(t["muted"]))
     pal.setColor(QPalette.Highlight, QColor(t["accent"]))
     pal.setColor(QPalette.HighlightedText, QColor(t["on_accent"]))
+    pal.setColor(QPalette.Link, QColor(t["accent"]))
+    pal.setColor(QPalette.BrightText, QColor(t["danger"]))
+    pal.setColor(QPalette.Disabled, QPalette.Text, QColor(t["muted"]))
+    pal.setColor(QPalette.Disabled, QPalette.WindowText, QColor(t["muted"]))
+    pal.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(t["muted"]))
     return pal
+
+
+def apply_shadow(widget: QWidget, *, blur: int = 22, dy: int = 6,
+                 alpha: int | None = None, theme: str = "dark") -> None:
+    """Soft elevation for surfaces QSS cannot shade.
+
+    Qt stylesheets have no box-shadow, which is why flat QSS apps read as
+    "unfinished"; a large, low-alpha blur under the raised surfaces gives the
+    depth ladder something to sit on. Keep this to a handful of widgets —
+    every effect forces an offscreen paint pass.
+    """
+    t = PALETTES["light" if theme == "light" else "dark"]
+    effect = QGraphicsDropShadowEffect(widget)
+    effect.setBlurRadius(blur)
+    effect.setOffset(0, dy)
+    shadow = QColor(t["shadow"])
+    shadow.setAlpha(int(t["shadow_alpha"]) if alpha is None else alpha)
+    effect.setColor(shadow)
+    widget.setGraphicsEffect(effect)
+
+
+def _check_icon_rule(theme: str) -> str:
+    """Tick glyph for QCheckBox::indicator:checked.
+
+    QSS cannot draw a checkmark and the frozen build ships no Qt resource, so
+    the glyph is rendered once into the temp dir and referenced by absolute
+    path. A failure is non-fatal: the indicator still fills with the accent
+    colour, just without the tick.
+    """
+    if QApplication.instance() is None:
+        return ""
+    color = PALETTES["light" if theme == "light" else "dark"]["on_accent"]
+    path = Path(tempfile.gettempdir()) / "relaydesk-ui" / f"check-{color.lstrip('#')}.png"
+    try:
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            pixmap = QPixmap(16, 16)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.Antialiasing)
+            pen = QPen(QColor(color))
+            pen.setWidthF(2.0)
+            pen.setCapStyle(Qt.RoundCap)
+            pen.setJoinStyle(Qt.RoundJoin)
+            painter.setPen(pen)
+            painter.drawPolyline([QPointF(3.4, 8.3), QPointF(6.6, 11.5),
+                                  QPointF(12.6, 4.7)])
+            painter.end()
+            pixmap.save(str(path), "PNG")
+        return f"image: url({path.as_posix()});"
+    except Exception:  # noqa: BLE001 - a missing tick must not break the theme
+        return ""
 
 
 def styles_for(theme: str) -> str:
     """One authored sheet for both themes, filled from explicit tokens."""
     tokens = dict(PALETTES["light" if theme == "light" else "dark"])
+    tokens.update(SCALE)
     tokens["font_stack"] = FONT_STACK
+    tokens["check_rule"] = _check_icon_rule(theme)
     return Template(STYLES).substitute(tokens)
 
 
 STYLES = """
 * { font-family: $font_stack; }
-QWidget#rootWindow, QWidget#page { background: $bg; color: $text; }
-QPushButton { background: $surface; color: $text; border: 1px solid $border;
-    border-radius: 8px; padding: 7px 12px; font-size: 12.5px; }
-QPushButton:hover { background: $surface_hi; border-color: $border_hi; }
-QPushButton:disabled { color: $muted; border-color: $border; }
-QFrame#titleBar { background: $bg_rail; border-bottom: 1px solid $border; }
-QLabel#titleName { color: $text_dim; font-size: 12px; font-weight: 600; }
-QPushButton#winBtn, QPushButton#closeBtn { background: transparent; border: 0; border-radius: 0; }
-QPushButton#winBtn:hover { background: $surface_hi; }
-QPushButton#closeBtn:hover { background: $danger; }
 
+/* ---------------------------------------------------------------- window */
+QWidget#rootWindow, QWidget#page {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 $bg, stop:1 $bg_deep);
+    color: $text;
+}
+QDialog { background: $bg; color: $text; }
+
+/* -------------------------------------------------------------- titlebar */
+QFrame#titleBar { background: $bg_rail; border-bottom: 1px solid $border; }
+QLabel#titleName { color: $text_dim; font-size: $fs_sm; font-weight: 600; }
+QPushButton#winBtn, QPushButton#closeBtn {
+    background: transparent; border: 0; border-radius: 0;
+}
+QPushButton#winBtn:hover { background: $surface_hi; }
+QPushButton#winBtn:pressed { background: $surface_2; }
+QPushButton#closeBtn:hover { background: $danger; }
+QPushButton#closeBtn:pressed { background: $danger_hi; }
+
+/* ------------------------------------------------------------------ rail */
 QFrame#rail { background: $bg_rail; border-right: 1px solid $border; }
-QPushButton#railButton { background: transparent; border: 0; border-radius: 10px; }
-QPushButton#railButton:hover { background: $surface_hi; }
-QPushButton#railButton:checked { background: $accent_soft; }
-QLabel#connectionDot { color: $offline; font-size: 10px; }
+QPushButton#railButton {
+    background: transparent; border: 1px solid transparent; border-radius: $r_md;
+}
+QPushButton#railButton:hover { background: $surface_hi; border-color: $border; }
+QPushButton#railButton:checked {
+    background: $accent_soft; border-color: $accent_line;
+}
+QPushButton#railButton:focus { border-color: $accent; }
+QLabel#connectionDot { color: $offline; font-size: $fs_xs; }
 QLabel#connectionDot[online="true"] { color: $online; }
 
+/* --------------------------------------------------------------- sidebar */
 QFrame#sidebar { background: $bg_side; border-right: 1px solid $border; }
-QLabel#brand { color: $text; font-size: 17px; font-weight: 700; }
-QLabel#brandSub { color: $muted; font-size: 11.5px; }
-QPushButton#roundBtn { background: transparent; color: $text_dim;
-    border: 1px solid $border; border-radius: 9px; }
+QLabel#brand { color: $text; font-size: $fs_lg; font-weight: 700; }
+QLabel#brandSub { color: $muted; font-size: $fs_sm; }
+QLabel#sidebarTitle {
+    color: $muted; font-size: $fs_xs; font-weight: 700; padding: 6px 2px 0 2px;
+}
+QPushButton#roundBtn {
+    background: $surface; border: 1px solid $border; border-radius: $r_sm;
+}
 QPushButton#roundBtn:hover { background: $surface_hi; border-color: $border_hi; }
-QLineEdit#search, QLineEdit#sessionSearch { background: $surface; color: $text;
-    border: 1px solid $border; border-radius: 9px; padding: 8px 11px; font-size: 12.5px;
-    selection-background-color: $accent; selection-color: $on_accent; }
-QLineEdit#search:focus, QLineEdit#sessionSearch:focus { border-color: $accent; }
-QLabel#sidebarTitle { color: $muted; padding-top: 2px; font-weight: 600; font-size: 11px; }
-QListWidget#entityList { background: transparent; border: 0; outline: 0; }
-QListWidget#entityList::item { color: $text; margin: 2px 0; border-radius: 10px;
-    border: 1px solid transparent; }
-QListWidget#entityList::item:selected { background: $accent_soft; border: 1px solid $accent; }
-QListWidget#entityList::item:hover { background: $surface_hi; }
-QFrame#entityCard { background: transparent; }
-QLabel#entityName { color: $text; font-size: 13px; font-weight: 600; }
-QLabel#entitySub { color: $muted; font-size: 11.5px; }
-QLabel#onlineDot { color: $online; font-size: 10px; }
-QLabel#offlineDot { color: $offline; font-size: 10px; }
+QPushButton#roundBtn:pressed { background: $surface_2; }
+QPushButton#roundBtn:focus { border-color: $accent; }
+QPushButton#roundBtn:disabled { background: transparent; border-color: $border_soft; }
 
+QLineEdit#search, QLineEdit#sessionSearch {
+    background: $surface; color: $text; border: 1px solid $border;
+    border-radius: $r_sm; padding: 7px 10px; font-size: $fs_md;
+    selection-background-color: $accent; selection-color: $on_accent;
+}
+QLineEdit#search:hover, QLineEdit#sessionSearch:hover { border-color: $border_hi; }
+QLineEdit#search:focus, QLineEdit#sessionSearch:focus {
+    border-color: $accent; background: $surface;
+}
+QLineEdit#search:disabled, QLineEdit#sessionSearch:disabled { color: $muted; }
+
+QListWidget#entityList { background: transparent; border: 0; outline: 0; }
+QListWidget#entityList::item {
+    color: $text; margin: 2px 0; border-radius: $r_md;
+    border: 1px solid transparent;
+}
+QListWidget#entityList::item:hover { background: $surface_hi; border-color: $border; }
+QListWidget#entityList::item:selected {
+    background: $accent_soft; border-color: $accent_line;
+}
+QFrame#entityCard { background: transparent; }
+QLabel#entityName { color: $text; font-size: $fs_base; font-weight: 600; }
+QLabel#entitySub { color: $muted; font-size: $fs_sm; }
+QLabel#onlineDot { color: $online; font-size: $fs_xs; }
+QLabel#offlineDot { color: $offline; font-size: $fs_xs; }
+
+/* ------------------------------------------------------------- workspace */
 QFrame#workspace { background: $bg; }
 QFrame#sessionHeader { background: $bg; border-bottom: 1px solid $border; }
-QLabel#sessionTitle { color: $text; font-size: 16px; font-weight: 650; }
-QLabel#muted { color: $muted; font-size: 12px; }
-QPushButton#headerBtn { background: transparent; border: 1px solid $border; border-radius: 9px; }
-QPushButton#headerBtn:hover { background: $surface_hi; border-color: $border_hi; }
+QLabel#sessionTitle { color: $text; font-size: $fs_lg; font-weight: 600; }
+QLabel#muted { color: $muted; font-size: $fs_sm; }
+QLabel#pageTitle { color: $text; font-size: $fs_xl; font-weight: 700; }
+QLabel#emptyTitle { color: $text; font-size: $fs_display; font-weight: 600; }
+QLabel#emptyNote { color: $muted; font-size: $fs_md; }
+QFrame#haloBadge {
+    background: qradialgradient(cx:0.5, cy:0.5, radius:0.72, fx:0.5, fy:0.5,
+                                stop:0 $glow, stop:1 transparent);
+    border: 1px solid $border; border-radius: $r_pill;
+}
+QFrame#headerToolbar {
+    background: $surface; border: 1px solid $border; border-radius: $r_md;
+}
+QPushButton#headerBtn {
+    background: transparent; border: 1px solid transparent; border-radius: $r_sm;
+}
+QPushButton#headerBtn:hover { background: $surface_hi; border-color: $border; }
+QPushButton#headerBtn:pressed { background: $surface_2; }
+QPushButton#headerBtn:focus { border-color: $accent; }
 
+/* -------------------------------------------------------------- timeline */
 QScrollArea#timeline { background: transparent; border: 0; }
 QWidget#timelineCanvas { background: transparent; }
-QLabel#daySeparator { color: $muted; font-size: 11px; padding: 6px 0 2px 0; }
-QFrame#bubbleOut { background: $accent; border-radius: 12px; border-bottom-right-radius: 4px; }
-QFrame#bubbleIn { background: $surface; border: 1px solid $border;
-    border-radius: 12px; border-bottom-left-radius: 4px; }
-QLabel#bubbleText { color: $text; font-size: 13px; }
+QFrame#dayRule { background: $border_soft; border: 0; max-height: 1px; }
+QLabel#daySeparator {
+    color: $muted; font-size: $fs_xs; font-weight: 600;
+    background: $surface; border: 1px solid $border; border-radius: $r_pill;
+    padding: 3px 12px;
+}
+QLabel#timelineEmpty { color: $muted; font-size: $fs_base; padding: 48px 0; }
+
+QFrame#bubbleOut {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 $accent, stop:1 $bubble_end);
+    border: 1px solid $accent_edge; border-radius: $r_lg;
+    border-bottom-right-radius: 5px;
+}
+QFrame#bubbleIn {
+    background: $surface; border: 1px solid $border; border-radius: $r_lg;
+    border-bottom-left-radius: 5px;
+}
+QLabel#bubbleText { color: $text; font-size: $fs_base; }
 QFrame#bubbleOut QLabel#bubbleText { color: $on_accent; }
-QLabel#bubbleMeta { color: $muted; font-size: 10.5px; }
+QLabel#bubbleMeta { color: $muted; font-size: $fs_xs; }
 QFrame#bubbleOut QLabel#bubbleMeta { color: $on_accent_meta; }
 
-QFrame#composer { background: $surface; border: 1px solid $border; border-radius: 12px; }
-QTextEdit#composerEdit { background: transparent; border: 0; color: $text; font-size: 13px;
-    selection-background-color: $accent; selection-color: $on_accent; }
-QPushButton#chipBtn { background: transparent; border: 1px solid $border; border-radius: 8px; }
+/* -------------------------------------------------------------- composer */
+QFrame#composer {
+    background: $surface; border: 1px solid $border; border-radius: $r_lg;
+}
+QFrame#composer[active="true"] { border-color: $accent; }
+QTextEdit#composerEdit {
+    background: transparent; border: 0; color: $text; font-size: $fs_base;
+    selection-background-color: $accent; selection-color: $on_accent;
+}
+QPushButton#chipBtn {
+    background: transparent; border: 1px solid $border; border-radius: $r_sm;
+}
 QPushButton#chipBtn:hover { background: $surface_hi; border-color: $border_hi; }
-QPushButton#newMsgPill { background: $accent; color: $on_accent; border: 0;
-    border-radius: 11px; padding: 5px 14px; font-size: 12px; font-weight: 600; }
+QPushButton#chipBtn:pressed { background: $surface_2; }
+QPushButton#chipBtn:focus { border-color: $accent; }
+QPushButton#newMsgPill {
+    background: $accent; color: $on_accent; border: 1px solid $accent_edge;
+    border-radius: $r_pill; padding: 5px 14px;
+    font-size: $fs_sm; font-weight: 600;
+}
 QPushButton#newMsgPill:hover { background: $accent_hi; }
-QPushButton#sendButton { background: $accent; color: $on_accent; border: 0; border-radius: 9px;
-    padding: 8px 18px; font-weight: 600; font-size: 12.5px; }
-QPushButton#sendButton:hover { background: $accent_hi; }
-QPushButton#sendButton:pressed { background: $accent_press; }
+QPushButton#newMsgPill:focus { border-color: $on_accent; }
 
-QListWidget#contentList { background: $surface; color: $text; border: 1px solid $border;
-    border-radius: 10px; padding: 6px; }
-QListWidget#contentList::item { padding: 10px; border-bottom: 1px solid $border;
-    border-radius: 6px; }
+/* --------------------------------------------------------------- buttons */
+QPushButton {
+    background: $surface; color: $text; border: 1px solid $border;
+    border-radius: $r_sm; padding: 7px 12px; font-size: $fs_md;
+}
+QPushButton:hover { background: $surface_hi; border-color: $border_hi; }
+QPushButton:pressed { background: $surface_2; }
+QPushButton:disabled { color: $muted; border-color: $border_soft; background: transparent; }
+QPushButton:focus { border-color: $accent; }
+
+QPushButton#sendButton, QPushButton#primaryBtn {
+    background: $accent; color: $on_accent; border: 1px solid $accent_edge;
+    border-radius: $r_sm; font-weight: 600;
+}
+QPushButton#sendButton { padding: 8px 18px; font-size: $fs_md; }
+QPushButton#primaryBtn { padding: 9px 18px; font-size: $fs_md; }
+QPushButton#sendButton:hover, QPushButton#primaryBtn:hover { background: $accent_hi; }
+QPushButton#sendButton:pressed, QPushButton#primaryBtn:pressed { background: $accent_press; }
+QPushButton#sendButton:disabled, QPushButton#primaryBtn:disabled {
+    background: $surface_2; color: $muted; border-color: $border;
+}
+QPushButton#sendButton:focus, QPushButton#primaryBtn:focus { border-color: $on_accent; }
+QPushButton#secondaryButton {
+    background: transparent; color: $text_dim; border: 1px solid $border;
+    border-radius: $r_sm; padding: 8px 14px; font-size: $fs_md;
+}
+QPushButton#secondaryButton:hover {
+    background: $surface_hi; border-color: $border_hi; color: $text;
+}
+QPushButton#secondaryButton:pressed { background: $surface_2; }
+QPushButton#secondaryButton:disabled { color: $muted; border-color: $border_soft; }
+
+/* ----------------------------------------------------------------- lists */
+QListWidget#contentList {
+    background: $surface; color: $text; border: 1px solid $border;
+    border-radius: $r_md; padding: 6px; outline: 0;
+}
+QListWidget#contentList::item {
+    padding: 10px 12px; border-radius: $r_sm; color: $text;
+}
 QListWidget#contentList::item:hover { background: $surface_hi; }
-QLabel#pageTitle { color: $text; font-size: 20px; font-weight: 700; }
-QLabel#emptyTitle { color: $text; font-size: 19px; font-weight: 650; }
-QFrame#settingsCard { background: $surface; border: 1px solid $border; border-radius: 10px; }
-QLabel#settingsText { color: $text_dim; font-size: 12.5px; }
-QLabel#mediaPreview { background: $bg; color: $muted; border: 1px solid $border;
-    border-radius: 10px; }
-QCheckBox { color: $text_dim; spacing: 7px; font-size: 12.5px; }
-QPushButton#primaryBtn { background: $accent; color: $on_accent; border: 0; border-radius: 9px;
-    padding: 9px 18px; font-weight: 600; }
-QPushButton#primaryBtn:hover { background: $accent_hi; }
-QPushButton#secondaryButton { background: transparent; color: $text; border: 1px solid $border;
-    border-radius: 9px; padding: 8px 14px; font-size: 12.5px; }
-QPushButton#secondaryButton:hover { background: $surface_hi; border-color: $border_hi; }
-QPushButton#secondaryButton:disabled { color: $muted; border-color: $border; }
-QMenu { background: $menu_bg; color: $text; border: 1px solid $border; border-radius: 9px;
-    padding: 5px; }
-QMenu::item { padding: 8px 20px; border-radius: 6px; }
+QListWidget#contentList::item:selected { background: $accent_soft; color: $text; }
+
+/* ------------------------------------------------------- cards and forms */
+QFrame#settingsCard {
+    background: $surface; border: 1px solid $border; border-radius: $r_md;
+}
+QLabel#settingsText { color: $text_dim; font-size: $fs_md; }
+QLabel#mediaPreview {
+    background: $bg_rail; color: $muted; border: 1px solid $border;
+    border-radius: $r_md;
+}
+QCheckBox { color: $text_dim; spacing: 8px; font-size: $fs_md; }
+QCheckBox:hover { color: $text; }
+QCheckBox:disabled { color: $muted; }
+QCheckBox::indicator {
+    width: 16px; height: 16px; border-radius: 5px;
+    border: 1px solid $border_hi; background: $surface;
+}
+QCheckBox::indicator:hover { border-color: $accent; }
+QCheckBox::indicator:checked {
+    background: $accent; border-color: $accent; $check_rule
+}
+QCheckBox::indicator:checked:hover { background: $accent_hi; border-color: $accent_hi; }
+
+/* -------------------------------------------------- menus, tips, statusbar */
+QMenu {
+    background: $menu_bg; color: $text; border: 1px solid $border;
+    border-radius: $r_sm; padding: 6px;
+}
+QMenu::item { padding: 8px 16px; border-radius: $r_xs; font-size: $fs_md; }
 QMenu::item:selected { background: $accent_soft; color: $text; }
-QStatusBar { background: $bg_rail; color: $muted; border-top: 1px solid $border;
-    font-size: 11.5px; }
+QMenu::item:disabled { color: $muted; }
+QMenu::separator { height: 1px; background: $border; margin: 6px 8px; }
+QToolTip {
+    background: $menu_bg; color: $text; border: 1px solid $border_hi;
+    border-radius: $r_xs; padding: 6px 9px; font-size: $fs_sm;
+}
+QStatusBar {
+    background: $bg_rail; color: $muted; border-top: 1px solid $border;
+    font-size: $fs_sm;
+}
+QStatusBar::item { border: 0; }
+
+/* ------------------------------------------------------------ scrollbars */
 QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
-QScrollBar::handle:vertical { background: $scroll; border-radius: 5px; min-height: 36px; }
+QScrollBar::handle:vertical {
+    background: $scroll; border-radius: 4px; min-height: 40px;
+}
 QScrollBar::handle:vertical:hover { background: $scroll_hi; }
-QScrollBar::add-line, QScrollBar::sub-line { height: 0; }
-QToolTip { background: $menu_bg; color: $text; border: 1px solid $border; padding: 5px 8px; }
-QPushButton:focus { border: 1px solid $accent; }
-QPushButton#railButton:focus { border: 1px solid $accent; }
-QPushButton#sendButton:focus, QPushButton#primaryBtn:focus { border: 1px solid $on_accent; }
-QPushButton#newMsgPill:focus { border: 1px solid $on_accent; }
-QListWidget#entityList:focus { border: 1px solid $accent; border-radius: 10px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+QScrollBar:horizontal { background: transparent; height: 10px; margin: 2px; }
+QScrollBar::handle:horizontal {
+    background: $scroll; border-radius: 4px; min-width: 40px;
+}
+QScrollBar::handle:horizontal:hover { background: $scroll_hi; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }
 """
