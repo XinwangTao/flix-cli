@@ -163,6 +163,9 @@ def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     window = gui.MainWindow(19999, snapshot=(wallpaper(), QPoint(0, 0)))
     window.timer.stop()
+    # Static shots: a section fade would otherwise be captured at opacity 0
+    # because grab() does not wait for the animation clock.
+    window.animations = False
     # The constructor's probe would race the loop and flip the page offline.
     if window.worker is not None:
         window.worker.blockSignals(True)

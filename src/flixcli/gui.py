@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QGraphicsBlurEffect,
+    QGraphicsOpacityEffect,
     QGraphicsPixmapItem,
     QGraphicsScene,
     QHBoxLayout,
@@ -443,6 +444,23 @@ def system_transparency_enabled() -> bool:
         return True
 
 
+def system_motion_enabled() -> bool:
+    """Windows' "show animations in Windows" accessibility switch.
+
+    HIG Motion: motion must be optional, so the page transition listens to the
+    same setting people already use to calm the rest of the desktop.
+    """
+    if sys.platform != "win32":
+        return True
+    try:
+        enabled = ctypes.c_int(1)
+        ok = ctypes.windll.user32.SystemParametersInfoW(
+            0x1042, 0, ctypes.byref(enabled), 0)  # SPI_GETCLIENTAREAANIMATION
+        return bool(enabled.value) if ok else True
+    except (AttributeError, OSError):
+        return True
+
+
 def desktop_snapshot():
     """Grab the composited desktop before our own window is mapped.
 
@@ -664,6 +682,8 @@ class MainWindow(QMainWindow):
         self.api_port = api_port
         self._snapshot = snapshot
         self.glass = self._load_glass()
+        self.animations = self._load_animations()
+        self._page_fade: QPropertyAnimation | None = None
         self.worker: ApiThread | None = None
         self.action_worker: ApiThread | None = None
         self.payload: dict = {}
@@ -747,7 +767,7 @@ class MainWindow(QMainWindow):
         font = app.font()
         font.setFamilies(["Segoe UI Variable Text", "Microsoft YaHei UI",
                           "Microsoft YaHei", "Segoe UI"])
-        font.setPointSizeF(9.0)
+        font.setPointSizeF(9.75)
         app.setFont(font)
 
     def _build(self):
@@ -786,8 +806,8 @@ class MainWindow(QMainWindow):
         rail.setObjectName("rail")
         rail.setFixedWidth(64)
         box = QVBoxLayout(rail)
-        box.setContentsMargins(6, 12, 6, 12)
-        box.setSpacing(4)
+        box.setContentsMargins(8, 12, 8, 12)
+        box.setSpacing(6)
         logo = QLabel()
         logo.setPixmap(logo_pixmap(32))
         box.addWidget(logo, 0, Qt.AlignHCenter)
@@ -840,8 +860,8 @@ class MainWindow(QMainWindow):
         panel.setObjectName("sidebar")
         panel.setFixedWidth(280)
         box = QVBoxLayout(panel)
-        box.setContentsMargins(14, 14, 12, 12)
-        box.setSpacing(10)
+        box.setContentsMargins(16, 16, 12, 12)
+        box.setSpacing(12)
         title_row = QHBoxLayout()
         title_row.setSpacing(6)
         heading = QLabel("会话")
@@ -872,7 +892,7 @@ class MainWindow(QMainWindow):
         self.search.setObjectName("search")
         self.search.setPlaceholderText("搜索设备、群组或消息")
         self.search.setClearButtonEnabled(True)
-        self.search.setFixedHeight(34)
+        self.search.setFixedHeight(32)
         self.search.installEventFilter(self)
         self.search.textChanged.connect(self.populate_sidebar)
         box.addWidget(self.search)
@@ -1053,10 +1073,10 @@ class MainWindow(QMainWindow):
     def _build_header(self):
         header = QFrame()
         header.setObjectName("sessionHeader")
-        header.setFixedHeight(48)
+        header.setFixedHeight(52)
         row = QHBoxLayout(header)
-        row.setContentsMargins(16, 4, 12, 4)
-        row.setSpacing(10)
+        row.setContentsMargins(20, 6, 16, 6)
+        row.setSpacing(12)
         self.session_avatar = Avatar("◉", "relaydesk", 28)
         row.addWidget(self.session_avatar)
         labels = QVBoxLayout()
@@ -1232,7 +1252,7 @@ class MainWindow(QMainWindow):
         # when the window is maximised on a wide monitor.
         self.timeline_widget.setMaximumWidth(880)
         self.timeline_layout = QVBoxLayout(self.timeline_widget)
-        self.timeline_layout.setContentsMargins(20, 12, 20, 16)
+        self.timeline_layout.setContentsMargins(20, 16, 20, 20)
         self.timeline_layout.setSpacing(10)
         self.timeline_layout.addStretch()
         self.timeline.setWidget(self.timeline_widget)
@@ -1263,8 +1283,8 @@ class MainWindow(QMainWindow):
         self.composer_card = composer
         composer.setMaximumWidth(880)
         cbox = QVBoxLayout(composer)
-        cbox.setContentsMargins(14, 10, 12, 8)
-        cbox.setSpacing(6)
+        cbox.setContentsMargins(14, 10, 14, 10)
+        cbox.setSpacing(8)
         self.composer = QTextEdit()
         self.composer.setObjectName("composerEdit")
         self.composer.setPlaceholderText("输入消息，回车发送（Shift+回车换行）")
@@ -1315,7 +1335,7 @@ class MainWindow(QMainWindow):
         actions.addWidget(self.send_button)
         cbox.addLayout(actions)
         wrap = QHBoxLayout()
-        wrap.setContentsMargins(20, 8, 20, 0)
+        wrap.setContentsMargins(20, 10, 20, 0)
         wrap.addStretch()
         wrap.addWidget(composer, 1)
         wrap.addStretch()
@@ -1346,7 +1366,7 @@ class MainWindow(QMainWindow):
 
     def _build_transfers(self):
         page = QWidget(); page.setObjectName("page")
-        box = QVBoxLayout(page); box.setContentsMargins(24, 20, 24, 20)
+        box = QVBoxLayout(page); box.setContentsMargins(20, 20, 20, 20)
         head = QHBoxLayout()
         note = QLabel("双击有本地副本的行可打开")
         note.setObjectName("muted")
@@ -1385,7 +1405,7 @@ class MainWindow(QMainWindow):
 
     def _build_adb(self):
         page = QWidget(); page.setObjectName("page")
-        box = QVBoxLayout(page); box.setContentsMargins(24, 20, 24, 20)
+        box = QVBoxLayout(page); box.setContentsMargins(20, 20, 20, 20)
         head = QHBoxLayout()
         note = QLabel("文件操作要求显式目标")
         note.setObjectName("muted")
@@ -1456,8 +1476,8 @@ class MainWindow(QMainWindow):
         card = QFrame()
         card.setObjectName("settingsCard")
         body = QVBoxLayout(card)
-        body.setContentsMargins(14, 10, 14, 12)
-        body.setSpacing(6)
+        body.setContentsMargins(16, 12, 16, 14)
+        body.setSpacing(8)
         head = QHBoxLayout()
         head.setSpacing(8)
         heading = QLabel(title)
@@ -1472,7 +1492,7 @@ class MainWindow(QMainWindow):
     def _build_settings(self):
         page = QWidget(); page.setObjectName("page")
         outer = QVBoxLayout(page)
-        outer.setContentsMargins(20, 12, 20, 12)
+        outer.setContentsMargins(20, 20, 20, 20)
         outer.setSpacing(8)
         scroll = QScrollArea()
         scroll.setObjectName("settingsScroll")
@@ -1484,7 +1504,7 @@ class MainWindow(QMainWindow):
         canvas.setObjectName("page")
         column = QVBoxLayout(canvas)
         column.setContentsMargins(0, 2, 0, 2)
-        column.setSpacing(10)
+        column.setSpacing(12)
         scroll.setWidget(canvas)
         wrap = QHBoxLayout()
         wrap.addWidget(scroll, 1)
@@ -1558,11 +1578,30 @@ class MainWindow(QMainWindow):
         glass_row.addStretch()
         body.addLayout(glass_row)
 
+        motion_row = QHBoxLayout()
+        motion_row.setSpacing(8)
+        caption = QLabel("界面动效")
+        caption.setObjectName("settingsKey")
+        caption.setFixedWidth(104)
+        motion_row.addWidget(caption)
+        self.animation_buttons = {}
+        for enabled, label in ((True, "标准"), (False, "关闭")):
+            button = QPushButton(label)
+            button.setObjectName("themeChoice")
+            button.setCheckable(True)
+            button.setCursor(Qt.PointingHandCursor)
+            button.clicked.connect(lambda _c=False, on=enabled: self.set_animations(on))
+            self.animation_buttons[enabled] = button
+            motion_row.addWidget(button)
+        motion_row.addStretch()
+        body.addLayout(motion_row)
+
         self.notify_check = QCheckBox("桌面提醒：收到新消息时弹出提示")
         self.notify_check.setChecked(self._load_prefs().get("notify", True) is not False)
         self.notify_check.toggled.connect(self._toggle_notify)
         body.addWidget(self.notify_check)
-        hint = QLabel("主题和材质立即应用，下次启动沿用；毛玻璃会模糊窗口后面的桌面")
+        hint = QLabel("主题、材质和动效立即应用，下次启动沿用；毛玻璃会模糊窗口后面的桌面，"
+                      "关闭动效后页面直接切换")
         hint.setObjectName("muted")
         hint.setWordWrap(True)
         body.addWidget(hint)
@@ -1576,6 +1615,7 @@ class MainWindow(QMainWindow):
         column.addWidget(self.settings_text)
         self._sync_theme_button()
         self._sync_glass_button()
+        self._sync_animation_button()
         return page
 
     def _load_prefs(self) -> dict:
@@ -1632,6 +1672,70 @@ class MainWindow(QMainWindow):
         self.glass = bool(enabled)
         self._restyle()
         self._save_prefs(glass=self.glass)
+
+    def _load_animations(self) -> bool:
+        saved = self._load_prefs().get("animations")
+        if isinstance(saved, bool):
+            return saved
+        return system_motion_enabled()
+
+    def set_animations(self, enabled: bool):
+        self.animations = bool(enabled)
+        if not self.animations:
+            self._finish_page_fade()
+        self._save_prefs(animations=self.animations)
+        self._sync_animation_button()
+
+    def _finish_page_fade(self) -> None:
+        anim = getattr(self, "_page_fade", None)
+        if anim is not None:
+            anim.stop()
+            self._page_fade = None
+        stack = getattr(self, "workspace_stack", None)
+        if stack is None:
+            return
+        for index in range(stack.count()):
+            page = stack.widget(index)
+            if page is not None and page.graphicsEffect() is not None:
+                page.setGraphicsEffect(None)
+
+    def _switch_workspace(self, index: int, *, animate: bool = True) -> None:
+        """Cross-fade the new page in; section switches only.
+
+        HIG Motion asks for brief, purposeful feedback and warns against
+        animating frequent interactions, so conversation switches stay
+        instant and this fade runs only when the rail changes a section.
+        """
+        stack = self.workspace_stack
+        if stack.currentIndex() == index:
+            return
+        if not animate or not self.animations:
+            self._finish_page_fade()
+            stack.setCurrentIndex(index)
+            return
+        self._finish_page_fade()
+        stack.setCurrentIndex(index)
+        page = stack.currentWidget()
+        if page is None:
+            return
+        effect = QGraphicsOpacityEffect(page)
+        effect.setOpacity(0.0)
+        page.setGraphicsEffect(effect)
+        anim = QPropertyAnimation(effect, b"opacity", self)
+        anim.setDuration(170)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+
+        def done():
+            page.setGraphicsEffect(None)
+            if self._page_fade is anim:
+                self._page_fade = None
+            anim.deleteLater()
+
+        anim.finished.connect(done)
+        self._page_fade = anim
+        anim.start()
 
     def _restyle(self):
         self.setStyleSheet(styles_for(self.theme, self._glass_visible()))
@@ -1795,9 +1899,13 @@ class MainWindow(QMainWindow):
         for enabled, button in getattr(self, "glass_buttons", {}).items():
             button.setChecked(bool(getattr(self, "glass", False)) == enabled)
 
+    def _sync_animation_button(self):
+        for enabled, button in getattr(self, "animation_buttons", {}).items():
+            button.setChecked(bool(getattr(self, "animations", True)) == enabled)
+
     def _build_remote(self):
         page = QWidget(); page.setObjectName("page")
-        box = QVBoxLayout(page); box.setContentsMargins(24, 18, 24, 18)
+        box = QVBoxLayout(page); box.setContentsMargins(20, 20, 20, 20)
         row = QHBoxLayout()
         self.remote_status = QLabel("默认仅观看；控制必须由对端单独批准")
         self.remote_status.setObjectName("muted")
@@ -1853,15 +1961,15 @@ class MainWindow(QMainWindow):
             self.sidebar_heading.setText(titles.get(mode, "会话"))
         self.mode = mode
         if mode == "transfers":
-            self.workspace_stack.setCurrentIndex(2)
+            self._switch_workspace(2)
         elif mode == "adb":
-            self.workspace_stack.setCurrentIndex(3)
+            self._switch_workspace(3)
         elif mode == "settings":
-            self.workspace_stack.setCurrentIndex(4)
+            self._switch_workspace(4)
         else:
-            self.workspace_stack.setCurrentIndex(0 if self.current is None else 1)
+            self._switch_workspace(0 if self.current is None else 1)
         if getattr(self, "offline_mode", False):
-            self.workspace_stack.setCurrentIndex(6)
+            self._switch_workspace(6, animate=False)
         self._sync_sidebar_for_mode()
         self.populate_sidebar()
         self._sync_header()
@@ -2051,16 +2159,16 @@ class MainWindow(QMainWindow):
 
     def render_current(self):
         if getattr(self, "offline_mode", False):
-            self.workspace_stack.setCurrentIndex(6)
+            self._switch_workspace(6, animate=False)
             return
         if not self.current:
-            self.workspace_stack.setCurrentIndex(0)
+            self._switch_workspace(0, animate=False)
             return
         kind, key = self.current["kind"], self.current["key"]
         if kind == "adb":
-            self.workspace_stack.setCurrentIndex(3)
+            self._switch_workspace(3, animate=False)
             return
-        self.workspace_stack.setCurrentIndex(1)
+        self._switch_workspace(1, animate=False)
         if kind == "device":
             device = next((d for d in self.payload.get("devices", [])
                            if d.get("fingerprint") == key), {})
@@ -2701,7 +2809,7 @@ class MainWindow(QMainWindow):
         dialog.setWindowTitle("群设置")
         dialog.setFixedWidth(460)
         layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setContentsMargins(20, 20, 20, 16)
         layout.setSpacing(10)
 
         caption = QLabel("群名称")
@@ -2811,7 +2919,7 @@ class MainWindow(QMainWindow):
         dialog.setWindowTitle("新建群组")
         dialog.setFixedWidth(460)
         layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setContentsMargins(20, 20, 20, 16)
         layout.setSpacing(10)
         caption = QLabel("群名称")
         caption.setObjectName("muted")
@@ -3132,7 +3240,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("请选择一台设备")
             return
         caps = ["view"] + (["control"] if self.remote_control.isChecked() else [])
-        self.workspace_stack.setCurrentIndex(5)
+        self._switch_workspace(5)
         self.run_action(lambda: self.api.post("/api/media/request",
                                               {"deviceId": target, "capabilities": caps}))
 
@@ -3218,7 +3326,7 @@ class MainWindow(QMainWindow):
         self.signal_text.setToolTip("原始错误：" + str(detail))
         self.populate_sidebar()  # every cached presence dot becomes 未知
         self.sidebar_footer.setText(self._last_known_footer())
-        self.workspace_stack.setCurrentIndex(6)
+        self._switch_workspace(6, animate=False)
         self._sync_offline_header()
         self.statusBar().showMessage(f"无法连接本机服务：{reason}（正在探测候选端口…）")
         self._discovery_worker = ApiThread(lambda: LocalApi.discover(self.api_port))
@@ -3240,7 +3348,7 @@ class MainWindow(QMainWindow):
             self._auto_start_tried = True
             self.start_local_daemon()
             return
-        self.workspace_stack.setCurrentIndex(6)
+        self._switch_workspace(6, animate=False)
         # Stale devices from the last good poll would look selectable but do
         # nothing while the service is down; clear them and say so.
         self.entity_list.blockSignals(True)
@@ -3266,13 +3374,19 @@ class MainWindow(QMainWindow):
                 self.search.clear()
                 self.entity_list.setFocus()
                 return True
-        if (watched is getattr(self, "composer", None)
-                and event.type() == QEvent.KeyPress):
-            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
-                # 回车直接发送；Shift+回车换行。Ctrl+回车保留为发送的旧习惯。
-                # 输入法组词时的回车由 IME 自己消费，不会走到这里。
-                if not (event.modifiers() & Qt.ShiftModifier):
-                    self.send_message(); return True
+        if watched is getattr(self, "composer", None):
+            if event.type() in (QEvent.FocusIn, QEvent.FocusOut):
+                card = getattr(self, "composer_card", None)
+                if card is not None:
+                    card.setProperty("focusRing", event.type() == QEvent.FocusIn)
+                    card.style().unpolish(card)
+                    card.style().polish(card)
+            if event.type() == QEvent.KeyPress:
+                if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                    # 回车直接发送；Shift+回车换行。Ctrl+回车保留为发送的旧习惯。
+                    # 输入法组词时的回车由 IME 自己消费，不会走到这里。
+                    if not (event.modifiers() & Qt.ShiftModifier):
+                        self.send_message(); return True
         if watched is getattr(self, "remote_preview", None):
             session = self.selected_remote()
             allowed = bool(session and session.get("state") == "active" and
@@ -3377,7 +3491,7 @@ PALETTES = {
         "bg_sunken": "#e9e9e9",
         "surface": "#ffffff", "surface_hi": "#ececec",
         "border": "#dcdcdc", "border_hi": "#c2c2c2",
-        "text": "#1b1b1b", "text_dim": "#4a4a4a", "muted": "#6d6d6d",
+        "text": "#1b1b1b", "text_dim": "#4a4a4a", "muted": "#5e5e5e",
         "accent": "#2f6fa8", "accent_hi": "#3b80bb", "accent_press": "#255a8a",
         "accent_soft": "#e3ecf5", "accent_text": "#2f6fa8",
         "on_accent": "#ffffff", "on_accent_meta": "rgba(255,255,255,0.84)",
@@ -3393,17 +3507,47 @@ PALETTES = {
     },
 }
 
+# Apple's macOS text styles, mapped to Windows logical pixels (macOS 13 pt
+# body reads like Segoe UI at 13 px). Six steps, integers only: size and
+# weight carry the hierarchy, never colour alone. Minimum is 10 px per HIG.
+TYPE = {
+    "title2": "17px",    # page titles, empty-state titles
+    "title3": "15px",    # session/page header
+    "body": "13px",      # message text, composer, primary values
+    "callout": "12px",   # menu items, secondary values, window title
+    "subhead": "11px",   # captions, metadata, table headers, status bar
+    "footnote": "10px",  # the floor: chips and glyph dots
+}
+# Desktop control geometry. macOS push buttons and fields sit near 6 pt;
+# grouped cards and popovers near 10 pt; message bubbles keep a softer 12 pt.
+RADIUS = {
+    "card": "10px",
+    "control": "6px",
+    "tag": "4px",
+    "row": "8px",
+    "bubble": "12px",
+    "pill": "999px",
+}
+
 # Apple HIG liquid-glass layering: only the functional layer (rail, sidebar,
 # title/toolbar, status bar) is glass. Content surfaces stay opaque. The fill
 # runs 60-80% so text on the material keeps its contrast; larger panes such as
 # the sidebar sit at the opaque end.
 GLASS_ALPHA = {
     "dark": {
-        "bg_rail": 140, "bg_side": 184, "glass_bar": 160, "surface_hi": 150,
+        "bg_rail": 140, "bg_side": 190, "glass_bar": 190, "surface_hi": 150,
     },
     "light": {
-        "bg_rail": 172, "bg_side": 202, "glass_bar": 184, "surface_hi": 168,
+        "bg_rail": 172, "bg_side": 202, "glass_bar": 200, "surface_hi": 168,
     },
+}
+# Vibrancy tint. The material composites translucent tint over the desktop, so
+# a bright window behind a dark sidebar used to lift secondary text to ~3:1.
+# Tinting the dark layer near-black (as macOS does) keeps 10-11 px text above
+# 4.5:1; the light layer goes white for the same reason against dark windows.
+GLASS_TINT = {
+    "dark": {"bg_rail": "#000000", "bg_side": "#000000", "glass_bar": "#000000"},
+    "light": {"bg_rail": "#ffffff", "bg_side": "#ffffff", "glass_bar": "#ffffff"},
 }
 
 
@@ -3460,15 +3604,19 @@ def styles_for(theme: str, glass: bool = False) -> str:
     """One authored sheet for both themes, filled from explicit tokens."""
     name = "light" if theme == "light" else "dark"
     tokens = dict(PALETTES[name])
+    tokens.update({f"fs_{key}": value for key, value in TYPE.items()})
+    tokens.update({f"r_{key}": value for key, value in RADIUS.items()})
     if glass:
+        tints = GLASS_TINT.get(name, {})
         for key, alpha in GLASS_ALPHA[name].items():
-            tokens[key] = _rgba(tokens[key], alpha)
+            tokens[key] = _rgba(tints.get(key, tokens[key]), alpha)
     tokens["check_icon"] = check_icon_path(tokens["on_accent"])
     return Template(STYLES).substitute(tokens)
 
 
 STYLES = """
-* { font-family: "Segoe UI Variable Text", "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI"; }
+* { font-family: "Segoe UI Variable Text", "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI";
+    font-size: $fs_body; }
 QMainWindow#rootWindow { background: $bg; color: $text; }
 QWidget#glassRoot { background: transparent; }
 QWidget#page { background: $bg; color: $text; }
@@ -3477,78 +3625,83 @@ QWidget:disabled { color: $muted; }
 QLabel { background: transparent; }
 
 QFrame#titleBar { background: $bg_rail; border-bottom: 1px solid $border; }
-QLabel#titleName { color: $text_dim; font-size: 12px; font-weight: 600; }
+QLabel#titleName { color: $text_dim; font-size: $fs_body; font-weight: 600; }
 QPushButton#winBtn, QPushButton#closeBtn { background: transparent; border: 0; border-radius: 0; }
 QPushButton#winBtn:hover { background: $surface_hi; }
 QPushButton#closeBtn:hover { background: $danger; }
 
 QFrame#rail { background: $bg_rail; border-right: 1px solid $border; }
 QToolButton#railButton { background: transparent; color: $text_dim; border: 0;
-    border-left: 2px solid transparent; border-radius: 3px; padding: 5px 0 3px 0;
-    font-size: 10px; font-weight: 400; }
+    border-left: 2px solid transparent; border-radius: $r_row; padding: 5px 0 3px 0;
+    font-size: $fs_footnote; font-weight: 400; }
 QToolButton#railButton:hover { background: $surface_hi; color: $text_dim; }
+QToolButton#railButton:pressed { background: $surface_hi; }
 QToolButton#railButton:checked { background: $accent_soft; color: $accent_text;
     border-left: 2px solid $accent; }
 QToolButton#railButton:focus { border: 1px solid $focus; }
-QLabel#connectionDot { color: $offline; font-size: 9px; font-weight: 600; }
+QLabel#connectionDot { color: $offline; font-size: $fs_footnote; font-weight: 600; }
 QLabel#connectionDot[online="true"] { color: $online; }
 
 QFrame#sidebar { background: $bg_side; border-right: 1px solid $border; }
-QLabel#brand { color: $text; font-size: 13px; font-weight: 600; }
-QLabel#brandSub { color: $muted; font-size: 11px; }
+QLabel#brand { color: $text; font-size: $fs_body; font-weight: 600; }
+QLabel#brandSub { color: $muted; font-size: $fs_subhead; }
 QPushButton#roundBtn { background: transparent; color: $text_dim;
-    border: 1px solid $border; border-radius: 3px; }
+    border: 1px solid $border; border-radius: $r_control; }
 QPushButton#roundBtn:hover { background: $surface_hi; border-color: $border_hi; }
+QPushButton#roundBtn:pressed { background: $surface_hi; }
 QLineEdit#search, QLineEdit#sessionSearch { background: $surface; color: $text;
-    border: 1px solid $border_hi; border-radius: 3px; padding: 4px 8px; font-size: 12px;
+    border: 1px solid $border_hi; border-radius: $r_row; padding: 5px 9px;
+    font-size: $fs_body;
     selection-background-color: $accent; selection-color: $on_accent; }
 QLineEdit#search:focus, QLineEdit#sessionSearch:focus { border: 1px solid $accent;
-    padding: 4px 8px; }
+    padding: 5px 9px; }
 QLineEdit#search:disabled, QLineEdit#sessionSearch:disabled { color: $muted; background: $bg_sunken; }
-QLabel#sidebarTitle { color: $muted; font-weight: 600; font-size: 11px; }
+QLabel#sidebarTitle { color: $muted; font-weight: 600; font-size: $fs_subhead; }
 QPushButton#filterChip { background: transparent; color: $muted; border: 1px solid transparent;
-    border-radius: 3px; padding: 2px 9px; font-size: 11px; }
+    border-radius: $r_control; padding: 3px 10px; font-size: $fs_subhead; }
 QPushButton#filterChip:hover { background: $surface_hi; color: $text_dim; }
+QPushButton#filterChip:pressed { background: $surface_hi; }
 QPushButton#filterChip:checked { background: $accent_soft; color: $accent_text;
     border-color: $border_hi; }
 
 QListWidget#entityList { background: transparent; border: 0; outline: 0; }
-QListWidget#entityList:focus { border: 1px solid $focus; border-radius: 3px; }
-QListWidget#entityList::item { margin: 0; border-radius: 3px;
+QListWidget#entityList:focus { border: 1px solid $focus; border-radius: $r_row; }
+QListWidget#entityList::item { margin: 0; border-radius: $r_row;
     border-left: 2px solid transparent; }
 QListWidget#entityList::item:selected { background: $accent_soft;
     border-left: 2px solid $accent; }
 QListWidget#entityList::item:hover { background: $surface_hi; }
 QListWidget#entityList::item:selected:hover { background: $accent_soft; }
 QFrame#entityCard { background: transparent; }
-QLabel#entityName { color: $text; font-size: 12.5px; font-weight: 600; }
-QLabel#entitySub { color: $muted; font-size: 11px; }
+QLabel#entityName { color: $text; font-size: $fs_body; font-weight: 600; }
+QLabel#entitySub { color: $muted; font-size: $fs_subhead; }
 QLabel#entityMono { color: $muted; font-family: "Cascadia Mono", "Consolas";
-    font-size: 11px; }
+    font-size: $fs_subhead; }
 QLabel#metaMono { color: $muted; font-family: "Cascadia Mono", "Consolas";
-    font-size: 11px; }
-QLabel#onlineText { color: $online; font-size: 10.5px; font-weight: 600; }
-QLabel#offlineText { color: $muted; font-size: 10.5px; font-weight: 600; }
-QLabel#unknownText { color: $warn; font-size: 10.5px; font-weight: 600; }
-QLabel#staleText { color: $muted; font-size: 10.5px; font-weight: 600; }
+    font-size: $fs_subhead; }
+QLabel#onlineText { color: $online; font-size: $fs_subhead; font-weight: 600; }
+QLabel#offlineText { color: $muted; font-size: $fs_subhead; font-weight: 600; }
+QLabel#unknownText { color: $warn; font-size: $fs_subhead; font-weight: 600; }
+QLabel#staleText { color: $muted; font-size: $fs_subhead; font-weight: 600; }
 
 QFrame#workspace { background: $bg; }
 QFrame#sessionHeader { background: $glass_bar; border-bottom: 1px solid $border; }
-QLabel#sessionTitle { color: $text; font-size: 14px; font-weight: 600; }
-QLabel#muted { color: $muted; font-size: 11.5px; }
-QLabel#sectionLabel { color: $muted; font-size: 11.5px; font-weight: 600; }
+QLabel#sessionTitle { color: $text; font-size: $fs_title2; font-weight: 600; }
+QLabel#muted { color: $muted; font-size: $fs_subhead; }
+QLabel#sectionLabel { color: $muted; font-size: $fs_subhead; font-weight: 600; }
 QPushButton#headerBtn { background: transparent; border: 1px solid $border;
-    border-radius: 3px; }
+    border-radius: $r_control; }
 QPushButton#headerBtn:hover { background: $surface_hi; border-color: $border_hi; }
+QPushButton#headerBtn:pressed { background: $surface_hi; }
 QPushButton#headerBtn:disabled { color: $muted; border-color: $border; }
 
 QLabel#signalText { color: $muted; font-family: "Cascadia Mono", "Consolas";
-    font-size: 10.5px; padding-left: 10px; }
+    font-size: $fs_subhead; padding-left: 10px; }
 QLabel#signalText[state="ok"] { color: $text_dim; }
 QLabel#signalText[state="bad"] { color: $danger; }
 QLabel#signalText[state="warn"] { color: $warn; }
 QLabel#signalMeta { color: $muted; font-family: "Cascadia Mono", "Consolas";
-    font-size: 10.5px; padding-left: 14px; padding-right: 8px; }
+    font-size: $fs_subhead; padding-left: 14px; padding-right: 8px; }
 
 QScrollArea#timeline, QScrollArea#settingsScroll { background: transparent; border: 0; }
 QScrollArea#timeline > QWidget > QWidget,
@@ -3557,33 +3710,37 @@ QWidget#timelineCanvas { background: transparent; }
 QWidget#timelineRow { background: transparent; }
 QWidget#dayRow { background: transparent; }
 QFrame#dayRule { background: $border; border: 0; }
-QLabel#daySeparator { color: $muted; font-size: 11px; }
-QLabel#senderName { color: $text_dim; font-size: 12.5px; font-weight: 600; }
+QLabel#daySeparator { color: $muted; font-size: $fs_subhead; }
+QLabel#senderName { color: $text_dim; font-size: $fs_subhead; font-weight: 600; }
 QFrame#bubbleOut { background: $accent_soft; border: 1px solid $border;
-    border-radius: 4px; }
+    border-radius: $r_bubble; }
 QFrame#bubbleIn { background: $surface; border: 1px solid $border;
-    border-radius: 4px; }
-QLabel#bubbleText { color: $text; font-size: 14px; }
+    border-radius: $r_bubble; }
+QLabel#bubbleText { color: $text; font-size: $fs_body; }
 QLabel#bubbleMeta { color: $muted; font-family: "Cascadia Mono", "Consolas";
-    font-size: 10.5px; }
+    font-size: $fs_footnote; }
 QLabel#fileMeta { color: $muted; font-family: "Cascadia Mono", "Consolas";
-    font-size: 11.5px; }
-QLabel#fileAction { color: $accent_text; font-size: 11.5px; font-weight: 600; }
+    font-size: $fs_subhead; }
+QLabel#fileAction { color: $accent_text; font-size: $fs_subhead; font-weight: 600; }
 
 QFrame#composer { background: $surface; border: 1px solid $border_hi;
-    border-radius: 4px; }
+    border-radius: $r_card; }
+QFrame#composer[focusRing="true"] { border: 1px solid $accent; }
 QTextEdit#composerEdit { background: transparent; border: 0; color: $text;
-    font-size: 13.5px; selection-background-color: $accent; selection-color: $on_accent; }
+    font-size: $fs_body; selection-background-color: $accent; selection-color: $on_accent; }
 QTextEdit#composerEdit:focus { border: 0; }
 QFrame#composerToolbar { background: transparent; border: 0; border-top: 1px solid $border; }
-QPushButton#chipBtn { background: transparent; border: 1px solid $border; border-radius: 3px; }
+QPushButton#chipBtn { background: transparent; border: 1px solid $border;
+    border-radius: $r_control; }
 QPushButton#chipBtn:hover { background: $surface_hi; border-color: $border_hi; }
-QLabel#composerHint { color: $muted; font-size: 11.5px; }
+QPushButton#chipBtn:pressed { background: $surface_hi; }
+QLabel#composerHint { color: $muted; font-size: $fs_subhead; }
 QPushButton#newMsgPill { background: $accent; color: $on_accent; border: 0;
-    border-radius: 10px; padding: 4px 12px; font-size: 11.5px; font-weight: 600; }
+    border-radius: $r_pill; padding: 5px 14px; font-size: $fs_subhead; font-weight: 600; }
 QPushButton#newMsgPill:hover { background: $accent_hi; }
+QPushButton#newMsgPill:pressed { background: $accent_press; }
 QPushButton#sendButton { background: $accent; color: $on_accent; border: 0;
-    border-radius: 3px; padding: 0 16px; font-weight: 600; font-size: 12.5px;
+    border-radius: $r_control; padding: 0 16px; font-weight: 600; font-size: $fs_body;
     min-height: 30px; }
 QPushButton#sendButton:hover { background: $accent_hi; }
 QPushButton#sendButton:pressed { background: $accent_press; }
@@ -3591,72 +3748,80 @@ QPushButton#sendButton:disabled { background: $surface_hi; color: $muted;
     border: 1px solid $border; }
 
 QWidget#tableHeader { background: transparent; }
-QLabel#tableHead { color: $muted; font-size: 11px; font-weight: 600; }
+QLabel#tableHead { color: $muted; font-size: $fs_subhead; font-weight: 600; }
 QListWidget#contentList { background: transparent; border: 0; outline: 0; }
 QListWidget#contentList::item { background: transparent; border-bottom: 1px solid $border; }
 QListWidget#contentList::item:selected { background: $accent_soft; }
 QFrame#tableRow { background: transparent; }
-QLabel#rowTitle { color: $text; font-size: 12.5px; font-weight: 600; }
-QLabel#rowSub { color: $text_dim; font-size: 11px; }
-QLabel#mono { color: $text_dim; font-family: "Cascadia Mono", "Consolas"; font-size: 11px; }
-QLabel#monoStrong { color: $text; font-family: "Cascadia Mono", "Consolas"; font-size: 11.5px; }
+QLabel#rowTitle { color: $text; font-size: $fs_body; font-weight: 600; }
+QLabel#rowSub { color: $text_dim; font-size: $fs_subhead; }
+QLabel#mono { color: $text_dim; font-family: "Cascadia Mono", "Consolas";
+    font-size: $fs_subhead; }
+QLabel#monoStrong { color: $text; font-family: "Cascadia Mono", "Consolas";
+    font-size: $fs_callout; }
 QLabel#chip { color: $text_dim; background: $chip_bg; border: 1px solid $border;
-    border-radius: 3px; padding: 2px 7px; font-size: 10.5px; font-weight: 600; }
+    border-radius: $r_tag; padding: 2px 8px; font-size: $fs_footnote; font-weight: 600; }
 QLabel#chipOk { color: $online; background: $ok_soft; border: 1px solid $border;
-    border-radius: 3px; padding: 2px 7px; font-size: 10.5px; font-weight: 600; }
+    border-radius: $r_tag; padding: 2px 8px; font-size: $fs_footnote; font-weight: 600; }
 QLabel#chipWarn { color: $warn; background: $warn_soft; border: 1px solid $border;
-    border-radius: 3px; padding: 2px 7px; font-size: 10.5px; font-weight: 600; }
+    border-radius: $r_tag; padding: 2px 8px; font-size: $fs_footnote; font-weight: 600; }
 QLabel#chipBad { color: $danger; background: $danger_soft; border: 1px solid $border;
-    border-radius: 3px; padding: 2px 7px; font-size: 10.5px; font-weight: 600; }
-QProgressBar { background: $surface_hi; border: 0; border-radius: 0; max-height: 6px; }
-QProgressBar::chunk { background: $accent; border-radius: 0; }
+    border-radius: $r_tag; padding: 2px 8px; font-size: $fs_footnote; font-weight: 600; }
+QProgressBar { background: $surface_hi; border: 0; border-radius: $r_pill; max-height: 6px; }
+QProgressBar::chunk { background: $accent; border-radius: $r_pill; }
 
-QLabel#pageTitle { color: $text; font-size: 15px; font-weight: 600; }
-QLabel#emptyTitle { color: $text; font-size: 14px; font-weight: 600; }
-QLabel#emptyBody { color: $text_dim; font-size: 12px; }
-QFrame#settingsCard { background: $surface; border: 1px solid $border; border-radius: 3px; }
-QLabel#settingsGroup { color: $muted; font-size: 11px; font-weight: 600; }
-QLabel#settingsKey { color: $text_dim; font-size: 12px; }
-QLabel#settingsValue { color: $text; font-size: 12px; }
+QLabel#pageTitle { color: $text; font-size: $fs_title2; font-weight: 600; }
+QLabel#emptyTitle { color: $text; font-size: $fs_title2; font-weight: 600; }
+QLabel#emptyBody { color: $text_dim; font-size: $fs_body; }
+QFrame#settingsCard { background: $surface; border: 1px solid $border;
+    border-radius: $r_card; }
+QLabel#settingsGroup { color: $muted; font-size: $fs_subhead; font-weight: 600; }
+QLabel#settingsKey { color: $text_dim; font-size: $fs_body; }
+QLabel#settingsValue { color: $text; font-size: $fs_body; }
 QPushButton#rowBtn { background: transparent; color: $text_dim; border: 1px solid $border;
-    border-radius: 3px; font-size: 11px; }
+    border-radius: $r_control; font-size: $fs_subhead; }
 QPushButton#rowBtn:hover { background: $surface_hi; color: $text; border-color: $border_hi; }
-QPushButton#copyBtn { background: transparent; border: 0; border-radius: 3px; }
+QPushButton#rowBtn:pressed { background: $surface_hi; }
+QPushButton#copyBtn { background: transparent; border: 0; border-radius: $r_control; }
 QPushButton#copyBtn:hover { background: $surface_hi; }
 QFrame#settingsDivider { background: $border; border: 0; max-height: 1px; }
 QPushButton#themeChoice { background: transparent; color: $text_dim; border: 1px solid $border;
-    border-radius: 3px; padding: 4px 12px; font-size: 11.5px; }
+    border-radius: $r_control; padding: 5px 14px; font-size: $fs_body; }
+QPushButton#themeChoice:hover { background: $surface_hi; }
 QPushButton#themeChoice:checked { background: $accent_soft; color: $accent_text;
     border-color: $accent; font-weight: 600; }
 QLabel#mediaPreview { background: $bg_sunken; color: $muted; border: 1px solid $border;
-    border-radius: 3px; }
-QCheckBox { color: $text_dim; spacing: 8px; font-size: 12px; }
-QCheckBox::indicator { width: 15px; height: 15px; border-radius: 2px;
+    border-radius: $r_card; }
+QCheckBox { color: $text_dim; spacing: 8px; font-size: $fs_body; }
+QCheckBox::indicator { width: 16px; height: 16px; border-radius: $r_tag;
     border: 1px solid $border_hi; background: $surface; }
 QCheckBox::indicator:hover { border-color: $accent; }
 QCheckBox::indicator:checked { background: $accent; border-color: $accent;
     image: url("$check_icon"); }
-QPushButton#primaryBtn { background: $accent; color: $on_accent; border: 0; border-radius: 3px;
-    padding: 7px 16px; font-weight: 600; font-size: 12.5px; }
+QPushButton#primaryBtn { background: $accent; color: $on_accent; border: 0;
+    border-radius: $r_control; padding: 7px 16px; font-weight: 600; font-size: $fs_body; }
 QPushButton#primaryBtn:hover { background: $accent_hi; }
+QPushButton#primaryBtn:pressed { background: $accent_press; }
 QPushButton#secondaryButton { background: transparent; color: $text; border: 1px solid $border_hi;
-    border-radius: 3px; padding: 6px 12px; font-size: 12px; }
+    border-radius: $r_control; padding: 6px 14px; font-size: $fs_body; }
 QPushButton#secondaryButton:hover { background: $surface_hi; border-color: $text_dim; }
+QPushButton#secondaryButton:pressed { background: $surface_hi; }
 QPushButton#secondaryButton:disabled { color: $muted; border-color: $border; }
 QPushButton:focus { border: 1px solid $focus; }
 QPushButton#sendButton:focus, QPushButton#primaryBtn:focus { border: 1px solid $on_accent; }
 QPushButton#newMsgPill:focus { border: 1px solid $on_accent; }
 
-QMenu { background: $menu_bg; color: $text; border: 1px solid $border_hi; border-radius: 3px;
-    padding: 4px; }
-QMenu::item { padding: 6px 18px; border-radius: 2px; }
+QMenu { background: $menu_bg; color: $text; border: 1px solid $border_hi;
+    border-radius: $r_card; padding: 6px; font-size: $fs_body; }
+QMenu::item { padding: 6px 18px; border-radius: $r_tag; }
 QMenu::item:selected { background: $accent_soft; color: $text; }
 QStatusBar { background: $glass_bar; color: $muted; border-top: 1px solid $border;
-    font-size: 11px; }
+    font-size: $fs_subhead; }
 QStatusBar::item { border: 0; }
 QScrollBar:vertical { background: transparent; width: 12px; margin: 0; }
-QScrollBar::handle:vertical { background: $scroll; border-radius: 0; min-height: 32px; }
+QScrollBar::handle:vertical { background: $scroll; border-radius: $r_pill; min-height: 32px; }
 QScrollBar::handle:vertical:hover { background: $scroll_hi; }
 QScrollBar::add-line, QScrollBar::sub-line { height: 0; }
-QToolTip { background: $menu_bg; color: $text; border: 1px solid $border_hi; padding: 4px 7px; }
+QToolTip { background: $menu_bg; color: $text; border: 1px solid $border_hi;
+    border-radius: $r_control; padding: 5px 8px; font-size: $fs_callout; }
 """

@@ -3,7 +3,7 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号与 GitHub Release 标签一致。
 可执行产物见 [Releases](https://github.com/XinwangTao/flix-cli/releases)。
 
-## [Unreleased] - 2026-11-02
+## [Unreleased] - 2026-11-03
 
 ### 界面
 - 桌面控制台改为原生 Windows 外观：系统标题栏、64px 图标导航、280px 会话列表、
@@ -16,6 +16,13 @@
 - 新增可选毛玻璃材质（设置 → 窗口材质）：按 Apple HIG Liquid Glass 只给导航栏、
   会话列表、标题栏和状态栏上材质，内容层保持不透明；模糊约 36px、填充 60–80%、
   带轻度饱和提升，浅色/深色各自适应；系统关闭透明效果时默认退回标准材质。
+- 排版按 macOS HIG 收敛为六档字号（10/11/12/13/15/17px，正文 13px）与五档圆角
+  （4/6/8/10/12px）；页头 17px，所有按钮、导航、选项补按压态。
+- 左侧分区切换加 170ms 交叉淡入，会话切换保持瞬时；遵循 Windows“显示动画”设置，
+  并新增「设置 → 界面动效」开关，偏好跨启动保留。
+- 毛玻璃按 vibrancy 染色（深色近黑、浅色纯白）：深色侧栏次级文字对比度 3.0→4.8:1，
+  浅色 3.5→4.7:1，页头说明 5.8:1；输入框补键盘焦点环。过程记录见
+  `docs/ui-optimization.md`。
 
 ### 安全
 - 收紧局域网信任边界：`/bubble`、剪贴板、rdShell、rdAgent、群快照只接受已配对且来源 IP
