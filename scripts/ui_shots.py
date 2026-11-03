@@ -152,9 +152,9 @@ def payload() -> dict:
     }
 
 
-def shot(window, name: str, theme: str) -> None:
+def shot(window, name: str, theme: str, size: tuple[int, int] = (1280, 840)) -> None:
     window.apply_theme(theme)
-    window.resize(1280, 840)
+    window.resize(*size)
     APP.processEvents()
     window.grab().save(str(OUT / f"{name}_{theme}.png"))
 
@@ -187,6 +187,9 @@ def main() -> int:
         window.populate_sidebar()
         APP.processEvents()
         shot(window, "chat", theme)
+        # Below 1180px the sidebar narrows to 240px; entity rows must
+        # ellipsize rather than clip.
+        shot(window, "chat_narrow", theme, (1100, 760))
 
         window.set_mode("groups")
         window.current = {"kind": "group", "key": GROUP, "title": "飞达 3 号线"}

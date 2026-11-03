@@ -91,6 +91,21 @@
 
 结果：文字在任意桌面背景上都能读到；Tab 进输入框有明确落点。
 
+## 第 4 轮：窄窗与高对比度
+
+补齐第 3 轮遗留的两项。
+
+**窄窗**：窗口窄于 1180px 时侧栏从 280px 收到 240px（`SIDEBAR_NARROW`），
+`resizeEvent` 随拖动实时切换。会话行原来按 280px 预先算好省略位置，窄窗下会硬裁；
+现在名称与副标题改用 `ElidedLabel`，按控件真实宽度重新省略，完整文本保留在
+tooltip。1100×760 的深色截图见 `docs/ui/chat_narrow_dark.png`。
+
+**高对比度**：新增 `system_contrast_enabled()`，读 `SPI_GETHIGHCONTRAST` 的
+`HCF_HIGHCONTRASTON` 位。开启时 `_glass_visible()` 恒为假（HIG Accessibility：
+增加对比度的请求不能被半透明材质抵消），设置页「毛玻璃」按钮禁用并说明原因，
+但用户的材质偏好保留，关闭高对比度后自动恢复。系统开关可在运行中切换，
+2.5s 数据刷新会检测变化并重绘。行为由 `tests/test_gui_adaptive.py` 覆盖。
+
 ## 动效
 
 - 只在左侧分区切换时做 170ms 的 `OutCubic` 交叉淡入
@@ -118,6 +133,4 @@
 
 ## 下一步（未做）
 
-- 高对比度模式（`SPI_GETHIGHCONTRAST`）目前只影响标准材质，毛玻璃下没有专门分支。
-- 窗口宽度小于 1040px 时侧栏仍固定 280px，尚未做收起。
 - 菜单、提示气泡的圆角在部分 Windows 主题下由系统绘制，QSS 只能覆盖一部分。

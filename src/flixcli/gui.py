@@ -351,6 +351,46 @@ class Avatar(QLabel):
         self.setPixmap(pm)
 
 
+class ElidedLabel(QLabel):
+    """Single-line label that ellipsizes at its real width.
+
+    Entity rows used to be elided once against an assumed 280px sidebar, so a
+    narrower window clipped mid-glyph instead of ellipsizing. Re-eliding on
+    every resize keeps the row readable at any width; the full text stays in
+    the tooltip.
+    """
+
+    def __init__(self, text: str = "", mode: Qt.TextElideMode = Qt.ElideRight):
+        super().__init__()
+        self._full_text = text
+        self._mode = mode
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.setToolTip(text)
+        self._apply()
+
+    def setText(self, text: str):
+        self._full_text = text
+        self.setToolTip(text)
+        self._apply()
+
+    def fullText(self) -> str:
+        return self._full_text
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        return QSize(0, hint.height())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply()
+
+    def _apply(self):
+        shown = QFontMetrics(self.font()).elidedText(
+            self._full_text, self._mode, max(0, self.width()))
+        if shown != QLabel.text(self):
+            QLabel.setText(self, shown)
+
+
 class TitleBar(QFrame):
     """Custom title bar: drag, double-click maximize, window buttons."""
 
@@ -459,6 +499,30 @@ def system_motion_enabled() -> bool:
         return bool(enabled.value) if ok else True
     except (AttributeError, OSError):
         return True
+
+
+def system_contrast_enabled() -> bool:
+    """Windows' high-contrast switch.
+
+    HIG Accessibility: when the system asks for increased contrast, the
+    interface must not replace it with a translucent material, so glass is
+    suspended and the opaque theme takes over.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        class HIGHCONTRASTW(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_uint),
+                        ("dwFlags", ctypes.c_uint),
+                        ("lpszDefaultScheme", ctypes.c_wchar_p)]
+
+        hc = HIGHCONTRASTW()
+        hc.cbSize = ctypes.sizeof(HIGHCONTRASTW)
+        ok = ctypes.windll.user32.SystemParametersInfoW(
+            0x0042, hc.cbSize, ctypes.byref(hc), 0)  # SPI_GETHIGHCONTRAST
+        return bool(hc.dwFlags & 0x00000001) if ok else False  # HCF_HIGHCONTRASTON
+    except (AttributeError, OSError):
+        return False
 
 
 def desktop_snapshot():
@@ -675,6 +739,9 @@ class GlassBackdrop(QWidget):
 
 class MainWindow(QMainWindow):
     HOT_MARGIN = 6
+    SIDEBAR_WIDE = 280
+    SIDEBAR_NARROW = 240
+    NARROW_BELOW = 1180
 
     def __init__(self, api_port: int = 8898, *, snapshot=None):
         super().__init__()
@@ -683,6 +750,7 @@ class MainWindow(QMainWindow):
         self._snapshot = snapshot
         self.glass = self._load_glass()
         self.animations = self._load_animations()
+        self._high_contrast = system_contrast_enabled()
         self._page_fade: QPropertyAnimation | None = None
         self.worker: ApiThread | None = None
         self.action_worker: ApiThread | None = None
@@ -855,10 +923,23 @@ class MainWindow(QMainWindow):
                 button.setIcon(icon(
                     name, colors["accent_text"] if button.isChecked() else colors["icon"], 21))
 
+    def _sidebar_width(self) -> int:
+        return (self.SIDEBAR_NARROW if self.width() < self.NARROW_BELOW
+                else self.SIDEBAR_WIDE)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        panel = getattr(self, "sidebar_panel", None)
+        if panel is not None:
+            width = self._sidebar_width()
+            if panel.minimumWidth() != width:
+                panel.setFixedWidth(width)
+
     def _build_sidebar(self):
         panel = QFrame()
         panel.setObjectName("sidebar")
-        panel.setFixedWidth(280)
+        self.sidebar_panel = panel
+        panel.setFixedWidth(self._sidebar_width())
         box = QVBoxLayout(panel)
         box.setContentsMargins(16, 16, 12, 12)
         box.setSpacing(12)
@@ -1657,11 +1738,13 @@ class MainWindow(QMainWindow):
         # Windows is the only platform where we can snapshot the desktop
         # before the window maps. HIG accessibility: respect the system's
         # "Reduce transparency" switch when the user has not chosen yet.
-        return sys.platform == "win32" and system_transparency_enabled()
+        return (sys.platform == "win32" and system_transparency_enabled()
+                and not system_contrast_enabled())
 
     def _glass_visible(self) -> bool:
         root = getattr(self, "glass_root", None)
-        return bool(self.glass and root is not None and root.has_source())
+        return bool(self.glass and not system_contrast_enabled()
+                    and root is not None and root.has_source())
 
     def apply_theme(self, theme: str):
         self.theme = "light" if theme == "light" else "dark"
@@ -1896,8 +1979,14 @@ class MainWindow(QMainWindow):
             button.setChecked(theme == getattr(self, "theme", "dark"))
 
     def _sync_glass_button(self):
+        blocked = system_contrast_enabled()
+        effective = bool(getattr(self, "glass", False)) and not blocked
         for enabled, button in getattr(self, "glass_buttons", {}).items():
-            button.setChecked(bool(getattr(self, "glass", False)) == enabled)
+            button.setChecked(effective == enabled)
+            if enabled:
+                button.setEnabled(not blocked)
+                button.setToolTip(
+                    "系统已开启高对比度，窗口使用标准材质" if blocked else "模糊窗口后面的桌面")
 
     def _sync_animation_button(self):
         for enabled, button in getattr(self, "animation_buttons", {}).items():
@@ -1978,6 +2067,7 @@ class MainWindow(QMainWindow):
     # ---------- data refresh ----------
 
     def refresh(self):
+        self._sync_contrast_state()
         if getattr(self, "offline_mode", False):
             return  # offline page waits for an explicit retry
         if self.worker and self.worker.isRunning():
@@ -1986,6 +2076,13 @@ class MainWindow(QMainWindow):
         self.worker.result.connect(self.apply_overview)
         self.worker.failed.connect(self.fail)
         self.worker.start()
+
+    def _sync_contrast_state(self) -> None:
+        """Follow the Windows high-contrast switch while the app is running."""
+        now = system_contrast_enabled()
+        if now != getattr(self, "_high_contrast", None):
+            self._high_contrast = now
+            self._restyle()
 
     def apply_overview(self, payload: dict):
         self.payload = payload
@@ -2102,9 +2199,8 @@ class MainWindow(QMainWindow):
         row.addWidget(avatar)
         col = QVBoxLayout()
         col.setSpacing(1)
-        name = QLabel(self._elide(title, 168, 14))
+        name = ElidedLabel(title)
         name.setObjectName("entityName")
-        name.setToolTip(title)
         col.addWidget(name)
         if kind in ("device", "adb") and " · " in subtitle:
             head, tail = subtitle.split(" · ", 1)
@@ -2114,16 +2210,14 @@ class MainWindow(QMainWindow):
             first = QLabel(self._elide(head, 74, 12) + " ·")
             first.setObjectName("entitySub")
             first.setToolTip(subtitle)
-            second = QLabel(self._elide(tail, 116, 11))
+            second = ElidedLabel(tail)
             second.setObjectName("entityMono")
-            second.setToolTip(subtitle)
             sub_row.addWidget(first)
             sub_row.addWidget(second, 1)
             col.addLayout(sub_row)
         else:
-            sub = QLabel(self._elide(subtitle, 176, 12))
+            sub = ElidedLabel(subtitle)
             sub.setObjectName("entitySub")
-            sub.setToolTip(subtitle)
             col.addWidget(sub)
         row.addLayout(col, 1)
         if getattr(self, "offline_mode", False):
