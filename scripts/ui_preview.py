@@ -53,6 +53,9 @@ def demo_payload() -> dict:
                  "path": "/nonexistent/relay-2025-02-20.log"})
     add(PEER, "👍 那我看一下今天的构建产物。", 240_000)
     add(ME, "dist 里有两个，macOS 那个还在跑。", 300_000)
+    # The store hands the transcript over newest-first and the renderer flips
+    # it; keep the sample honest or the preview shows the conversation backwards.
+    bubbles.reverse()
     return {
         "self": {"id": ME, "alias": "工作站", "port": 9012},
         "devices": [
