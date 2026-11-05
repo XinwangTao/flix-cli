@@ -16,7 +16,7 @@ a = Analysis(
     binaries=_winpty_binaries,
     datas=_winpty_datas,
     hiddenimports=['flixcli.cli', 'flixcli.mcp_server', 'flixcli.daemon',
-                   'flixcli.ptyshell'] + _winpty_hidden,
+                   'flixcli.ptyshell', 'flixcli.autoupdate'] + _winpty_hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
