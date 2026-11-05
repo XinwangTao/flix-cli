@@ -514,9 +514,17 @@ def _clean_env() -> dict:
 
 
 def start_instance(exe: str | Path, args: str = "") -> subprocess.Popen | None:
-    """Detached so the updater can exit without killing what it started."""
+    """Detached so the updater can exit without killing what it started.
+
+    On Windows the command line is passed as one string: it came from the
+    running process verbatim, and splitting it on spaces would break
+    `agent --cmd "a command with quoted arguments"`.
+    """
     exe = str(exe)
-    command = [exe] + (args.split() if args else [])
+    if sys.platform == "win32":
+        command: str | list[str] = f'"{exe}"' + (f" {args}" if args.strip() else "")
+    else:
+        command = [exe] + (args.split() if args else [])
     kwargs: dict = {"cwd": str(Path(exe).parent), "env": _clean_env(),
                     "stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
                     "stderr": subprocess.DEVNULL, "close_fds": True}

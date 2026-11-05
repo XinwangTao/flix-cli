@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import sys
 import tempfile
 import time
 import unittest
@@ -103,6 +104,17 @@ class LogTests(unittest.TestCase):
             with mock.patch("builtins.print", side_effect=OSError("closed pipe")):
                 au.log_line("installed", path=log, echo=True)
             self.assertIn("installed", log.read_text(encoding="utf-8"))
+
+
+class StartInstanceTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "win32", "Windows command-line semantics")
+    def test_quoted_agent_command_survives_a_restart(self):
+        with mock.patch.object(au.subprocess, "Popen") as popen:
+            popen.return_value = mock.Mock()
+            au.start_instance(r"C:\Apps\RelayDesk.exe",
+                              'agent --cmd "claude -p hello world"')
+        self.assertEqual(popen.call_args.args[0],
+                         '"C:\\Apps\\RelayDesk.exe" agent --cmd "claude -p hello world"')
 
 
 class VersionTests(unittest.TestCase):
