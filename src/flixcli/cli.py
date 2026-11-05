@@ -356,10 +356,18 @@ async def cmd_upgrade(args) -> int:
 def cmd_update(args) -> int:
     """Install a newer build from the GitHub release page.
 
-    Exit codes: 10 means an update exists but `--check` was asked for, so a
-    scheduled task can tell "nothing to do" from "act now".
+    Exit codes: 10 means an update exists but `--check` was asked for, so the
+    caller can tell "nothing to do" from "act now".
     """
     from . import autoupdate as au
+
+    def emit_safely(payload: dict) -> None:
+        # The GUI that launched us may have been stopped to swap its own exe;
+        # its stdout pipe is then closed and must not crash the updater.
+        try:
+            emit(payload, args.json)
+        except (OSError, ValueError):
+            pass
 
     mirrors = tuple(args.mirror) if args.mirror else au.MIRRORS
     state_dir = Path(args.state_dir) if args.state_dir else None
@@ -377,13 +385,13 @@ def cmd_update(args) -> int:
             log_path=log_path,
             downloads_dir=args.downloads_dir, echo=not args.quiet)
     except au.UpdateError as exc:
-        # A scheduled run has no console: leave the reason in the log too.
+        # A headless run has no console: leave the reason in the log too.
         au.log_line(f"failed {exc.kind}: {exc.detail}", path=log_path)
         if not args.quiet:
-            emit({"ok": False, "error": exc.kind, "detail": exc.detail}, args.json)
+            emit_safely({"ok": False, "error": exc.kind, "detail": exc.detail})
         return exc.code
     if not args.quiet:
-        emit(result, args.json)
+        emit_safely(result)
     if not result.get("ok"):
         return au.EXIT_INSTALL
     if args.check and result.get("status") == "update-available":

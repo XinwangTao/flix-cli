@@ -94,6 +94,17 @@ class ManagedInstanceTests(unittest.TestCase):
             self.assertEqual(result["leftRunning"], [os.getpid(), 777])
 
 
+class LogTests(unittest.TestCase):
+    def test_broken_stdout_does_not_abort_the_update(self):
+        """The GUI is stopped before the health check; its stdout pipe is gone.
+        A failed echo must not skip the rollback that follows."""
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "update.log"
+            with mock.patch("builtins.print", side_effect=OSError("closed pipe")):
+                au.log_line("installed", path=log, echo=True)
+            self.assertIn("installed", log.read_text(encoding="utf-8"))
+
+
 class VersionTests(unittest.TestCase):
     def test_real_tag_forms(self):
         for text in ("v2.2.1", "2.2.1", "flix 2.2.1", "RelayDesk v2.2.1"):

@@ -73,7 +73,13 @@ def log_line(message: str, *, path: Path | None = None, echo: bool = False) -> N
     except OSError:
         pass
     if echo:
-        print(message, flush=True)
+        # The caller may be the GUI we just stopped to swap its exe: its end of
+        # the stdout pipe is gone, and a failed print must never abort a swap or
+        # (worse) the rollback that follows an unhealthy restart.
+        try:
+            print(message, flush=True)
+        except (OSError, ValueError):
+            pass
 
 
 # ---------------------------------------------------------------- versions
