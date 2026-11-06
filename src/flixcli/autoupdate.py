@@ -851,3 +851,97 @@ def _probe_version(exe: Path) -> str | None:
     text = (completed.stdout or "") + (completed.stderr or "")
     version = parse_version(text)
     return ".".join(str(p) for p in version) if version else None
+
+# ---------------------------------------------------------------- startup check
+
+def check_update(repo: str = REPO_DEFAULT, current: str | None = None) -> dict:
+    """Latest release vs installed version; never raises.
+
+    flixd calls this at every start so a stale daemon on a board says so in its
+    own log and in /healthz instead of silently running last month's build.
+    """
+    from . import __version__ as installed
+
+    cur = current or installed
+    try:
+        release = pick_release(fetch_releases(repo))
+    except UpdateError as exc:
+        return {"ok": False, "error": exc.kind, "detail": exc.detail, "current": cur}
+    return {
+        "ok": True,
+        "current": cur,
+        "latest": release.tag.lstrip("vV"),
+        "tag": release.tag,
+        "available": compare_versions(release.tag, cur) > 0,
+        "url": release.url,
+    }
+
+
+def install_from_source(tag: str, repo: str = REPO_DEFAULT,
+                        workdir: str | Path = "/tmp/flixcli-update") -> str:
+    """Download the GitHub source tarball for `tag` and install it in place.
+
+    Used on Linux boxes that run from source (board deployments): the published
+    binaries are x86_64/Windows only, so the source tarball is the update.
+    Returns the installed version string.
+    """
+    import subprocess
+    import tarfile
+
+    work = Path(workdir)
+    if work.exists():
+        for child in work.iterdir():
+            if child.is_dir():
+                import shutil
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
+    work.mkdir(parents=True, exist_ok=True)
+
+    url = f"https://api.github.com/repos/{repo}/tarball/{tag}"
+    archive = work / "source.tar.gz"
+    with _open(url) as resp, open(archive, "wb") as fh:
+        while True:
+            chunk = resp.read(1 << 16)
+            if not chunk:
+                break
+            fh.write(chunk)
+    with tarfile.open(archive, "r:gz") as tar:
+        tar.extractall(work)
+    roots = [p for p in work.iterdir() if p.is_dir()]
+    if not roots:
+        raise UpdateError("bad-archive", "源码包里没有目录")
+    src = roots[0]
+
+    import sys
+    uv = _find_uv()
+    if uv:
+        cmd = [uv, "pip", "install", "--python", sys.executable, "--reinstall", str(src)]
+    else:
+        # uv 建的 venv 默认没有 pip：先补一个再说
+        subprocess.run([sys.executable, "-m", "ensurepip", "--upgrade"],
+                       capture_output=True, text=True, timeout=300)
+        cmd = [sys.executable, "-m", "pip", "install", "--force-reinstall",
+               "--no-input", str(src)]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    if proc.returncode != 0:
+        raise UpdateError("install-failed", (proc.stderr or proc.stdout)[-400:])
+    return tag.lstrip("vV")
+
+
+def shutil_which(name: str) -> str | None:
+    import shutil
+    return shutil.which(name)
+
+
+def _find_uv() -> str | None:
+    """systemd 服务的 PATH 很短，uv 常在用户目录里，得自己找。"""
+    import shutil
+    found = shutil.which("uv")
+    if found:
+        return found
+    for candidate in ("/root/.local/bin/uv", "/usr/local/bin/uv",
+                      str(Path.home() / ".local/bin/uv")):
+        if Path(candidate).exists():
+            return candidate
+    return None

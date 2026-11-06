@@ -15,6 +15,8 @@ ExecStart=@DIR@/.venv/bin/flixd --web-port @WEB_PORT@ --alias %H
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
+# 每次启动检查 GitHub release；设为 1 时自动装源码包并重启，0 只报告
+Environment=FLIX_AUTO_UPDATE=1
 # 板子无 GUI 剪贴板时加 --no-clip-sync 可省掉一轮空轮询
 MemoryMax=256M
 TasksMax=256

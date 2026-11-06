@@ -14,6 +14,9 @@ from pathlib import Path
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 from . import DEVICE_PORT, local_ip, model
+
+# 启动时检查 GitHub 最新 release 的结果，/healthz 直接读它
+UPDATE_STATE: dict = {}
 from .adb import AdbClient
 from .media_session import SessionManager
 from .media_transport import MediaRuntime
@@ -225,7 +228,8 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
 
         wapp, _push = make_web_app(store, ident, _on_web_text, _save_dir,
                                    channel_port=device_port,
-                                   send_text_fn=send_text)
+                                   send_text_fn=send_text,
+                                   update_info=lambda: UPDATE_STATE)
         wr = _web.AppRunner(wapp)
         await wr.setup()
         await _web.TCPSite(wr, "0.0.0.0", web_port).start()
@@ -270,6 +274,42 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
             pass
 
     tasks.append(asyncio.create_task(announce_loop()))
+
+    async def update_check_task() -> None:
+        """每次启动查一次 GitHub release；FLIX_AUTO_UPDATE=1 时自动装源码包并重启。"""
+        import os
+        from .autoupdate import check_update
+        try:
+            info = await asyncio.to_thread(check_update)
+        except Exception as exc:  # noqa: BLE001 - 检查失败不影响主服务
+            info = {"ok": False, "error": str(exc)}
+        UPDATE_STATE.update(info)
+        print("[flixd] 版本检查: 当前 %s 最新 %s%s" % (
+            info.get("current"), info.get("latest") or "未知",
+            "（有新版本）" if info.get("available") else "（已是最新）"),
+            file=sys.stderr, flush=True)
+        if info.get("available") and os.environ.get("FLIX_AUTO_UPDATE") == "1":
+            await asyncio.to_thread(_apply_update, info.get("tag") or "")
+
+    def _apply_update(tag: str) -> None:
+        import os
+        from .autoupdate import install_from_source
+        try:
+            version = install_from_source(tag)
+        except Exception as exc:  # noqa: BLE001
+            print("[flixd] 自动更新失败: %s" % exc, file=sys.stderr, flush=True)
+            UPDATE_STATE["error"] = str(exc)
+            return
+        print("[flixd] 已更新到 %s，重启服务" % version, file=sys.stderr, flush=True)
+        if subprocess.run(["systemctl", "is-active", "flixd"],
+                          capture_output=True).returncode == 0:
+            subprocess.Popen(["systemctl", "restart", "flixd"])
+        else:
+            os.execv(sys.executable, [sys.executable, *sys.argv])
+
+    tasks.append(asyncio.create_task(update_check_task()))
+    print("[flixd] 启动时检查更新", file=sys.stderr, flush=True)
+
     print("[flixd] periodic announce every 30s", file=sys.stderr, flush=True)
 
     async def agent_outbox_loop() -> None:

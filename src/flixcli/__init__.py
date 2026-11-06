@@ -5,7 +5,7 @@ import socket
 import struct
 import sys
 
-__version__ = "2.2.1"   # must match pyproject.toml (tests/test_version.py guards it)
+__version__ = "2.3.1"   # must match pyproject.toml (tests/test_version.py guards it)
 
 MULTICAST_GROUP = "224.0.0.168"      # [IDA pending: DiscoverManager] / [RT capture]
 DEVICE_PORT = 8891                    # TCP+UDP device channel
