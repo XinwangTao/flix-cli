@@ -53,6 +53,7 @@ class AgentIntentTests(unittest.TestCase):
                 root = Path(tmp)
                 store = make_store(root, PEER)
                 store.add_pair(ME["fingerprint"], "3012")
+                store.upsert_device(ME["fingerprint"], ip="127.0.0.1")
                 app = make_app(store, PEER, lambda *_: None)
                 runner = web.AppRunner(app); await runner.setup()
                 await web.TCPSite(runner, "127.0.0.1", 19632).start()
@@ -100,6 +101,7 @@ class SendTests(unittest.TestCase):
                 mine = make_store(Path(mine_tmp), ME)
                 peer = make_store(Path(peer_tmp), PEER)
                 peer.add_pair(ME["fingerprint"], "3012")
+                peer.upsert_device(ME["fingerprint"], ip="127.0.0.1")
                 app = make_app(peer, PEER, lambda *_: None)
                 runner = web.AppRunner(app); await runner.setup()
                 await web.TCPSite(runner, "127.0.0.1", 19634).start()
@@ -121,6 +123,7 @@ class SendTests(unittest.TestCase):
                 mine = make_store(Path(mine_tmp), ME)
                 peer = make_store(Path(peer_tmp), PEER)
                 peer.add_pair(ME["fingerprint"], "3012")
+                peer.upsert_device(ME["fingerprint"], ip="127.0.0.1")
                 mine.upsert_device(PEER["fingerprint"], alias="B",
                                    ip="127.0.0.1", port=19635)
                 try:

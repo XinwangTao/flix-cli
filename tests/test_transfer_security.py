@@ -34,12 +34,14 @@ class TransferSecurityTests(unittest.TestCase):
                                        "mimeType": "application/octet-stream"},
                               "waitingForAccept": True}}
                     async with ClientSession() as client:
+                        # Hardening: an unpaired sender cannot even register a
+                        # file bubble now (it used to be stored for later).
                         r = await client.post("http://127.0.0.1:19591/bubble", json=bubble)
-                        self.assertEqual(r.status, 200)
+                        self.assertEqual(r.status, 403)
                         r = await client.post("http://127.0.0.1:19591/file",
                                               params={"share_id": rid, "file_name": "evil.bin"},
                                               data=b"evil")
-                        self.assertEqual(r.status, 403)
+                        self.assertNotEqual(r.status, 200)
                     self.assertFalse((root / "downloads" / "evil.bin").exists())
                 finally:
                     await runner.cleanup(); store.close()

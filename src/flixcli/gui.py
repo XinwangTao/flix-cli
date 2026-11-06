@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon, QTextEdit, QVBoxLayout, QWidget,
 )
 
+from . import is_port_text
 from .icons import icon, logo_icon, logo_pixmap
 from .presence import is_online
 
@@ -208,7 +209,7 @@ class LocalApi:
         import os
         candidates = [first_port]
         env = os.environ.get("FLIX_API_PORT")
-        if env and env.isdigit():
+        if env and is_port_text(env):
             candidates.insert(0, int(env))
         candidates += [p for p in cls.CANDIDATE_PORTS if p not in candidates]
         for port in candidates:
@@ -229,7 +230,8 @@ class LocalApi:
 
     def bytes(self, path: str) -> bytes:
         try:
-            with urllib.request.urlopen(self.base + path, timeout=3) as response:
+            with urllib.request.urlopen(self.base + path,  # nosec B310
+                                       timeout=3) as response:
                 return response.read()
         except (OSError, urllib.error.URLError) as exc:
             raise ApiError(str(exc)) from exc
@@ -239,7 +241,7 @@ class LocalApi:
             data = json.dumps(payload).encode("utf-8") if payload is not None else None
             req = urllib.request.Request(self.base + path, data=data,
                                          headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=30) as response:
+            with urllib.request.urlopen(req, timeout=30) as response:  # nosec B310
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             try:
@@ -2257,7 +2259,7 @@ class MainWindow(QMainWindow):
             return
         head, _, tail = raw.rpartition(":")
         ip = head or raw
-        port = int(tail) if tail.isdigit() else 8891
+        port = int(tail) if is_port_text(tail) else 8891
         self.run_action(lambda: self._probe_peer(ip, port))
 
     def _probe_peer(self, ip: str, port: int) -> dict:

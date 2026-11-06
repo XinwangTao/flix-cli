@@ -17,13 +17,29 @@ import urllib.parse
 import urllib.request
 import uuid
 
-from . import DEVICE_PORT, __version__, local_ip
+from . import DEVICE_PORT, __version__, is_port_text, local_ip
 from .adb import AdbClient, AdbError
 from .channel import PeerError, post_bubble, post_intent, post_json
 from .config import APP_DIR, Store, load_or_create_identity
 from .discovery import Discovery
 from .model import clipboard_intent, shell_intent, text_bubble
 from .routing import resolve_target
+
+
+def _join_remote_command(parts: list[str]) -> str:
+    """Rebuild one command line without losing the caller's argument quoting.
+
+    `" ".join(parts)` turned `python -c "print('a b')"` into
+    `python -c print('a b')` on the peer. Quote for the platform the command
+    will run on (both flixcli ends are the same OS in practice).
+    """
+    if not parts:
+        return ""
+    if sys.platform == "win32":
+        import subprocess
+        return subprocess.list2cmdline(parts)
+    import shlex
+    return shlex.join(parts)
 
 
 def emit(payload, as_json: bool) -> None:
@@ -129,7 +145,7 @@ async def cmd_shell(args) -> int:
     parts = list(args.command)
     if parts and parts[0] == "--":
         parts = parts[1:]
-    command = " ".join(parts).strip()
+    command = _join_remote_command(parts)
     if not command and not getattr(args, "pty", False):
         emit({"error": "usage",
               "detail": "nothing to run; use: flix shell <device> -- <command>"}, True)
@@ -377,7 +393,7 @@ async def cmd_send_files(args) -> int:
 async def cmd_probe(args) -> int:
     import aiohttp
     to = args.to
-    if to.rpartition(":")[2].isdigit() is False:
+    if not is_port_text(to.rpartition(":")[2]):
         to = f"{to}:{DEVICE_PORT}"
     try:
         async with aiohttp.ClientSession() as s:
@@ -398,7 +414,7 @@ async def cmd_ping(args) -> int:
     """Manual-add handshake: POST /ping_v2, report the peer's deviceModal."""
     from .channel import PeerError, ping_v2
     to = args.to
-    if to.rpartition(":")[2].isdigit() is False:
+    if not is_port_text(to.rpartition(":")[2]):
         to = f"{to}:{DEVICE_PORT}"
     ip, _, ps = to.rpartition(":")
     store = Store()
@@ -650,8 +666,16 @@ def cmd_bubbles(args) -> int:
 async def cmd_pair(args) -> int:
     """Pair with a device: ping_v2 for identity, then askPairDevice intent."""
     from .channel import PeerError, pair_device, ping_v2
+    # Fail fast: the receiver verifies verifyCode, so a code-less attempt can
+    # never succeed and should not even touch the network.
+    if not args.code:
+        emit({"error": "pair-code-required",
+              "detail": "pass --code <peer 4-digit key>; run `flix qrcode` "
+                        "on the peer or scan its pairing QR",
+              "target": args.to}, args.json)
+        return 2
     to = args.to
-    if to.rpartition(":")[2].isdigit() is False:
+    if not is_port_text(to.rpartition(":")[2]):
         to = f"{to}:{DEVICE_PORT}"
     ip, _, ps = to.rpartition(":")
     port = int(ps) if ps else DEVICE_PORT
@@ -676,7 +700,7 @@ async def cmd_pair(args) -> int:
         own_key = store.own_pair_key()
         try:
             code, msg = await pair_device(ip, ident["fingerprint"], peer_fp,
-                                          args.code or own_key, port=port)
+                                          args.code, port=port)
         except PeerError as e:
             emit({"error": e.kind, "detail": e.detail, "ip": to}, args.json)
             return 3 if e.kind in ("timeout", "unreachable") else 4
@@ -693,28 +717,38 @@ async def cmd_pair(args) -> int:
 # --- group chat -------------------------------------------------------------
 
 
-def cmd_group_create(args) -> int:
-    from .groupchat import new_group
+async def cmd_group_create(args) -> int:
+    from .groupchat import new_group, update_group
     store = Store()
     try:
+        ident = load_or_create_identity(store)
         g = new_group(store, args.name, args.member or [])
-        emit(g, args.json)
+        # Creating a group must tell its members, otherwise the peer keeps
+        # receiving bubbles with a groupId it has no row for.
+        res = await update_group(store, ident, g["id"])
+        emit({**g, "delivered": res.get("delivered", 0),
+              "total": res.get("total", 0),
+              "results": res.get("results", [])}, args.json)
         return 0
     finally:
         store.close()
 
 
-def cmd_group_add(args) -> int:
+async def cmd_group_add(args) -> int:
+    from .groupchat import update_group
     store = Store()
     try:
-        from .groupchat import find_group
-        g = find_group(store, args.group)
-        if g is None:
-            emit({"error": "no-group", "detail": args.group}, args.json)
+        ident = load_or_create_identity(store)
+        res = await update_group(store, ident, args.group,
+                                 add=(args.fingerprint,))
+        if not res.get("ok"):
+            emit(res, args.json)
             return 2
-        store.add_group_member(g["id"], args.fingerprint)
-        emit({"ok": True, "group": g["id"],
-              "members": store.group_members(g["id"])}, args.json)
+        emit({"ok": True, "group": res["group"], "name": res.get("name", ""),
+              "members": res.get("members", []),
+              "delivered": res.get("delivered", 0),
+              "total": res.get("total", 0),
+              "results": res.get("results", [])}, args.json)
         return 0
     finally:
         store.close()
@@ -795,7 +829,7 @@ def _desktop_api_request(port: int, path: str, payload: dict | None = None) -> d
     req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data,
                                  headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with urllib.request.urlopen(req, timeout=10) as response:  # nosec B310
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         try:

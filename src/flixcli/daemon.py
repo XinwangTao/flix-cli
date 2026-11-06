@@ -3,13 +3,49 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
+import os
 import sys
 
 from . import DEVICE_PORT, DESKTOP_API_PORT
 from .channel import PeerError, post_bubble
-from .config import Store, load_or_create_identity
+from .config import APP_DIR, Store, load_or_create_identity
 from .daemon_runtime import run_daemon
+
+
+def _acquire_singleton():
+    """Hold one daemon per app dir for the process lifetime.
+
+    Two instances share db.sqlite: both would flush the outbox (duplicate
+    delivery) and overwrite each other's announced port. Same-port bind
+    failures only caught the identical-port case.
+    """
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = APP_DIR / "daemon.lock"
+    fh = open(lock_path, "a+b")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        # Windows denies reads on a byte range locked by another process, so
+        # close first and read the pid through a fresh handle.
+        fh.close()
+        try:
+            pid = lock_path.read_text(encoding="ascii").strip()
+        except OSError:
+            pid = ""
+        return None, pid
+    fh.seek(0)
+    fh.truncate()
+    fh.write(str(os.getpid()).encode("ascii"))
+    fh.flush()
+    return fh, str(os.getpid())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -28,6 +64,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="also serve the browser send page on this port")
     args = ap.parse_args(argv)
 
+    lock, held_pid = _acquire_singleton()
+    if lock is None:
+        print(f"flixd: already running (pid {held_pid or '?'}); stop it first "
+              f"(the daemon owns {APP_DIR})", file=sys.stderr)
+        return 5
+
     store = Store()
     ident = load_or_create_identity(store)
     if args.alias:
@@ -45,7 +87,9 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("flixd: stopped", file=sys.stderr)
         return 0
-    return 0
+    finally:
+        with contextlib.suppress(OSError):
+            lock.close()
 
 
 if __name__ == "__main__":

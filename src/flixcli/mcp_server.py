@@ -13,7 +13,7 @@ import asyncio
 import json
 import sys
 
-from . import __version__
+from . import DEVICE_PORT, __version__, is_port_text
 from .adb import AdbClient, AdbError
 from .channel import PeerError, post_bubble, post_intent
 from .config import Store, load_or_create_identity
@@ -88,14 +88,15 @@ TOOLS = [
     {"name": "flix_pair",
      "description": "Pair with a device (ping_v2 identity exchange then "
                     "askPairDevice). Pairing enables auto file receive on "
-                    "official clients.",
+                    "official clients. code is REQUIRED and must be the "
+                    "peer's 4-digit pairing key.",
      "inputSchema": {"type": "object",
                      "properties": {"to": {"type": "string",
                                            "description": "ip[:port]"},
                                     "code": {"type": "string",
                                              "description": "peer's 4-digit "
-                                             "pairing key (optional)"}},
-                     "required": ["to"]}},
+                                             "pairing key (from its QR)"}},
+                     "required": ["to", "code"]}},
     {"name": "flix_group_create",
      "description": "Create a LAN group with optional member fingerprints.",
      "inputSchema": {"type": "object",
@@ -224,7 +225,7 @@ async def _tool_call(name: str, args: dict) -> dict:
         from . import DEVICE_PORT
         target = str(args.get("target", ""))
         head, _, tail = target.rpartition(":")
-        if not tail.isdigit():
+        if not is_port_text(tail):
             target = f"{target}:{DEVICE_PORT}"
         try:
             async with aiohttp.ClientSession() as s:
@@ -244,7 +245,7 @@ async def _tool_call(name: str, args: dict) -> dict:
             port = None
             target = to
             head, _, tail = to.rpartition(":")
-            if tail.isdigit():
+            if is_port_text(tail):
                 target, port = head, int(tail)
             ip, fp = None, to
             for row in store.devices():
@@ -252,7 +253,7 @@ async def _tool_call(name: str, args: dict) -> dict:
                     ip, fp = row["ip"], row["fingerprint"]
                     port = port or (row.get("port") or None)
                     break
-            if ip is None and target.replace(".", "").isdigit():
+            if ip is None and is_port_text(target.replace(".", "")):
                 ip = target
             if ip is None:
                 return {"error": "no-device", "detail": f"unknown target {to!r}; "
@@ -272,14 +273,17 @@ async def _tool_call(name: str, args: dict) -> dict:
             store.close()
     if name == "flix_pair":
         from .channel import pair_device, ping_v2
+        peer_code = str(args.get("code") or "").strip()
+        if not peer_code:
+            return {"ok": False, "error": "pair-code-required",
+                    "detail": "pass the peer's 4-digit key (flix qrcode)"}
         store = Store()
         try:
             ident = load_or_create_identity(store)
             to = str(args.get("to", ""))
             head, _, tail = to.rpartition(":")
-            ip, port = (head, int(tail)) if tail.isdigit() else (to, DEVICE_PORT)
-            from . import DEVICE_PORT as DP
-            port = port or DP
+            ip, port = (head, int(tail)) if is_port_text(tail) else (to, DEVICE_PORT)
+            port = port or DEVICE_PORT
             modal = await ping_v2(ip, ident, port=port)
             peer_fp = modal.get("fingerprint")
             if not peer_fp:
@@ -289,8 +293,7 @@ async def _tool_call(name: str, args: dict) -> dict:
                                 port=modal.get("port"), version=modal.get("version"),
                                 ip=ip, os_name=str(modal.get("os") or ""))
             code, msg = await pair_device(ip, ident["fingerprint"], peer_fp,
-                                          str(args.get("code") or ""),
-                                          port=port)
+                                          peer_code, port=port)
             if code == 0:
                 store.add_pair(peer_fp, store.own_pair_key())
             return {"ok": code == 0, "paired": code == 0, "peer": peer_fp,
@@ -300,24 +303,27 @@ async def _tool_call(name: str, args: dict) -> dict:
         finally:
             store.close()
     if name == "flix_group_create":
-        from .groupchat import new_group
+        from .groupchat import new_group, update_group
         store = Store()
         try:
+            ident = load_or_create_identity(store)
             g = new_group(store, str(args.get("name", "")),
                           [str(m) for m in (args.get("members") or [])])
-            return {"ok": True, **g}
+            res = await update_group(store, ident, g["id"])
+            return {"ok": True, **g, "delivered": res.get("delivered", 0),
+                    "total": res.get("total", 0),
+                    "results": res.get("results", [])}
         finally:
             store.close()
     if name == "flix_group_add":
-        from .groupchat import find_group
+        from .groupchat import update_group
         store = Store()
         try:
-            g = find_group(store, str(args.get("group", "")))
-            if not g:
-                return {"ok": False, "error": "no-group"}
+            ident = load_or_create_identity(store)
             fp = str(args.get("fingerprint", ""))
-            store.add_group_member(g["id"], fp)
-            return {"ok": True, "group": g["id"], "added": fp}
+            res = await update_group(store, ident, str(args.get("group", "")),
+                                     add=(fp,))
+            return {**res, "added": fp}
         finally:
             store.close()
     if name == "flix_status":
@@ -347,7 +353,7 @@ async def _tool_call(name: str, args: dict) -> dict:
             port = None
             target = to
             head, _, tail = to.rpartition(":")
-            if tail.isdigit():
+            if is_port_text(tail):
                 target, port = head, int(tail)
             ip, fp = None, to
             for row in store.devices():
@@ -355,7 +361,7 @@ async def _tool_call(name: str, args: dict) -> dict:
                     ip, fp = row["ip"], row["fingerprint"]
                     port = port or (row.get("port") or None)
                     break
-            if ip is None and target.replace(".", "").isdigit():
+            if ip is None and is_port_text(target.replace(".", "")):
                 ip = target
             if ip is None:
                 return {"ok": False, "error": "no-device",
@@ -460,11 +466,14 @@ def serve() -> int:
             msg = json.loads(line)
         except ValueError:
             continue
+        if not isinstance(msg, dict):
+            continue
         method = msg.get("method")
         mid = msg.get("id")
         if method == "initialize":
+            params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
             write({"jsonrpc": "2.0", "id": mid, "result": {
-                "protocolVersion": msg.get("params", {}).get("protocolVersion", "2025-06-18"),
+                "protocolVersion": params.get("protocolVersion", "2025-06-18"),
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION}}})
         elif method == "notifications/initialized":
@@ -474,9 +483,12 @@ def serve() -> int:
         elif method == "tools/list":
             write({"jsonrpc": "2.0", "id": mid, "result": {"tools": TOOLS}})
         elif method == "tools/call":
-            params = msg.get("params", {})
-            name = params.get("name", "")
-            args = params.get("arguments") or {}
+            # A client may send params:null or a non-object; MCP requires an
+            # error response, never a crashed stdio server.
+            params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+            name = params.get("name") or ""
+            args = params.get("arguments") if isinstance(
+                params.get("arguments"), dict) else {}
             try:
                 result = asyncio.run(_tool_call(name, args))
                 payload = {"content": [{"type": "text",

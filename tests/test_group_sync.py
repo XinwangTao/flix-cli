@@ -83,6 +83,7 @@ class GroupSyncHttpTests(unittest.IsolatedAsyncioTestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.store = Store(Path(self._tmp.name) / "relaydesk.db")
         self.store.add_pair("fp-peer", "1234")
+        self.store.upsert_device("fp-peer", ip="127.0.0.1")
         self.events: list[tuple[str, dict]] = []
         app = server.make_app(
             self.store, {"fingerprint": "fp-me", "alias": "me"},
