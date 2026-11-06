@@ -7,12 +7,24 @@
 板子侧用 /opt/flixcli/.venv/bin/flix，PC 侧用本仓库的 venv。
 """
 import argparse
+import os
 import subprocess
 import sys
 import time
 
 PC_FLIX = [sys.executable, "-m", "flixcli.cli"]
 BOARD_FLIX = "/opt/flixcli/.venv/bin/flix"
+
+# Windows 控制台/管道默认用 ANSI 代码页（简体中文机器是 cp936）。脚本里的检查名和
+# 剪贴板正文都带中文和 "✓"，直接 print 会在第 7 项就把自己打死：
+#   UnicodeEncodeError: 'gbk' codec can't encode character '✓'
+# 现场表现是跑完前 6 项后 traceback 退出，后面的剪贴板/文件项根本没执行，
+# 而退出码还是 1，看不出是"没测"还是"测挂了"。两端实测脚本一律 UTF-8 输出。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):  # 非 TextIOWrapper（极端重定向）
+        pass
 
 
 def run(cmd, timeout=60):
@@ -145,6 +157,47 @@ def main() -> int:
         after, after_raw = board_copy_count()
         results.append(check("板端新增两份副本", before >= 0 and after == before + 2,
                              "before=%s after=%s | %s" % (before, after, after_raw)))
+
+    # 板→PC 文件，且文件名用 Linux 合法、Windows 非法的字符（":" 与 "?"）。
+    # NTFS 把 "linux:colon?.txt" 解释成文件 "linux" 的数据流：接收端曾因此把
+    # O_EXCL 占位建到另一个路径上，正文全收完后再被 os.replace 以 WinError 123
+    # 拒绝，发送方看到 400 upload-failed，Downloads 里多出一个空的 "linux"。
+    stem = "e2e-b2p-%d" % int(time.time())
+    hostile = stem + ":colon?.txt"
+    payload = "board→pc file %d" % int(time.time())
+    ssh_script(args.ssh,
+               "from pathlib import Path\n"
+               "p = Path('/tmp') / %r\n"
+               "p.write_text(%r, encoding='utf-8')\n"
+               "print(p.name)\n" % (hostile, payload))
+    out = ssh(args.ssh, "%s send %s %r" % (BOARD_FLIX, args.pc_ip, "/tmp/" + hostile))
+    if "not-paired" in out or "sender not paired" in out:
+        print("SKIP 板→PC 文件传输（双方未配对）")
+    else:
+        results.append(check("板→PC 文件传输", '"ok": True' in out or "ok: True" in out, out))
+        from flixcli.config import Store
+        st = Store()
+        try:
+            row = st.con.execute(
+                "SELECT path FROM file_contents WHERE name=? ORDER BY rowid DESC LIMIT 1",
+                (hostile,)).fetchone()
+        finally:
+            st.close()
+        saved = (row[0] if row and row[0] else "") or ""
+        try:
+            with open(saved, "rb") as fh:
+                got = fh.read().decode("utf-8") if saved else ""
+        except OSError:
+            got = ""
+        results.append(check("板→PC 文件落盘且内容一致", got == payload,
+                             "saved=%r got=%r" % (saved, got)))
+        if os.name == "nt":
+            base = os.path.basename(saved)
+            illegal = set('<>:"/\\|?*') & set(base)
+            results.append(check("Windows 非法文件名已消毒", bool(base) and not illegal,
+                                 "savedAs=%r" % base))
+            stub = os.path.join(os.path.dirname(saved), stem)
+            results.append(check("未残留 NTFS 数据流空壳", not os.path.exists(stub), stub))
 
     ok = all(results)
     print("RESULT: %d/%d 通过" % (sum(1 for r in results if r), len(results)))

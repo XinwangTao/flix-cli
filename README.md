@@ -62,6 +62,18 @@ success）；Linux 桌面在 Wayland 下用
 `/healthz` 的 `clipboard` 字段给出实际落地方式（`win32` / `wl-clipboard` / `xclip` /
 `xsel` / `pbcopy` / `file` / `none`），多端排障时先看这一项。
 
+## 跨平台文件名
+
+接收端按**本机**的规则清洗对端文件名，对端库里/气泡里的名字保持原样，
+`fileReceived.savedAs` 报实际落盘名。板子（Linux）里 `linux:colon?.txt`、`a*b`、
+`CON`、结尾带点的名字都合法，直接往 Windows 上写会出事——而且 `:` 比"拒绝"更糟：
+NTFS 把它当**数据流**分隔符，占位文件建成了另一个名字（`~/Downloads/linux`），
+正文全部收完才在 `os.replace` 处以 WinError 123 失败，发送端看到 400 `upload-failed`，
+`Downloads` 里还多一个空文件。现在 Windows 上把 `<>:"/\|?*` 和控制字符换成 `_`、
+去掉结尾的点/空格、给 `CON/NUL/COM1…` 这类设备名加 `_` 前缀；POSIX 只去掉 NUL，
+所以板上仍能收到带 `:` 的原名。端到端回归见 `scripts/e2e_two_nodes.py` 的
+"板→PC 文件（Windows 非法名）" 三项。
+
 ## 功能矩阵
 
 | 功能 | CLI | MCP 工具 | 官方互通 |

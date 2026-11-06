@@ -68,8 +68,47 @@ def _max_file_bytes(store) -> int:
     return min(declared, DEFAULT_MAX_FILE_BYTES)
 
 
-def _safe_destination(store, name: str) -> tuple[str, str] | None:
+def _sanitize_file_name(name: str, *, windows: bool | None = None) -> str:
+    """Return a peer-supplied basename that this OS can actually create.
+
+    Peers run Linux, where `linux:colon?.txt`, `a*b`, `CON` and trailing dots
+    are all legal, so a board happily sends them. Windows rejects those names —
+    and ":" is worse than a plain rejection: NTFS reads `linux:colon?.txt` as
+    the alternate data stream `colon?.txt` of a file called `linux`, so the
+    O_EXCL reservation *succeeds* on a different path ("~/Downloads/linux"),
+    the whole payload is received, and the final os.replace dies with
+    WinError 123. The sender sees a 400 upload-failed after a full transfer and
+    a stray empty file is left behind.
+
+    Only names are rewritten; the declared name in the DB/bubble stays as the
+    sender wrote it, and `fileReceived.savedAs` reports the on-disk name.
+    POSIX only has to drop NUL and separators (already peeled off by the
+    caller), so a board keeps `linux:colon?.txt` untouched.
+    """
     clean = os.path.basename(name.replace("\\", "/"))
+    if windows is None:
+        windows = os.name == "nt"
+    if not windows:
+        return clean.replace("\x00", "")
+    clean = clean.strip()
+    clean = "".join("_" if ch in '<>:"/\\|?*' or ord(ch) < 32 else ch for ch in clean)
+    # Windows silently strips trailing dots/spaces, so "a." and "a" collide.
+    clean = clean.rstrip(" .")
+    # Device names (CON, NUL, COM1…) are reserved with or without extension.
+    if clean.split(".")[0].upper() in _WINDOWS_DEVICE_NAMES:
+        clean = "_" + clean
+    return clean or "file"
+
+
+_WINDOWS_DEVICE_NAMES = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+})
+
+
+def _safe_destination(store, name: str) -> tuple[str, str] | None:
+    clean = _sanitize_file_name(name)
     if not clean or clean in (".", ".."):
         return None
     root = os.path.realpath(_save_dir(store))
@@ -100,6 +139,10 @@ def _reserve_destination(root: str, wanted: str) -> str | None:
             fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
             continue
+        except OSError:
+            # e.g. ENAMETOOLONG or a name the filesystem still rejects: no
+            # suffix will make it creatable, so stop instead of looping.
+            return None
         os.close(fd)
         return candidate
     return None

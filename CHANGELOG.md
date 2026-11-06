@@ -18,6 +18,16 @@
   （sha256 校验 + 健康检查 + 失败回滚），窗口内无需终端；同时显示当前客户端版本。
 
 ### 修复
+- 板子（Linux）发来 Windows 非法文件名时整次传输作废：`linux:colon?.txt` 里的 `:` 被 NTFS
+  当成数据流分隔符，占位文件建成了 `~/Downloads/linux`，正文收完后 `os.replace` 报
+  WinError 123、接收端回 400 `upload-failed`，发送方以为文件没发出去，磁盘上还留一个空文件。
+  现接收端按本机规则清洗文件名（`<>:"/\|?*`、控制字符、结尾点/空格、`CON/NUL/COM1…` 设备名），
+  气泡与库里的原名不变，`fileReceived.savedAs` 报实际落盘名；POSIX 端不受影响
+  （`tests/test_transfer_security.py`，e2e 新增板→PC 非法名三项）。
+- `scripts/e2e_two_nodes.py` 在简体中文 Windows 控制台上跑到剪贴板项就 traceback
+  （`UnicodeEncodeError: 'gbk' codec can't encode '✓'`），后面 4 项根本没执行却仍以非 0 退出，
+  分不清"没测"和"测挂了"；现脚本统一 UTF-8 输出。同时补了板→PC 文件（含落盘内容与
+  NTFS 空壳检查），端到端从 10 项扩到 14 项。
 - 无头 Linux（QCM6490 板子）收到剪贴板时静默丢弃：`set_clipboard_text()` 在非 Windows 上直接
   返回，发送方却收到 `{0: success}`。现在 Linux 桌面用 `wl-clipboard`/`xclip`/`xsel`，
   macOS 用 `pbcopy`，无 GUI 时原子写入 `~/flixcli/clipboard.txt`（0600）并记日志；
