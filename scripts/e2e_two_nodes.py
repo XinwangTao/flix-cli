@@ -63,6 +63,11 @@ def ensure_pc_daemon():
     with socket.socket() as sk:
         sk.settimeout(1.0)
         if sk.connect_ex(("127.0.0.1", 8891)) == 0:
+            # 复用的守护进程可能是上一次运行（甚至别的解释器/旧代码）留下的：
+            # 它的 server.py 在启动时就固定在内存里，本轮改动不会生效，结果会
+            # 在“有时消毒、有时 WinError 123”之间飘。提示先停掉再重跑。
+            print("NOTE 复用 8891 上已有的守护进程（非本轮启动）；如果结果异常，"
+                  "先停掉它再重跑", flush=True)
             return None
     proc = subprocess.Popen(PC_FLIX + ["serve", "--web-port", "8892"],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -80,7 +85,14 @@ def main() -> int:
     ap.add_argument("board_ip")
     ap.add_argument("--ssh", default="quecpi-alpha")
     ap.add_argument("--pc-ip", default="192.168.137.1", help="板子看到的 PC 地址")
+    ap.add_argument("--pc-port", default="8891",
+                    help="PC 设备通道端口；固定到本轮守护进程，避免被同机第二个实例接走")
     args = ap.parse_args()
+    # 同一台 PC 上可能还跑着别的 flixcli/RelayDesk 实例（同样的指纹、不同端口），
+    # 板子按“最后一次 announce”的端口寻址时会在两个进程之间来回跳：结果看起来
+    # 时好时坏（旧进程没有新的文件名消毒，偶发 WinError 123）。测试固定到仓库
+    # 当前守护进程的端口，才是在测本轮代码。
+    pc_target = args.pc_ip if ":" in args.pc_ip else "%s:%s" % (args.pc_ip, args.pc_port)
     results = []
     _pc_daemon = ensure_pc_daemon()
 
@@ -92,7 +104,7 @@ def main() -> int:
     results.append(check("PC→板 文本送达", "state: delivered" in out, out))
 
     marker2 = "e2e-board2pc-%d" % int(time.time())
-    out = ssh(args.ssh, "%s send-text %s '%s'" % (BOARD_FLIX, args.pc_ip, marker2))
+    out = ssh(args.ssh, "%s send-text %s '%s'" % (BOARD_FLIX, pc_target, marker2))
     results.append(check("板→PC 文本送达", "state: delivered" in out, out))
 
     # 按 IP 寻址的命令必须映射回已配对设备的指纹：resolve_target 曾把 IP 原样当
@@ -178,7 +190,7 @@ def main() -> int:
                              "sent=%r got=%r" % (clip_pc2board, board_clip)))
 
     clip_board2pc = "e2e-剪贴板-board2pc-%d ✓" % int(time.time())
-    out = ssh(args.ssh, "%s clipboard %s '%s'" % (BOARD_FLIX, args.pc_ip, clip_board2pc))
+    out = ssh(args.ssh, "%s clipboard %s '%s'" % (BOARD_FLIX, pc_target, clip_board2pc))
     if "sender not paired" in out:
         print("SKIP 板→PC 剪贴板（板子未在 PC 上配对）")
     else:
@@ -274,7 +286,7 @@ def main() -> int:
                "p = Path('/tmp') / %r\n"
                "p.write_text(%r, encoding='utf-8')\n"
                "print(p.name)\n" % (hostile, payload))
-    out = ssh(args.ssh, "%s send %s %r" % (BOARD_FLIX, args.pc_ip, "/tmp/" + hostile))
+    out = ssh(args.ssh, "%s send %s %r" % (BOARD_FLIX, pc_target, "/tmp/" + hostile))
     if "not-paired" in out or "sender not paired" in out:
         print("SKIP 板→PC 文件传输（双方未配对）")
     else:
@@ -302,6 +314,37 @@ def main() -> int:
                                  "savedAs=%r" % base))
             stub = os.path.join(os.path.dirname(saved), stem)
             results.append(check("未残留 NTFS 数据流空壳", not os.path.exists(stub), stub))
+
+    # 单字符前缀 + ":"：Windows 的 ntpath 把 "a:" 当盘符，basename 会把前缀
+    # 整个吞掉。板上发 `a:e2e-….txt` 时 PC 曾落成 `e2e-….txt`（看起来像另一个
+    # 文件），现在按最后一个 "/" 手工切分，前缀保留为 `a_`。
+    one_name = "a:" + stem + "?.txt"
+    one_payload = "one-char-prefix %d" % int(time.time())
+    ssh_script(args.ssh,
+               "from pathlib import Path\n"
+               "p = Path('/tmp') / %r\n"
+               "p.write_text(%r, encoding='utf-8')\n"
+               "print(p.name)\n" % (one_name, one_payload))
+    out = ssh(args.ssh, "%s send %s %r" % (BOARD_FLIX, pc_target, "/tmp/" + one_name))
+    if "not-paired" in out or "sender not paired" in out:
+        print("SKIP 板→PC 单字符前缀文件名（双方未配对）")
+    else:
+        results.append(check("板→PC 单字符前缀文件送达",
+                             '"ok": True' in out or "ok: True" in out, out))
+        from flixcli.config import Store
+        st = Store()
+        try:
+            row = st.con.execute(
+                "SELECT path FROM file_contents WHERE name=? ORDER BY rowid DESC LIMIT 1",
+                (one_name,)).fetchone()
+        finally:
+            st.close()
+        one_saved = (row[0] if row and row[0] else "") or ""
+        one_base = os.path.basename(one_saved)
+        expected = "a_" + stem + "_.txt"
+        results.append(check("单字符前缀未被当作盘符吞掉",
+                             one_base == expected,
+                             "expected=%r savedAs=%r" % (expected, one_base)))
 
     ok = all(results)
     print("RESULT: %d/%d 通过" % (sum(1 for r in results if r), len(results)))

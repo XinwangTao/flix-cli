@@ -18,6 +18,11 @@
   （sha256 校验 + 健康检查 + 失败回滚），窗口内无需终端；同时显示当前客户端版本。
 
 ### 修复
+- 对端文件名只有一个字符的前缀时会被当成 Windows 盘符丢掉：板子发来
+  `a:notes.txt`，接收端 `ntpath.basename` 认为 `a:` 是盘符，落盘名变成 `notes.txt`
+  （多字符前缀如 `linux:colon?.txt` 反而正常，容易误判成“已修好”）。现在按最后一个
+  `/` 手工切分再消毒，`a:notes.txt` → `a_notes.txt`。单测补在
+  `tests/test_transfer_security.py`，e2e 新增“板→PC 单字符前缀文件送达 / 前缀未被当作盘符吞掉”。
 - 按 IP 寻址时把地址当成了对端指纹：`flix shell 192.168.137.162` 明明两端已配对却回
   `not-paired`，`send-text`/`send`/剪贴板气泡的 `to`（deviceId）也写成 IP，接收端与官方
   客户端拿不到应有的指纹。`resolve_target` 现在用库内设备表把 `ip`/`ip:port` 映射回指纹

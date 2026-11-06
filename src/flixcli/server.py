@@ -85,7 +85,11 @@ def _sanitize_file_name(name: str, *, windows: bool | None = None) -> str:
     POSIX only has to drop NUL and separators (already peeled off by the
     caller), so a board keeps `linux:colon?.txt` untouched.
     """
-    clean = os.path.basename(name.replace("\\", "/"))
+    # Split separators by hand instead of os.path.basename: on Windows ntpath
+    # treats the part before ":" as a drive letter, so a board's `a:notes.txt`
+    # came back as `notes.txt` (the `a` prefix vanished from savedAs) while
+    # `linux:colon?.txt` only worked by luck (a drive must be one character).
+    clean = name.replace("\\", "/").rsplit("/", 1)[-1]
     if windows is None:
         windows = os.name == "nt"
     if not windows:

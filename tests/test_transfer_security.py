@@ -23,6 +23,10 @@ class FileNameSanitizeTests(unittest.TestCase):
     def test_windows_rewrites_illegal_chars_and_device_names(self):
         cases = {
             "linux:colon?.txt": "linux_colon_.txt",
+            # ntpath.basename("a:notes.txt") is "notes.txt" (drive letter), so
+            # a board's one-character prefix used to disappear from savedAs.
+            "a:notes.txt": "a_notes.txt",
+            "1:2.txt": "1_2.txt",
             "a*b|c.txt": "a_b_c.txt",
             'quote"and<angle>.txt': "quote_and_angle_.txt",
             "trailing.": "trailing",
