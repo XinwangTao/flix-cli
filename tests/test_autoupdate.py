@@ -18,6 +18,13 @@ from unittest import mock
 
 from flixcli import autoupdate as au
 
+# The suite models the Windows installer: PE ("MZ") payloads and win64 asset
+# names, which is what `flix update` actually replaces. On Linux/macOS CI the
+# platform asset pattern deliberately picks a different zip, so these fixtures
+# would be testing a build path that does not exist yet.
+if sys.platform != "win32":
+    raise unittest.SkipTest("auto-update swaps RelayDesk.exe; fixtures are Windows-only")
+
 FAKE_EXE = b"MZ" + b"\x90" * (1 << 20)          # PE magic + enough bytes
 FAKE_EXE_V2 = b"MZ" + b"\x91" * (1 << 20)
 
