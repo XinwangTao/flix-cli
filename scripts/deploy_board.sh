@@ -14,7 +14,7 @@ SRC="$(cd "$(dirname "$0")/.." && pwd)"
 TAR="/tmp/flix-src-deploy.tgz"
 
 echo "[deploy] packaging $SRC"
-tar czf "$TAR" -C "$SRC" src pyproject.toml README.md LICENSE assets scripts
+tar czf "$TAR" -C "$SRC" src pyproject.toml README.md LICENSE assets scripts deploy
 
 echo "[deploy] copying to $HOST:$DIR"
 ssh -o BatchMode=yes "$HOST" "mkdir -p '$DIR'"
@@ -34,31 +34,15 @@ if [ ! -x "$DIR/.venv/bin/python" ]; then
   uv venv "$DIR/.venv" --python 3.12
 fi
 
-uv pip install --python "$DIR/.venv/bin/python" -e "$DIR" >/dev/null
+# Network may be unavailable (board on an isolated link): fall back to the
+# existing install instead of failing the whole deploy.
+if ! uv pip install --python "$DIR/.venv/bin/python" -e "$DIR" >/dev/null 2>&1; then
+  echo "[deploy] install failed (no PyPI?), reusing existing environment"
+  "$DIR/.venv/bin/python" -c "import flixcli" || {
+    echo "[deploy] flixcli not importable and no network; aborting" >&2; exit 1; }
+fi
 
-cat > /etc/systemd/system/flixd.service <<UNIT
-[Unit]
-Description=flixd (RelayDesk daemon)
-After=network-online.target
-Wants=network-online.target
-StartLimitIntervalSec=60
-StartLimitBurst=5
-
-[Service]
-Type=simple
-WorkingDirectory=$DIR
-ExecStart=$DIR/.venv/bin/flixd --web-port $WEB_PORT
-Restart=always
-RestartSec=5
-Environment=PYTHONUNBUFFERED=1
-Environment=HOSTNAME=%H
-MemoryMax=384M
-TasksMax=256
-Nice=5
-
-[Install]
-WantedBy=multi-user.target
-UNIT
+sed -e "s|@DIR@|$DIR|g" -e "s|@WEB_PORT@|$WEB_PORT|g"     "$DIR/deploy/flixd.service" > /etc/systemd/system/flixd.service
 
 systemctl daemon-reload
 systemctl enable flixd >/dev/null 2>&1 || true

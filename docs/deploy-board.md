@@ -11,7 +11,7 @@ scripts/deploy_board.sh user@host /opt/flixcli 8892
 ```
 
 脚本做的事：打包源码 → scp → 首次装 uv/Python 3.12/venv → `uv pip install -e` →
-写 `/etc/systemd/system/flixd.service` → 起服务 → 用 `/healthz` 自检。
+把 `deploy/flixd.service` 模板（替换安装目录与端口）装到 `/etc/systemd/system/` → 起服务 → 用 `/healthz` 自检。
 
 ## 验证
 

@@ -1,5 +1,5 @@
 # flixd on a headless Linux box (ARM boards such as Quectel QCM6490).
-# Install: sudo cp deploy/flixd.service /etc/systemd/system/ && sudo systemctl enable --now flixd
+# Template: scripts/deploy_board.sh 会替换 @DIR@ / @WEB_PORT@ 后安装
 [Unit]
 Description=flixd (RelayDesk daemon)
 Documentation=https://github.com/XinwangTao/flix-cli
@@ -10,8 +10,8 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/flixcli
-ExecStart=/opt/flixcli/.venv/bin/flixd --web-port 8892 --alias %H
+WorkingDirectory=@DIR@
+ExecStart=@DIR@/.venv/bin/flixd --web-port @WEB_PORT@ --alias %H
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1

@@ -313,3 +313,5 @@ scripts/deploy_board.sh root@quecpi-alpha          # 打包 → 传输 → uv �
   否则 TCP 通、对端却再也发现不了这台机器。
 - 板载 QCA1023 Wi-Fi 的驱动不声明 802.11w(PMF)，只能连不强制 PMF 的 AP；
   强制 PMF 的企业 AP 会握手成功后几秒内以 reason=148 踢掉。
+
+细节（healthz 自检、无头配对、Wi-Fi 限制）见 `docs/deploy-board.md`。
