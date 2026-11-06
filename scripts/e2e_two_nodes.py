@@ -107,6 +107,38 @@ def main() -> int:
     out = ssh(args.ssh, "%s send-text %s '%s'" % (BOARD_FLIX, pc_target, marker2))
     results.append(check("板→PC 文本送达", "state: delivered" in out, out))
 
+    # 以 IP 为 peer 排队：`send-text <ip>` 在对端还没 announce 过时会把地址当
+    # 对端标识写进 outbox。flush 原先用 device_ip(peer) 精确匹配指纹，IP 键
+    # 永远查不到地址，行每 30s 被静默 skip，直到 7 天 TTL 过期；气泡里的 to
+    # 也一直是 IP。现在用 resolve_target 把 IP 映射回指纹并回写。这里在跑完
+    # 后面的 discover 项（约 70s）之后再验，正好等过守护进程的 30s flush。
+    from flixcli.config import Store
+    import json as _json
+    import uuid as _uuid
+    _st = Store()
+    try:
+        pc_fp = ((_st.prefs().get("identity") or {}).get("fingerprint") or "")
+        _row = _st.con.execute(
+            "SELECT fingerprint FROM persistence_devices WHERE ip=?",
+            (args.board_ip,)).fetchone()
+        board_fp = _row[0] if _row else ""
+    finally:
+        _st.close()
+    late_oid = str(_uuid.uuid4())
+    late_marker = "e2e-late-ip-%d" % int(time.time())
+    if pc_fp and board_fp:
+        late_bubble = {"id": late_oid, "from": pc_fp, "to": args.board_ip,
+                       "type": 0, "content": late_marker,
+                       "time": int(time.time() * 1000), "groupId": ""}
+        _st = Store()
+        try:
+            _st.add_outbox(late_oid, args.board_ip, "text",
+                           _json.dumps(late_bubble, ensure_ascii=False))
+        finally:
+            _st.close()
+    else:
+        print("NOTE 跳过 IP-peer 排队项（设备表里还没有板子）")
+
     # 按 IP 寻址的命令必须映射回已配对设备的指纹：resolve_target 曾把 IP 原样当
     # deviceId 返回，`flix shell <ip>` 明明已配对却回 not-paired，气泡的 to 字段
     # 也变成 IP（协议里应是指纹，官方客户端按它判断收件人）。
@@ -120,6 +152,26 @@ def main() -> int:
 
     out = ssh(args.ssh, "%s discover --timeout 35" % BOARD_FLIX)
     results.append(check("板子发现 PC 广播", "windows" in out or args.pc_ip in out, out))
+
+    if pc_fp and board_fp:
+        state, peer = "", ""
+        for _ in range(6):
+            _st = Store()
+            try:
+                row = _st.outbox_get(late_oid) or {}
+            finally:
+                _st.close()
+            state, peer = row.get("state", ""), row.get("peer", "")
+            if state == "delivered":
+                break
+            time.sleep(4)
+        line = ssh(args.ssh, "%s bubbles 2>/dev/null | grep '%s' || true"
+                   % (BOARD_FLIX, late_marker))
+        results.append(check(
+            "以 IP 为 peer 的排队消息在对端出现后送达",
+            state == "delivered" and peer.startswith(board_fp[:8])
+            and late_marker in line and board_fp in line,
+            "state=%s peer=%r board=%s" % (state, peer[:12], line.strip()[:120])))
 
     # announce 也是心跳。对端防火墙挡住入站 8891 时，板上 /ping_v2 永远连不上，
     # 而设备仍在每 30s 广播；旧代码只在探活成功时刷新 seenAt，90s 后就把还在

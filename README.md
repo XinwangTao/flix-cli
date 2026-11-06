@@ -229,6 +229,11 @@ flix outbox --drop <id>        # 丢弃
 
 - **4xx 不重试**：未配对、参数错误属于永久失败，直接标 `failed`。
 - **只有幂等动作排队**：`flix shell`、`flix upgrade` 这类执行类动作重复跑有副作用，仍然只发一次。
+- **按 IP 排队的消息也会落地**：`flix send-text 192.168.1.9 …` 在对端还没 announce 过时，
+  队列行只能把地址当对端标识。重投时按 `resolve_target` 把 `ip[:port]` 映射回库里该地址
+  最新的设备指纹，并回写队列行与气泡的 `to`（协议字段应是指纹）；否则重投永远用
+  `device_ip(IP)` 精确匹配指纹查不到地址，消息每 30 秒被静默跳过，直到 7 天过期。
+  e2e 用一条直接注入的 IP-peer 队列行验证“对端出现后自动送达并回写指纹”。
 - 文件与剪贴板暂不排队（二期沿用同一张表）。
 
 流程真源：`docs/archify/flix_outbox_workflow.html`（旁路 `.json`）。

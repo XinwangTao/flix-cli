@@ -489,6 +489,17 @@ class Store:
             (error[:500], oid))
         self.con.commit()
 
+    def rebind_outbox(self, oid: str, peer: str) -> None:
+        """Point a queued row at the identity we learned after it was queued.
+
+        Text queued towards a peer that was only known by ``ip[:port]`` carries
+        that address as its peer key. Once the peer announces, its fingerprint
+        is the stable key; rewriting the row keeps later passes (and the wire
+        field ``to``) off the transport address.
+        """
+        self.con.execute("UPDATE outbox SET peer=? WHERE id=?", (peer, oid))
+        self.con.commit()
+
     def outbox_pending(self, limit: int = 20) -> list[dict]:
         rows = self.con.execute(
             "SELECT id, peer, kind, payload, attempts, created FROM outbox"

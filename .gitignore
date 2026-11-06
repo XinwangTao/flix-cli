@@ -46,6 +46,7 @@ reverse/tmp/
 /bigfile2.txt
 /sendtest.txt
 flixd.log
+pc_flixd_*.log
 build_new_rd/
 build_new_flix/
 build_new_flixd/

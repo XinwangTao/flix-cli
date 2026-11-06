@@ -18,6 +18,14 @@
   （sha256 校验 + 健康检查 + 失败回滚），窗口内无需终端；同时显示当前客户端版本。
 
 ### 修复
+- 以 IP 为 peer 排队的文本永远不重投：`flix send-text 192.168.137.162 …` 在板子还没
+  announce 过时，队列行的 `peer` 就是地址；`outbox.flush` 用 `device_ip(peer)` 只按指纹
+  精确匹配，IP 键每 30 秒都查不到地址、被静默 skip，消息一直 `queued` 到 7 天 TTL 过期
+  （对端其实早已恢复广播）。现在 flush 走 `resolve_target`，把 `ip[:port]` 映射回该地址
+  最新的设备指纹（同 IP 多行取 `seenAt` 最新），并回写队列行与气泡 `to`，接收端拿到的
+  收件人是指纹而不是 IP。实测：PC 上一条 peer=板子 IP 的 queued 行，在板子恢复 announce
+  且 PC 换上新代码后由下一轮 flush 自动送达，`outbox` 显示 `delivered … 364220a6`。
+  单测见 `tests/test_outbox.py`，e2e 新增“以 IP 为 peer 的排队消息在对端出现后送达”。
 - 同机多 flixd 实例（默认 8891 + RelayDesk 的 18991）共用同一指纹时，双方的 30s announce
   会把对端库里的 `port` 每半分钟改写一次：板子的日志与 `devicesChanged` 反复刷新，消息、
   剪贴板、outbox 和文件确认在两个端口之间随机落点，停止其中一个实例后要到下一次 announce
