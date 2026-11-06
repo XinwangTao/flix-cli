@@ -29,7 +29,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e .
-          pip install pytest
+          pip install pytest hypothesis
 
       # e2e.py 需要两台机器和固定端口，CI 里不跑；
       # GUI 单测在未装 PySide6 时会自行 SkipTest。
