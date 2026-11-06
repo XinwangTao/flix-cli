@@ -18,6 +18,13 @@
   （sha256 校验 + 健康检查 + 失败回滚），窗口内无需终端；同时显示当前客户端版本。
 
 ### 修复
+- 对端文件名里的反斜杠被当成路径分隔符：Linux 允许 `back\slash.txt` 是一个普通文件，
+  板上发送后 PC 却落成 `slash.txt`（前缀消失），`a\x.txt` 与 `b\x.txt` 还会撞名成
+  `x (1).txt`；同一套 `os.path.basename(supplied.replace("\\","/"))` 比较也让 POSIX
+  接收端把合法的反斜杠文件名判成 400 `bad file name`。现在只按 `/` 切路径，Windows
+  把 `\` 与其他非法字符一样消毒成 `_`（`back_slash.txt`，前缀保留），POSIX 原样保留；
+  `/file` 的 `file_name` 校验改为比较同一套清洗结果，发送端/气泡里的原名不变。
+  单测 `tests/test_transfer_security.py`，e2e 新增“板→PC 文件名含反斜杠”。
 - 管道输入的正文按控制台代码页解码，中文剪贴板/文本直接发不出去：`flix clipboard <ip> -`
   用 `sys.stdin.read()`，Windows 上重定向的 stdin 按 cp936 解码，管道里的 UTF-8 中文变成
   孤立代理字符，随后在 `json.dumps(...).encode("utf-8")` 处抛

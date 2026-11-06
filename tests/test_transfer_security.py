@@ -43,14 +43,26 @@ class FileNameSanitizeTests(unittest.TestCase):
                 self.assertEqual(_sanitize_file_name(raw, windows=True), want)
 
     def test_posix_keeps_legal_names_untouched(self):
-        for name in ("linux:colon?.txt", "a*b|c.txt", "trailing.", "CON"):
+        for name in ("linux:colon?.txt", "a*b|c.txt", "trailing.", "CON",
+                     r"back\slash.txt"):
             with self.subTest(name=name):
                 self.assertEqual(_sanitize_file_name(name, windows=False), name)
 
     def test_path_components_are_flattened_either_way(self):
         self.assertEqual(_sanitize_file_name("../../etc/passwd"), "passwd")
-        self.assertEqual(_sanitize_file_name(r"C:\tmp\evil.txt", windows=True), "evil.txt")
-        self.assertEqual(_sanitize_file_name(r"..\evil.txt", windows=False), "evil.txt")
+        # A backslash inside a peer basename is data, not a separator: Linux
+        # allows `back\slash.txt`. Treating it as a path used to drop the
+        # prefix (savedAs "slash.txt"), and two distinct files could collide.
+        self.assertEqual(_sanitize_file_name(r"back\slash.txt", windows=True),
+                         "back_slash.txt")
+        self.assertEqual(_sanitize_file_name(r"C:\tmp\evil.txt", windows=True),
+                         "C__tmp_evil.txt")
+        self.assertEqual(_sanitize_file_name(r"..\evil.txt", windows=True),
+                         ".._evil.txt")
+        # On POSIX it is a perfectly legal character and must survive as-is;
+        # no escaped directory exists there, so traversal is still impossible.
+        self.assertEqual(_sanitize_file_name(r"..\evil.txt", windows=False),
+                         r"..\evil.txt")
 
 
 class FileNameLengthTests(unittest.TestCase):
@@ -274,6 +286,64 @@ class TransferSecurityTests(unittest.TestCase):
                     # Nothing may be created under the raw (illegal) name, and
                     # in particular no NTFS data-stream stub ("linux").
                     self.assertFalse((downloads / "linux").exists())
+                finally:
+                    await runner.cleanup(); store.close()
+        asyncio.run(run())
+
+    def test_backslash_in_peer_name_is_not_a_path_separator(self):
+        """`back\\slash.txt` is one Linux file, not `slash.txt` in a dir.
+
+        The board's own sender uses os.path.basename (POSIX), so the declared
+        name keeps the backslash. The receiver used to split on it, dropping
+        the "back\\" prefix in savedAs and making `a\\x.txt` / `b\\x.txt`
+        collide. It must be sanitised as one component (`back_slash.txt`) and
+        the /file filename check must agree instead of rejecting the upload.
+        """
+        async def run():
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); downloads = root / "downloads"; downloads.mkdir()
+                store = Store(root / "db.sqlite")
+                store.set_pref("saveDir", str(downloads))
+                sender = "sender"
+                ident = {"fingerprint": "self", "alias": "test",
+                         "deviceModel": "Windows"}
+                store.upsert_device(sender, ip="127.0.0.1", port=19595)
+                store.add_pair(sender, "0000")
+                app = make_app(store, ident, lambda *_: None)
+                runner = web.AppRunner(app); await runner.setup()
+                await web.TCPSite(runner, "127.0.0.1", 19595).start()
+                try:
+                    raw = r"back\slash.txt"
+                    body = b"single posix component"
+                    rid = str(uuid.uuid4())
+                    bubble = {"id": rid, "from": sender, "to": "self",
+                              "type": BUBBLE_FILE, "time": 1, "groupId": "",
+                              "content": {"state": 2,
+                              "meta": {"resourceId": rid, "name": raw,
+                                       "size": len(body),
+                                       "mimeType": "text/plain"},
+                              "waitingForAccept": True}}
+                    async with ClientSession() as client:
+                        r = await client.post("http://127.0.0.1:19595/bubble",
+                                              json=bubble)
+                        self.assertEqual(r.status, 200)
+                        # A name that no longer matches the bubble is still
+                        # rejected; only the separator handling changed.
+                        r = await client.post("http://127.0.0.1:19595/file",
+                                              params={"share_id": rid,
+                                                      "file_name": "other.bin"},
+                                              data=body)
+                        self.assertEqual(r.status, 400)
+                        r = await client.post("http://127.0.0.1:19595/file",
+                                              params={"share_id": rid,
+                                                      "file_name": raw},
+                                              data=body)
+                        self.assertEqual(r.status, 200, await r.text())
+                    expected = _sanitize_file_name(raw)
+                    self.assertTrue(expected.startswith("back"), expected)
+                    self.assertEqual((downloads / expected).read_bytes(), body)
+                    # The old bug wrote the truncated remainder instead.
+                    self.assertFalse((downloads / "slash.txt").exists())
                 finally:
                     await runner.cleanup(); store.close()
         asyncio.run(run())

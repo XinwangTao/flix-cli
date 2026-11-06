@@ -82,14 +82,25 @@ def _sanitize_file_name(name: str, *, windows: bool | None = None) -> str:
 
     Only names are rewritten; the declared name in the DB/bubble stays as the
     sender wrote it, and `fileReceived.savedAs` reports the on-disk name.
-    POSIX only has to drop NUL and separators (already peeled off by the
+    POSIX only has to drop NUL and path separators (already peeled off by the
     caller), so a board keeps `linux:colon?.txt` untouched.
+
+    A backslash is *not* a path separator for a peer-supplied basename: Linux
+    names it as data (`back\\slash.txt` is one file), and stripping everything
+    before the last backslash silently renamed it to `slash.txt` on Windows.
+    Two such files (`a\\x.txt`, `b\\x.txt`) then collided and the second landed
+    as `x (1).txt`. On Windows the backslash is rewritten to `_` like the
+    other illegal characters; on POSIX it is kept verbatim. Flattening still
+    prevents traversal: a name like `..\\evil.txt` becomes the single
+    component `.._evil.txt` on Windows and stays a literal name on POSIX, and
+    the resolved destination is checked against the save root.
     """
-    # Split separators by hand instead of os.path.basename: on Windows ntpath
-    # treats the part before ":" as a drive letter, so a board's `a:notes.txt`
-    # came back as `notes.txt` (the `a` prefix vanished from savedAs) while
-    # `linux:colon?.txt` only worked by luck (a drive must be one character).
-    clean = name.replace("\\", "/").rsplit("/", 1)[-1]
+    # Split path separators by hand instead of os.path.basename: on Windows
+    # ntpath treats the part before ":" as a drive letter, so a board's
+    # `a:notes.txt` came back as `notes.txt` (the `a` prefix vanished from
+    # savedAs) while `linux:colon?.txt` only worked by luck (a drive must be
+    # one character).
+    clean = name.rsplit("/", 1)[-1]
     if windows is None:
         windows = os.name == "nt"
     if not windows:
@@ -622,7 +633,14 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
         if existing_path or not waiting:
             return web.Response(status=409, text="transfer already committed")
         safe = _safe_destination(store, expected_name)
-        if safe is None or os.path.basename(supplied_name.replace("\\", "/")) != os.path.basename(expected_name):
+        # Compare the names the way they will be materialised here: a peer
+        # basename may contain characters this OS rewrites (":" on Windows, a
+        # backslash on both sides), and os.path.basename() splits on the local
+        # separator only. Using the sanitizer keeps `file_name` and the bubble
+        # name in agreement without ever treating a peer's backslash as a path
+        # separator ("back\\slash.txt" used to be reduced to "slash.txt").
+        if safe is None or (_sanitize_file_name(supplied_name)
+                            != _sanitize_file_name(expected_name)):
             return web.Response(status=400, text="bad file name")
         root, dest, _fitted = safe
         declared = _to_int(declared, -1)

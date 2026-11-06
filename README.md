@@ -93,6 +93,14 @@ NTFS 把它当**数据流**分隔符，占位文件建成了另一个名字（`~
 所以板上仍能收到带 `:` 的原名。端到端回归见 `scripts/e2e_two_nodes.py` 的
 "板→PC 文件（Windows 非法名）" 三项。
 
+**反斜杠不是对端文件名的路径分隔符**：Linux 允许 `back\slash.txt` 是一个普通文件。
+旧实现先按 `\` 和 `/` 一起切 basename，板上发这种名字时 PC 落成 `slash.txt`——前缀
+悄悄消失，`a\x.txt` 与 `b\x.txt` 还会互相撞名变成 `x (1).txt`。现在只按 `/` 切路径，
+Windows 再把 `\` 和其他非法字符一样换成 `_`（`back_slash.txt`），POSIX 原样保留。
+`/file` 的 `file_name` 校验也改用同一套清洗结果比较，所以板↔板、板→PC 都不再误判
+400 `bad file name`。回归：e2e "板→PC 文件名含反斜杠" 与
+`tests/test_transfer_security.py::test_backslash_in_peer_name_is_not_a_path_separator`。
+
 名字合法还不够——**长度**也得按接收端算。ext4 的 `NAME_MAX` 是 255 **字节**，
 NTFS 是 255 个 UTF-16 单元（没开长路径时整条路径还得 <260 字符）。PC 上一个
 `长文件名×30.txt`（364 字节）在 Windows 上完全合法，往板上发时接收端 `O_EXCL` 占位直接

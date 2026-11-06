@@ -434,6 +434,51 @@ def main() -> int:
                              one_base == expected,
                              "expected=%r savedAs=%r" % (expected, one_base)))
 
+    # 反斜杠：Linux 允许 `back\slash.txt`（一个文件），Windows 不允许。接收端
+    # 曾把它当作路径分隔符，savedAs 变成 `slash.txt`——前缀悄悄消失，
+    # `a\x.txt` 与 `b\x.txt` 还会撞名。现在 Windows 把 `\` 消毒成 `_`（保留
+    # 前缀），POSIX 原样保留。用 ssh_script 里的 subprocess 传路径，避免
+    # shell 单引号把 `\` 转义成两个字符。
+    bs_ts = int(time.time())
+    bs_name = "e2e-bs-%d\\tail.txt" % bs_ts
+    bs_payload = "backslash-in-name %d" % bs_ts
+    out = ssh_script(args.ssh, (
+        "import subprocess\n"
+        "from pathlib import Path\n"
+        "p = Path('/tmp') / %r\n"
+        "p.write_text(%r, encoding='utf-8')\n"
+        "r = subprocess.run([%r, 'send', %r, %r], capture_output=True,\n"
+        "                   encoding='utf-8', errors='replace')\n"
+        "print((r.stdout or '') + (r.stderr or ''))\n"
+        "print('RC=%%d' %% r.returncode)\n"
+        % (bs_name, bs_payload, BOARD_FLIX, pc_target, "/tmp/" + bs_name)))
+    if "not-paired" in out or "sender not paired" in out:
+        print("SKIP 板→PC 文件名含反斜杠（双方未配对）")
+    else:
+        results.append(check("板→PC 文件名含反斜杠送达",
+                             "RC=0" in out and ('"ok": True' in out or "ok: True" in out),
+                             out))
+        from flixcli.config import Store
+        st = Store()
+        try:
+            row = st.con.execute(
+                "SELECT path FROM file_contents WHERE name=? ORDER BY rowid DESC LIMIT 1",
+                (bs_name,)).fetchone()
+        finally:
+            st.close()
+        bs_saved = (row[0] if row and row[0] else "") or ""
+        bs_base = os.path.basename(bs_saved)
+        bs_expected = "e2e-bs-%d_tail.txt" % bs_ts
+        try:
+            with open(bs_saved, "rb") as fh:
+                bs_got = fh.read().decode("utf-8") if bs_saved else ""
+        except OSError:
+            bs_got = ""
+        results.append(check("反斜杠不是路径分隔符（前缀保留）",
+                             bs_base == bs_expected and bs_got == bs_payload,
+                             "expected=%r savedAs=%r body=%r"
+                             % (bs_expected, bs_base, bs_got[:60])))
+
     ok = all(results)
     print("RESULT: %d/%d 通过" % (sum(1 for r in results if r), len(results)))
     return 0 if ok else 1
