@@ -1,6 +1,6 @@
 [project]
 name = "flixcli"
-version = "2.2.1"
+version = "2.3.0"
 description = "flixd + flix CLI: interoperable reimplementation of the Flix LAN transport protocol"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -14,7 +14,7 @@ classifiers = [
 ]
 dependencies = [
     "aiohttp>=3.9",
-    "cryptography>=43,<47",
+    "cryptography>=50,<51",
 ]
 
 [project.urls]
@@ -30,7 +30,7 @@ gui = [
 media = [
     "aiortc>=1.10,<2",
     "mss>=10,<11",
-    "Pillow>=11,<13",
+    "Pillow>=13,<14",
     "numpy>=2.1,<3",
 ]
 pty = [

@@ -1,26 +1,34 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Light palette (v2E). Dark values live in values-night/colors.xml; the
-     Activity forces uiMode from prefs, so this is the user's choice and not the
-     system's. -->
+<!-- Light palette. Dark values live in values-night/colors.xml; the Activity
+     forces uiMode from prefs, so this is the user's choice and not the system's.
+
+     Tones mirror the desktop design system (src/flixcli/gui.py: PALETTES["light"])
+     so both ends of the relay read as one product. Names are the Android-side
+     vocabulary; the parenthesised token is the desktop equivalent. Every
+     foreground/background pair below clears WCAG AA (>= 4.5:1) · keep it that
+     way if you retune, the jade neutrals are warm and easy to overshoot.
+
+     `mention` has no desktop counterpart: @-mentions stay amber on purpose,
+     because they must be distinguishable from the accent on sight. -->
 <resources>
-    <color name="bg">#F4F6F9</color>
-    <color name="bgHeader">#FFFFFF</color>
-    <color name="bgPanel">#FFFFFF</color>
-    <color name="bgBubbleIn">#E7EBF1</color>
-    <color name="accent">#2F6FED</color>
-    <color name="textPrimary">#12161D</color>
-    <color name="textMuted">#5C6B80</color>
-    <color name="textOnAccent">#FFFFFF</color>
-    <color name="online">#1B9A55</color>
+    <color name="bg">#F3F2EE</color>              <!-- bg -->
+    <color name="bgHeader">#F8F7F3</color>       <!-- bg_side -->
+    <color name="bgPanel">#FFFFFF</color>        <!-- surface -->
+    <color name="bgBubbleIn">#ECE9E2</color>     <!-- surface_2 -->
+    <color name="accent">#12795B</color>         <!-- accent -->
+    <color name="textPrimary">#191F1C</color>    <!-- text -->
+    <color name="textMuted">#5D6A64</color>      <!-- muted -->
+    <color name="textOnAccent">#FFFFFF</color>   <!-- on_accent -->
+    <color name="online">#12795B</color>         <!-- online -->
     <color name="mention">#A96300</color>
-    <color name="danger">#D33A4A</color>
-    <color name="bubbleTextFailed">#A61B2B</color>
-    <color name="senderName">#2A5FC0</color>
-    <color name="searchHighlight">#66FFB020</color>
-    <color name="divider">#DCE1E9</color>
-    <color name="bgElevated">#FFFFFF</color>
-    <color name="chipBg">#EDF1F7</color>
-    <color name="chipText">#47546A</color>
-    <color name="selectedBg">#E7EFFD</color>
-    <color name="iconBg">#EFF2F7</color>
+    <color name="danger">#B44A41</color>         <!-- danger -->
+    <color name="bubbleTextFailed">#A03E36</color><!-- danger_hi -->
+    <color name="senderName">#0F6B50</color>     <!-- accent_hi -->
+    <color name="searchHighlight">#4212795B</color> <!-- accent_line, 26% -->
+    <color name="divider">#DEDAD1</color>        <!-- border -->
+    <color name="bgElevated">#F5F3EE</color>     <!-- surface_hi -->
+    <color name="chipBg">#ECE9E2</color>         <!-- surface_2 -->
+    <color name="chipText">#3F4C46</color>       <!-- text_dim -->
+    <color name="selectedBg">#1A12795B</color>   <!-- accent_soft, 10% -->
+    <color name="iconBg">#F5F3EE</color>         <!-- surface_hi -->
 </resources>

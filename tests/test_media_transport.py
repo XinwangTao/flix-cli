@@ -2,10 +2,26 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import sys
 import unittest
 
 from flixcli.media_session import SessionManager
 from flixcli.media_transport import PeerMedia, available
+
+
+@contextlib.contextmanager
+def _selector_loop():
+    # See tests/test_media_http.py: Proactor's UDP sendto wedges on this host.
+    if sys.platform != "win32":
+        yield
+        return
+    old = asyncio.get_event_loop_policy()
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    try:
+        yield
+    finally:
+        asyncio.set_event_loop_policy(old)
 
 
 class MediaTransportTests(unittest.TestCase):
@@ -39,7 +55,8 @@ class MediaTransportTests(unittest.TestCase):
             await offer_peer.close()
             await answer_peer.close()
             await asyncio.sleep(0.05)
-        asyncio.run(run())
+        with _selector_loop():
+            asyncio.run(asyncio.wait_for(run(), timeout=30))
 
 
 if __name__ == "__main__":

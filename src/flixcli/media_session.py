@@ -141,6 +141,14 @@ class SessionManager:
         requested = frozenset(capabilities)
         if not requested or not requested <= VALID_CAPABILITIES or "view" not in requested:
             raise SessionError("bad-capabilities", "view is required; capabilities are view/audio/control")
+        if call_id is not None:
+            try:
+                call_id = str(uuid.UUID(str(call_id)))
+            except (ValueError, TypeError, AttributeError) as exc:
+                # call_id becomes a filename in the snapshot directory; a
+                # caller-supplied "../../x" used to escape it.
+                raise SessionError("bad-call-id",
+                                   "callId must be a UUID") from exc
         call_id = call_id or str(uuid.uuid4())
         if call_id in self.sessions:
             raise SessionError("duplicate-call", "callId already exists")

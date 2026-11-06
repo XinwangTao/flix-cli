@@ -10,7 +10,9 @@ The PIN rotates on every daemon start (stored in prefs, printed at startup).
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
+import os
 import secrets
 import time
 from pathlib import Path
@@ -59,7 +61,7 @@ fetch('/devices?pin=' + PIN).then(r => r.json()).then(j => {
     sel.appendChild(o);
   }
 });
-const ws = new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');
+const ws = new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws?pin='+encodeURIComponent(PIN));
 const chat = document.getElementById('chat');
 function add(t, right, meta){
   const d=document.createElement('div');d.className='bubble '+(right?'right':'left');
@@ -225,29 +227,61 @@ def make_web_app(store, ident: dict, on_web_text: Callable[[str], None],
     def pin() -> str:
         return store.own_web_pin()
 
+    # Every entry point must share one throttled counter.  A 4-digit PIN is
+    # only 10k guesses: unlimited GET /<pin> probes defeat the login entirely.
+    FAIL_LIMIT = 10
+    FAIL_WINDOW_S = 300.0
+
+    def _throttle_state(request: web.Request) -> tuple[int, float]:
+        rec = request.app["fails"].get(request.remote) or (0, 0.0)
+        return rec[0], rec[1]
+
+    def _record_failure(request: web.Request) -> None:
+        n, since = _throttle_state(request)
+        now = time.monotonic()
+        if now - since > FAIL_WINDOW_S:
+            n, since = 0, now
+        request.app["fails"][request.remote] = (n + 1, since)
+
+    def throttled(request: web.Request) -> bool:
+        n, since = _throttle_state(request)
+        return n >= FAIL_LIMIT and time.monotonic() - since <= FAIL_WINDOW_S
+
+    def _pin_matches(candidate: str | None) -> bool:
+        if not isinstance(candidate, str):
+            return False
+        try:
+            return hmac.compare_digest(candidate.encode("utf-8"),
+                                       pin().encode("utf-8"))
+        except (UnicodeError, AttributeError):
+            return False
+
+    def authorized(request: web.Request) -> bool:
+        supplied = request.match_info.get("pin") or request.query.get("pin")
+        if _pin_matches(supplied):
+            request.app["fails"].pop(request.remote, None)
+            return True
+        _record_failure(request)
+        return False
+
     async def index(request: web.Request) -> web.Response:
         return web.Response(text=INDEX, content_type="text/html", charset="utf-8")
 
     async def validate(request: web.Request) -> web.Response:
+        if throttled(request):
+            return web.Response(status=429, text="too many attempts")
         try:
             payload = await request.json()
         except Exception:
             return web.Response(status=401, text="bad request")
-        fails = int(request.app["fails"].get(request.remote, 0))
-        if fails >= 10:
-            return web.Response(status=429, text="too many attempts")
-        if payload.get("code") == pin():
+        if _pin_matches(payload.get("code")):
             request.app["fails"].pop(request.remote, None)
             return web.Response(text="ok")
-        request.app["fails"][request.remote] = fails + 1
+        _record_failure(request)
         return web.Response(status=401, text="wrong code")
 
-    def authorized(request: web.Request) -> bool:
-        return request.match_info.get("pin") == pin() or \
-            request.query.get("pin") == pin()
-
     async def app_page(request: web.Request) -> web.Response:
-        if not authorized(request):
+        if throttled(request) or not authorized(request):
             raise web.HTTPFound("/")
         return web.Response(text=PAGE, content_type="text/html", charset="utf-8")
 
@@ -279,18 +313,28 @@ def make_web_app(store, ident: dict, on_web_text: Callable[[str], None],
                 continue
             if part.name != "file":
                 continue
-            dest_dir = Path(save_dir_fn())
+            dest_dir = Path(save_dir_fn()).resolve()
             dest_dir.mkdir(parents=True, exist_ok=True)
-            dest = dest_dir / part.filename
-            tmp = dest_dir / (part.filename + ".flixdownload")
+            # Never trust the multipart filename: aiohttp only strips a leading
+            # slash, so "../../evil.txt" would otherwise escape save_dir.
+            clean = os.path.basename((part.filename or "").replace("\\", "/"))
+            if not clean or clean in (".", "..") or ":" in clean:
+                return web.json_response(
+                    {"ok": False, "error": "bad-filename",
+                     "detail": part.filename}, status=400)
+            dest = (dest_dir / clean).resolve()
+            if dest.parent != dest_dir:
+                return web.json_response(
+                    {"ok": False, "error": "bad-filename",
+                     "detail": part.filename}, status=400)
+            tmp = dest.with_name(dest.name + ".flixdownload")
             size = 0
             with open(tmp, "wb") as f:
                 while chunk := await part.read_chunk(256 * 1024):
                     f.write(chunk)
                     size += len(chunk)
-            import os
             os.replace(tmp, dest)
-            entry = {"name": part.filename, "size": size, "path": str(dest)}
+            entry = {"name": clean, "size": size, "path": str(dest)}
             if target:
                 from .files import send_file
                 from .routing import resolve_target
@@ -306,7 +350,10 @@ def make_web_app(store, ident: dict, on_web_text: Callable[[str], None],
         return web.json_response({"ok": True, "saved": saved})
 
     async def devices_json(request: web.Request) -> web.Response:
-        if request.query.get("pin") != pin():
+        if throttled(request):
+            return web.json_response({"error": "too many attempts"}, status=429)
+        if not _pin_matches(request.query.get("pin")):
+            _record_failure(request)
             return web.json_response({"error": "unauthorized"}, status=401)
         return web.json_response({"devices": [
             {"fingerprint": d["fingerprint"],
@@ -319,7 +366,11 @@ def make_web_app(store, ident: dict, on_web_text: Callable[[str], None],
         except Exception:
             return web.json_response({"ok": False, "error": "bad request"},
                                      status=400)
-        if payload.get("pin") != pin():
+        if throttled(request):
+            return web.json_response({"ok": False, "error": "too many attempts"},
+                                     status=429)
+        if not _pin_matches(payload.get("pin")):
+            _record_failure(request)
             return web.json_response({"ok": False, "error": "unauthorized"},
                                      status=401)
         to = str(payload.get("to", ""))

@@ -1,0 +1,254 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RelayDesk v2.3.0 多端发布流水线",
+    "locale": "zh-CN",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    {
+      "id": "maintainer",
+      "label": "维护者"
+    },
+    {
+      "id": "cicd",
+      "label": "GitHub Actions"
+    },
+    {
+      "id": "win",
+      "label": "Windows 产物"
+    },
+    {
+      "id": "apple",
+      "label": "macOS 产物"
+    },
+    {
+      "id": "linux",
+      "label": "Linux 产物"
+    },
+    {
+      "id": "android",
+      "label": "Android 产物"
+    },
+    {
+      "id": "release",
+      "label": "GitHub Release"
+    },
+    {
+      "id": "exceptions",
+      "label": "失败与人工出口",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "trigger",
+      "label": "触发",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "build",
+      "label": "四端并行构建",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "publish",
+      "label": "校验与发布",
+      "fromCol": 4,
+      "toCol": 5
+    }
+  ],
+  "mainPath": [
+    "tag",
+    "gate",
+    "win_build",
+    "checksum",
+    "publish"
+  ],
+  "nodes": [
+    {
+      "id": "tag",
+      "lane": "maintainer",
+      "col": 0,
+      "type": "frontend",
+      "label": "推送 tag v2.3.0",
+      "sublabel": "main 合入后打 tag",
+      "width": 150
+    },
+    {
+      "id": "gate",
+      "lane": "cicd",
+      "col": 1,
+      "type": "security",
+      "label": "测试门禁",
+      "sublabel": "pytest + 版本一致性",
+      "tag": "阻断",
+      "width": 150
+    },
+    {
+      "id": "win_build",
+      "lane": "win",
+      "col": 3,
+      "type": "backend",
+      "label": "PyInstaller Windows",
+      "sublabel": "RelayDesk.exe + zip",
+      "width": 160
+    },
+    {
+      "id": "mac_build",
+      "lane": "apple",
+      "col": 3,
+      "type": "backend",
+      "label": "PyInstaller macOS",
+      "sublabel": "arm64 + x86_64 .app",
+      "width": 160
+    },
+    {
+      "id": "linux_build",
+      "lane": "linux",
+      "col": 3,
+      "type": "backend",
+      "label": "PyInstaller Linux",
+      "sublabel": "RelayDesk 二进制 + zip",
+      "width": 160
+    },
+    {
+      "id": "android_build",
+      "lane": "android",
+      "col": 3,
+      "type": "backend",
+      "label": "Gradle Android",
+      "sublabel": "assembleDebug → APK",
+      "width": 160
+    },
+    {
+      "id": "checksum",
+      "lane": "release",
+      "col": 4,
+      "type": "security",
+      "label": "汇总与校验",
+      "sublabel": "sha256 + 缺失检查",
+      "tag": "全端齐备",
+      "width": 150
+    },
+    {
+      "id": "publish",
+      "lane": "release",
+      "col": 5,
+      "type": "external",
+      "label": "发布 GitHub Release",
+      "sublabel": "v2.3.0 附件 + 说明",
+      "width": 170
+    },
+    {
+      "id": "stop",
+      "lane": "exceptions",
+      "col": 1,
+      "type": "security",
+      "label": "停止发布",
+      "sublabel": "门禁红，tag 不产出",
+      "width": 140
+    },
+    {
+      "id": "manual",
+      "lane": "exceptions",
+      "col": 4,
+      "type": "messagebus",
+      "label": "保留产物人工排查",
+      "sublabel": "缺端或构建失败，不发布",
+      "tag": "人工出口",
+      "width": 160
+    }
+  ],
+  "edges": [
+    {
+      "from": "tag",
+      "to": "gate",
+      "label": "触发 workflow"
+    },
+    {
+      "from": "gate",
+      "to": "win_build",
+      "label": "通过后并行构建"
+    },
+    {
+      "from": "gate",
+      "to": "mac_build"
+    },
+    {
+      "from": "gate",
+      "to": "linux_build"
+    },
+    {
+      "from": "gate",
+      "to": "android_build"
+    },
+    {
+      "from": "win_build",
+      "to": "checksum",
+      "label": "上传附件"
+    },
+    {
+      "from": "mac_build",
+      "to": "checksum"
+    },
+    {
+      "from": "linux_build",
+      "to": "checksum"
+    },
+    {
+      "from": "android_build",
+      "to": "checksum"
+    },
+    {
+      "from": "checksum",
+      "to": "publish",
+      "label": "校验通过"
+    },
+    {
+      "from": "gate",
+      "to": "stop",
+      "label": "测试失败",
+      "role": "error",
+      "variant": "security"
+    },
+    {
+      "from": "checksum",
+      "to": "manual",
+      "label": "缺任一端",
+      "role": "error",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "发布主路径",
+      "items": [
+        "推 tag 即构建，四端产物一次出齐",
+        "每一端自带 sha256 校验文件",
+        "全部附件就位才创建 Release"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "阻断条件",
+      "items": [
+        "单元测试或版本一致性失败，直接停止发布",
+        "任一平台构建失败时不发正式 Release"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "人工出口",
+      "items": [
+        "失败任务仍保留 artifact 供下载排查",
+        "Android 使用已验证的调试签名 APK"
+      ]
+    }
+  ]
+}

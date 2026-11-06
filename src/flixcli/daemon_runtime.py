@@ -13,7 +13,7 @@ from pathlib import Path
 # 0 on non-Windows keeps Popen happy there.
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
-from . import DEVICE_PORT, local_ip, model
+from . import DEVICE_PORT, is_port_text, local_ip, model
 from .adb import AdbClient
 from .media_session import SessionManager
 from .media_transport import MediaRuntime
@@ -32,8 +32,11 @@ async def set_clipboard_text(text: str) -> None:
         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         creationflags=NO_WINDOW)
     data = text.encode("utf-16-le")
-    with contextlib.suppress(Exception):
-        await proc.communicate(b"\xff\xfe" + data)
+    try:
+        await asyncio.wait_for(proc.communicate(b"\xff\xfe" + data), timeout=3)
+    except (asyncio.TimeoutError, Exception):
+        with contextlib.suppress(Exception):
+            proc.kill()
 
 
 def read_clipboard() -> str | None:
@@ -86,8 +89,8 @@ async def clip_sync_loop(store, ident: dict, state: dict,
         text = text.lstrip("﻿")
         if not text or text == state.get("last_set") or text == last_sent:
             continue
-        last_sent = text
-        h = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:12]
+        h = hashlib.sha1(text.encode("utf-8", "replace"),
+                         usedforsecurity=False).hexdigest()[:12]
         intent = model.clipboard_intent(ident["fingerprint"], text)
         sent = 0
         for fp, ip, port in store.paired_targets():
@@ -99,6 +102,10 @@ async def clip_sync_loop(store, ident: dict, state: dict,
             except (PeerError, Exception):
                 continue
         if sent:
+            # Only mark as sent after a success: previously last_sent was set
+            # before the loop, so a clipboard change made while every peer was
+            # offline was silently dropped forever.
+            last_sent = text
             print(f"[clip-sync] {h} -> {sent} paired device(s)",
                   file=sys.stderr, flush=True)
 
@@ -107,12 +114,55 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
                      announce: bool = True, clip_sync: bool = True,
                      web_port: int = 0, multicast_if: str | None = None) -> int:
     devices: dict[str, dict] = {}
+    verify_pending: set[str] = set()
+
+    async def _verify_moved_device(dev: dict) -> None:
+        """An announce may not move an already-known peer on its own.
+
+        Announce datagrams are unsigned: anyone can claim a paired
+        fingerprint and redirect routing (and outbox retries) to themselves.
+        A new address is accepted only after ping_v2 proves the fingerprint
+        really answers there.
+        """
+        fp = dev["fingerprint"]
+        ip = dev.get("ip", "")
+        port = int(dev.get("port") or DEVICE_PORT)
+        try:
+            modal = await ping_v2(ip, ident, port=port,
+                                  device_port=device_port, timeout=3.0)
+        except Exception:
+            return
+        finally:
+            verify_pending.discard(fp)
+        if modal.get("fingerprint") != fp:
+            print(f"[discover] ignored IP move for {fp[:8]}: identity mismatch",
+                  file=sys.stderr, flush=True)
+            return
+        devices[fp] = dev
+        store.upsert_device(fp, alias=dev.get("alias", ""),
+                            device_model=dev.get("deviceModel", ""),
+                            port=dev.get("port"), version=dev.get("version"),
+                            ip=ip, os_name=dev.get("os", ""))
+        print(f"[discover] {dev.get('alias')} ({fp[:8]}) moved to "
+              f"{ip}:{port}", file=sys.stderr, flush=True)
 
     def on_device(dev: dict) -> None:
         fp = dev.get("fingerprint")
         if not fp or fp == ident["fingerprint"]:
             return
         if devices.get(fp) == dev:
+            return
+        old_ip = store.device_ip(fp)[0]
+        new_ip = dev.get("ip", "")
+        if old_ip and new_ip and old_ip != new_ip:
+            if fp not in verify_pending:
+                verify_pending.add(fp)
+                try:
+                    asyncio.get_running_loop().create_task(
+                        _verify_moved_device(dev))
+                except RuntimeError:  # callback outside the loop
+                    verify_pending.discard(fp)
+                    devices[fp] = dev
             return
         devices[fp] = dev
         try:
@@ -134,7 +184,7 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
         port = DEVICE_PORT
         target = to
         head, _, tail = to.rpartition(":")
-        if tail.isdigit():
+        if is_port_text(tail):
             target, port = head, int(tail)
         dev = devices.get(to) or devices.get(target) or {}
         if not dev:
@@ -146,7 +196,7 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
         ip = dev.get("ip") or target
         fp = dev.get("fingerprint", to)
         p = dev.get("port") or port
-        if not (ip and ip.replace(".", "").isdigit()):
+        if not (ip and is_port_text(ip.replace(".", ""))):
             return None, p, fp
         return ip, p, fp
 
@@ -314,30 +364,41 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
         try:
             while True:
                 await asyncio.sleep(3)
-                refreshed = 0
-                for row in store.devices():
-                    fp = row.get("fingerprint") or ""
-                    ip = row.get("ip") or ""
-                    port = row.get("port")
-                    if (not fp or not ip or not port
-                            or fp == ident["fingerprint"]):
-                        continue
-                    try:
-                        modal = await ping_v2(ip, ident, port=int(port),
-                                              device_port=device_port,
-                                              timeout=3.0)
-                    except Exception:
-                        continue
-                    try:
-                        store.upsert_device(
-                            fp, alias=modal.get("alias", ""),
-                            device_model=modal.get("deviceModel", ""),
-                            port=modal.get("port") or port,
-                            version=modal.get("version"), ip=ip,
-                            os_name=modal.get("os", ""))
-                        refreshed += 1
-                    except Exception as e:
-                        print(f"[presence] {e}", file=sys.stderr, flush=True)
+                peers = [row for row in store.devices()
+                         if row.get("fingerprint") and row.get("ip")
+                         and row.get("port")
+                         and row.get("fingerprint") != ident["fingerprint"]]
+                # Probes used to run serially (3 s each): with ~10 unreachable
+                # history rows one pass exceeded the 90 s presence TTL and
+                # flipped *online* devices to offline. Bound concurrency so a
+                # large table cannot stall the loop or the event loop.
+                sem = asyncio.Semaphore(8)
+
+                async def probe(row, sem=sem) -> bool:
+                    async with sem:
+                        fp = row["fingerprint"]
+                        ip = row["ip"]
+                        port = int(row["port"])
+                        try:
+                            modal = await ping_v2(ip, ident, port=port,
+                                                  device_port=device_port,
+                                                  timeout=3.0)
+                        except Exception:
+                            return False
+                        try:
+                            store.upsert_device(
+                                fp, alias=modal.get("alias", ""),
+                                device_model=modal.get("deviceModel", ""),
+                                port=modal.get("port") or port,
+                                version=modal.get("version"), ip=ip,
+                                os_name=modal.get("os", ""))
+                            return True
+                        except Exception as e:
+                            print(f"[presence] {e}", file=sys.stderr, flush=True)
+                            return False
+
+                refreshed = sum(await asyncio.gather(
+                    *(probe(row) for row in peers))) if peers else 0
                 if refreshed:
                     print(f"[presence] refreshed {refreshed} device(s)",
                           file=sys.stderr, flush=True)

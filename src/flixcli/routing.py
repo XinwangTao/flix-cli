@@ -1,7 +1,7 @@
 """Shared target resolution for CLI/MCP group + direct sends."""
 from __future__ import annotations
 
-from . import DEVICE_PORT
+from . import DEVICE_PORT, is_port_text
 
 
 def resolve_target(store, to: str) -> tuple[str | None, int | None, str]:
@@ -14,11 +14,11 @@ def resolve_target(store, to: str) -> tuple[str | None, int | None, str]:
     port = None
     target = to
     head, _, tail = to.rpartition(":")
-    if tail.isdigit():
+    if is_port_text(tail):
         target, port = head, int(tail)
     for row in store.devices():
         if row["fingerprint"].startswith(target) and row.get("ip"):
             return row["ip"], (port or row.get("port")), row["fingerprint"]
-    if target.replace(".", "").isdigit():
+    if is_port_text(target.replace(".", "")):
         return target, port, to
     return None, port, to

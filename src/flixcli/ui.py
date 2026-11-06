@@ -109,8 +109,20 @@ class UiApp:
         self.entry.delete(0, "end")
 
         def run() -> None:
-            asyncio.run(send_group_text(self.store,
-                                        {"fingerprint": self.me}, self.gid, text))
+            # SQLite connections are thread-bound (check_same_thread=True):
+            # reusing the UI thread's Store here raised ProgrammingError and
+            # silently dropped the message.
+            local = Store()
+            try:
+                asyncio.run(send_group_text(local,
+                                            {"fingerprint": self.me},
+                                            self.gid, text))
+                self.root.after(0, lambda: self.status.configure(text="已发送"))
+            except Exception as e:  # noqa: BLE001 - surface in the status bar
+                self.root.after(0, lambda err=e: self.status.configure(
+                    text=f"发送失败: {err}"))
+            finally:
+                local.close()
         threading.Thread(target=run, daemon=True).start()
 
 

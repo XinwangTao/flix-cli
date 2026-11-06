@@ -55,3 +55,6 @@ build_*/
 dist_*/
 dist-macos/
 .pytest_cache/
+
+# 工具/调试产物
+.lancer/

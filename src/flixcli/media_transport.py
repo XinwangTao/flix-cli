@@ -12,6 +12,7 @@ import contextlib
 import io
 import json
 import time
+import uuid
 from fractions import Fraction
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -24,9 +25,11 @@ try:
     import mss
     import numpy as np
     from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
+    from aiortc.mediastreams import MediaStreamError
     MEDIA_IMPORT_ERROR = None
 except ImportError as exc:  # optional dependency
     av = mss = np = RTCConfiguration = RTCPeerConnection = RTCSessionDescription = VideoStreamTrack = None
+    MediaStreamError = None
     MEDIA_IMPORT_ERROR = str(exc)
 
 
@@ -53,7 +56,13 @@ class ScreenTrack(VideoStreamTrack if VideoStreamTrack is not None else object):
         def grab():
             with mss.MSS() as grabber:
                 return grabber.grab(self._monitor)
-        image = await asyncio.to_thread(grab)
+        try:
+            # A locked or disconnected Windows session can make the GDI capture
+            # block indefinitely. Bound it: a wedged grab would otherwise keep
+            # the worker thread and the whole PeerConnection close waiting.
+            image = await asyncio.wait_for(asyncio.to_thread(grab), timeout=3.0)
+        except asyncio.TimeoutError:
+            raise MediaStreamError("screen capture timed out") from None
         frame = av.VideoFrame.from_ndarray(np.asarray(image), format="bgra")
         longest = max(frame.width, frame.height)
         if longest > self.max_edge:
@@ -185,7 +194,13 @@ class MediaRuntime:
         self.peers: dict[str, PeerMedia] = {}
 
     async def _save_frame(self, call_id: str, data: bytes) -> None:
-        path = self.snapshot_dir / f"{call_id}.jpg"
+        try:
+            safe = str(uuid.UUID(str(call_id)))
+        except (ValueError, TypeError, AttributeError):
+            return
+        path = (self.snapshot_dir / f"{safe}.jpg").resolve()
+        if path.parent != self.snapshot_dir.resolve():
+            return
         tmp = path.with_suffix(".jpg.tmp")
         await asyncio.to_thread(tmp.write_bytes, data)
         await asyncio.to_thread(tmp.replace, path)
@@ -197,6 +212,11 @@ class MediaRuntime:
 
     def create(self, call_id: str) -> PeerMedia:
         self.require_available()
+        # Repeated offers used to build a fresh RTCPeerConnection every time
+        # and orphan the previous one (sockets/tasks leaking until revoke).
+        existing = self.peers.get(call_id)
+        if existing is not None:
+            return existing
         peer = PeerMedia(call_id, self.manager, self._save_frame)
         self.peers[call_id] = peer
         self.manager.media[call_id] = peer
@@ -209,5 +229,11 @@ class MediaRuntime:
         return peer
 
     def snapshot(self, call_id: str) -> Path | None:
-        path = self.snapshot_dir / f"{call_id}.jpg"
+        try:
+            safe = str(uuid.UUID(str(call_id)))
+        except (ValueError, TypeError, AttributeError):
+            return None
+        path = (self.snapshot_dir / f"{safe}.jpg").resolve()
+        if path.parent != self.snapshot_dir.resolve():
+            return None
         return path if path.is_file() else None

@@ -57,7 +57,7 @@ announce，因此 flixd 每 60s 对库内设备做一次 `/ping_v2` 探活并刷
 | 探测 | `flix probe <ip[:port]>` | flix_probe | ✅ 404 "Route not found" |
 | 局域网诊断（网卡/组播/防火墙/端口可达） | `flix netcheck [--json]` | — | — |
 | 手动添加（ping_v2 握手） | `flix ping <ip[:port]>` | — | ✅ 官方 UI 添加成功 |
-| 配对（askPairDevice/confirmPairDevice） | `flix pair [--code]` | flix_pair | ✅ 双侧 pair_devices 落库 |
+| 配对（askPairDevice/confirmPairDevice，`--code` 必填：对端 4 位配对码） | `flix pair <ip[:port]> --code <码>` | flix_pair | ✅ 双侧 pair_devices 落库 |
 | 文本气泡（type 0） | `flix send-text` | flix_send_text | ✅ |
 | 文本持久投递（离线排队 → 30s 重投 → TTL 7 天） | `flix outbox` | — | 线格式不变 |
 | 剪贴板投递（TransIntent clipboard） | `flix clipboard` | flix_send_clipboard | ✅ |
@@ -134,6 +134,17 @@ ADB shell 默认只返回 `approval_required`；只有本机操作者显式加 `
 GUI 通过 `127.0.0.1:8898` Desktop API 工作，CLI/MCP 与 GUI 读取同一状态。若缺少依赖，
 执行 `pip install -e ".[gui]"`。
 
+## 自动更新
+
+RelayDesk 窗口启动后会自己检查 GitHub Release（设置里可关闭）：发现新版本就在后台下载、
+校验 sha256，窗口顶部出现横幅；点「重启并安装」才替换 `RelayDesk.exe` 并按原参数重启，
+起不来自动回滚。下载期间不阻塞聊天，MCP 进程不会被重启。
+
+同一套引擎也可以用 CLI 手动执行：`flix update --check` 只查（有新版本退出码 10），
+`flix update` 直接安装，`--dry-run` 停在替换前。源码检出可
+`python scripts\autoupdate.py --check`。状态与日志在 `%APPDATA%\flixcli`，细节见
+[docs/autoupdate.md](docs/autoupdate.md)。
+
 ## 自动应答（flix agent）
 
 `flix mcp` 是被动的：AI 会话被唤醒才会收发。要无人值守地互相应答，用 `flix agent`——
@@ -207,6 +218,18 @@ flix shell --pty --shell powershell 4c4ca286
 
 流程真源：`docs/archify/flix_shell_pty_workflow.html`（旁路 `.json`）。
 
+## 安全边界（2026-11 加固）
+
+- **配对是信任边界**：`/bubble`、`/intent`（剪贴板、rdShell、rdAgent、群快照）只接受
+  `pair_devices` 里已配对的发送方，且数据报来源 IP 必须与该设备记录一致；未配对或来源不符一律 403。
+- **配对需要验证码**：`askPairDevice` 的 `verifyCode` 必须等于本机 4 位配对码（常量时间比较），
+  无码请求在联网前就被拒绝（`pair-code-required`）。旧版官方客户端不看这个字段，但 flixcli 两端都校验。
+- **Web PIN 限流**：4 位 PIN 在所有入口（`GET /<pin>`、`/validate-code`、上传、WebSocket）共享
+  同一来源计数；10 次/5 分钟后限流，成功登录清零。
+- **单实例**：同一 `APPDATA` 只允许一个 flixd；第二个实例以退出码 5 退出，不再抢端口/锁冲突。
+- **Desktop API** 只监听 127.0.0.1，并校验 `Host`/`Origin` 与 JSON Content-Type，阻断浏览器 CSRF 与 DNS rebinding。
+- **线日志默认关闭**：只有设置 `FLIX_WIRE_LOG` 才落盘，正文只记哈希，`pin=` 参数打码，单文件 5 MB 轮转。
+
 ## 回归测试
 
 ```
@@ -214,6 +237,13 @@ python tests/e2e.py         # 双节点 11 项：ping/pair/text/file/group/web/
                             # webrtc/qrcode/clipboard（需 18991/18995 空闲）
 python scripts/interop_check.py --my-fp <fp> --official-fp <fp> --self-test
                             # 与原生 Flix 客户端的线格式互通（官方客户端在跑时）
+
+# 100 轮审计（修复/回归/模糊/A-B/工具链）
+python scripts/audit_rounds.py core   # R01-R50
+python scripts/audit_rounds.py cli    # R51-R73
+python scripts/audit_rounds.py fuzz   # R74-R83
+python scripts/audit_rounds.py ab     # R84-R93（基线 worktree D:\UserData\Temp\flix-baseline）
+python scripts/audit_rounds.py tools  # R94-R100
 ```
 
 ## 退出码约定
@@ -228,6 +258,7 @@ python scripts/interop_check.py --my-fp <fp> --official-fp <fp> --self-test
 | 3 | 网络失败（无设备/超时/不可达） |
 | 4 | 对端拒绝（传输被拒等） |
 | 5 | 本机环境/协议未就绪（端口占用、防火墙） |
+| 10 | `flix update --check`：发现新版本 |
 | 130 | Ctrl+C |
 
 ## 目录
@@ -278,6 +309,25 @@ open dist/RelayDesk.app
 应用未签名、未公证。首次打开若提示「无法验证开发者」：右键 → 打开，或执行
 `xattr -dr com.apple.quarantine /Applications/RelayDesk.app`。
 状态目录为 `~/Library/Application Support/flixcli`。
+
+## 发布（多端 Release）
+
+推一个 `v*` tag 即触发 `.github/workflows/release.yml`，四端并行构建后在
+GitHub Release 一次发齐（每份附件旁边都有同名 `.sha256`）：
+
+| 端 | 产物 | 说明 |
+|---|---|---|
+| Windows | `RelayDesk-<ver>-win64.zip` | 单文件 `RelayDesk.exe`（serve / mcp / 窗口） |
+| macOS | `RelayDesk-<ver>-macos-arm64.zip`、`-x86_64.zip` | `.app`，未签名未公证 |
+| Linux | `RelayDesk-<ver>-linux-x86_64.zip` | 单文件二进制 + zip，解压即用 |
+| Android | `RelayDesk-<ver>-android.apk` | `assembleDebug` 调试签名，与平板上验证过的包一致 |
+
+门禁：`pytest tests -q --ignore=tests/e2e.py` 全绿且 `pyproject.toml` 版本与 tag 一致，
+才会进入构建；任一端缺失或失败，Release 不会创建，失败任务的 artifact 仍可下载排查。
+重跑某次失败的发布用 `workflow_dispatch` 并填已有 tag，不必重新打 tag。
+
+发布前本地流程：合入 `main` → 改 `pyproject.toml` 版本与 `CHANGELOG.md` →
+`git tag v<ver>` → `git push origin v<ver>`。
 
 ## 许可与反馈
 
