@@ -18,6 +18,8 @@ from typing import Callable
 
 from aiohttp import WSMsgType, web
 
+from . import clipboard as clipboard_mod
+
 PAGE = """<!doctype html>
 <html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -206,11 +208,13 @@ setInterval(poll, 3000); poll();
 
 def health_payload(ident: dict, started_at: float, now: float,
                    device_count: int, channel_port: int,
-                   update: dict | None = None) -> dict:
+                   update: dict | None = None,
+                   clipboard: str = "none") -> dict:
     """Small, stable probe payload for deploy checks and monitoring.
 
     Kept as a pure function so the shape can be asserted without a running
-    server; the route only feeds it live values.
+    server; the route only feeds it live values.  ``clipboard`` names the
+    sink for incoming clipboard intents (a headless board reports ``file``).
     """
     return {
         "ok": True,
@@ -220,6 +224,7 @@ def health_payload(ident: dict, started_at: float, now: float,
         "channelPort": channel_port,
         "uptime": max(0, int(now - started_at)),
         "devices": device_count,
+        "clipboard": clipboard,
         "update": update or None,
     }
 
@@ -410,9 +415,11 @@ def make_web_app(store, ident: dict, on_web_text: Callable[[str], None],
             count = len(store.devices())
         except Exception:
             count = -1
+        spool = Path(store.path).parent / "clipboard.txt" if store.path else None
         return web.json_response(
             health_payload(ident, started_at, time.time(), count, channel_port,
-                           update_info() if update_info else None))
+                           update_info() if update_info else None,
+                           clipboard_mod.describe(spool)))
 
     app.router.add_get("/", index)
     app.router.add_get("/healthz", healthz)

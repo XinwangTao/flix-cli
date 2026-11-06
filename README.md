@@ -49,6 +49,17 @@ announce，因此 flixd 每 60s 对库内设备做一次 `/ping_v2` 探活并刷
 `scripts/fix_firewall.ps1` 交给**对端**管理员，在其机器上以管理员 PowerShell 执行
 （默认放行 `dist\flixd.exe`，`-Remove` 撤销）；flixd/RelayDesk 不会自动执行它，也不会改动远端。
 
+## 跨平台剪贴板
+
+`flixd` 的自动同步在 Windows 上走 user32 + `clip.exe`；Linux 桌面在 Wayland 下用
+`wl-clipboard`，X11 下用 `xclip`/`xsel`；macOS 用 `pbpaste`/`pbcopy`。**无 GUI 的 Linux 板子**
+（QCM6490 在 systemd/tty 下运行，没有 X/Wayland）拿不到剪贴板，收到远端剪贴板后不再静默丢弃，
+而是原子写入 `~/flixcli/clipboard.txt`（0600，UTF-8），journal 打印
+`[clip-sync] no GUI clipboard; stored N chars in …`，本机脚本/agent 可直接 `cat` 取用。
+该文件只写不读：否则守护进程重启后会把上次收到的文本当成"新剪贴板"重新广播。
+`/healthz` 的 `clipboard` 字段给出实际落地方式（`win32` / `wl-clipboard` / `xclip` /
+`xsel` / `pbcopy` / `file` / `none`），多端排障时先看这一项。
+
 ## 功能矩阵
 
 | 功能 | CLI | MCP 工具 | 官方互通 |

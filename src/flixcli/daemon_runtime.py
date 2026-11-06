@@ -2,18 +2,13 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
 import subprocess
 import sys
 from pathlib import Path
 
-# The daemon runs inside the windowed exe (no console). Windows gives every
-# console child (clip.exe) a brand-new visible terminal unless suppressed;
-# 0 on non-Windows keeps Popen happy there.
-NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
 from . import DEVICE_PORT, local_ip, model
+from . import clipboard
 
 # 启动时检查 GitHub 最新 release 的结果，/healthz 直接读它
 UPDATE_STATE: dict = {}
@@ -25,52 +20,10 @@ from .desktop_api import serve_desktop_api
 from .discovery import Discovery
 from .server import serve_channel
 
-
-async def set_clipboard_text(text: str) -> None:
-    """Best-effort clipboard write; clip.exe understands UTF-16LE with BOM."""
-    if not sys.platform.startswith("win"):
-        return
-    proc = await asyncio.create_subprocess_exec(
-        "clip", stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-        creationflags=NO_WINDOW)
-    data = text.encode("utf-16-le")
-    with contextlib.suppress(Exception):
-        await proc.communicate(b"\xff\xfe" + data)
-
-
-def read_clipboard() -> str | None:
-    """Local clipboard text via user32 (CF_UNICODETEXT); None if empty/error."""
-    if not sys.platform.startswith("win"):
-        return None
-    import ctypes
-    from ctypes import wintypes
-    u32 = ctypes.windll.user32
-    k32 = ctypes.windll.kernel32
-    CF_UNICODETEXT = 13
-    # Handles/pointers come back as 64-bit values; without explicit restypes
-    # ctypes truncates them to 32-bit c_int and reads garbage -- observed as
-    # random access violations in wstring_at (0x7F591B90-style addresses).
-    u32.GetClipboardData.argtypes = [wintypes.UINT]
-    u32.GetClipboardData.restype = wintypes.HANDLE
-    k32.GlobalLock.argtypes = [wintypes.HGLOBAL]
-    k32.GlobalLock.restype = wintypes.LPVOID
-    k32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
-    if not u32.OpenClipboard(0):
-        return None
-    try:
-        h = u32.GetClipboardData(CF_UNICODETEXT)
-        if not h:
-            return None
-        p = k32.GlobalLock(h)
-        if not p:
-            return None
-        try:
-            return ctypes.wstring_at(p)
-        finally:
-            k32.GlobalUnlock(h)
-    finally:
-        u32.CloseClipboard()
+# Kept as thin aliases: the clipboard backends moved to flixcli.clipboard so
+# the web health probe can report them without importing this runtime.
+read_clipboard = clipboard.read_text
+set_clipboard_text = clipboard.write_text
 
 
 async def clip_sync_loop(store, ident: dict, state: dict,
@@ -169,10 +122,19 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
         return result
 
     clip_state = {"last_set": None}
+    # Headless Linux (board) has no clipboard; the shared backend spools the
+    # text here so a remote clipboard send is no longer a silent no-op.
+    clip_spool = Path(store.path).parent / "clipboard.txt"
 
     async def _set_clipboard(text: str) -> None:
-        await set_clipboard_text(text)
+        sink = await clipboard.awrite_text(text, clip_spool)
         clip_state["last_set"] = text   # suppress our own echo in clip_sync
+        if sink.startswith("file:"):
+            print(f"[clip-sync] no GUI clipboard; stored {len(text)} chars in "
+                  f"{sink[5:]}", file=sys.stderr, flush=True)
+        elif not sink:
+            print("[clip-sync] clipboard write failed on this host",
+                  file=sys.stderr, flush=True)
 
     from .webrtc import SignalHub, make_signal_app
     hub = SignalHub()

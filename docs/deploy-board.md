@@ -17,8 +17,13 @@ scripts/deploy_board.sh user@host /opt/flixcli 8892
 
 ```bash
 curl http://<板子IP>:8892/healthz
-# {"ok": true, "alias": "qcm6490-idp", "channelPort": 8891, "uptime": 12, "devices": 1}
+# {"ok": true, "alias": "qcm6490-idp", "channelPort": 8891, "uptime": 12,
+#  "devices": 1, "clipboard": "file"}
 ```
+
+- `clipboard` 是收到远端剪贴板后的落地方式。板子没有 X/Wayland，值为 `file`：
+  文本会写进 `~/flixcli/clipboard.txt`（0600），不再出现"发出去显示成功、板上什么都没有"。
+  桌面 Linux 跑 flixd 时会显示 `wl-clipboard`/`xclip`/`xsel`。
 
 - 网页版：`http://<板子IP>:8892/`，启动日志里有 4 位 PIN（`journalctl -u flixd | grep PIN`）。
 - 设备通道：8891（发现/收发），桌面 API：127.0.0.1:8898（只给本机 RelayDesk 用）。
