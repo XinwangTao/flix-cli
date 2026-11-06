@@ -3,7 +3,7 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号与 GitHub Release 标签一致。
 可执行产物见 [Releases](https://github.com/XinwangTao/flix-cli/releases)。
 
-## [Unreleased] - 2026-11-02
+## [v2.3.0] - 2026-11-06
 
 ### 安全
 - 收紧局域网信任边界：`/bubble`、剪贴板、rdShell、rdAgent、群快照只接受已配对且来源 IP
@@ -97,6 +97,7 @@
 - Android 平板端：页头与分段控件重排、卡片式列表与空状态、会话页视觉统一。
 - 配对后自动补推群快照；修复测试污染真实配置导致收文件静默失败。
 
+[v2.3.0]: https://github.com/XinwangTao/flix-cli/compare/v2.2.1...v2.3.0
 [v2.2.1]: https://github.com/XinwangTao/flix-cli/compare/v2.2.0...v2.2.1
 [v2.2.0]: https://github.com/XinwangTao/flix-cli/compare/v2.1.0...v2.2.0
 [v2.1.0]: https://github.com/XinwangTao/flix-cli/compare/v2.0.0...v2.1.0

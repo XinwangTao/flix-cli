@@ -8,11 +8,30 @@ onedir is intentional: a onefile .app unpacks ~110 MB to /tmp on every launch
 and macOS Gatekeeper scans it each time, which made startup visibly slow.
 """
 
+import tomllib
+from pathlib import Path
+
+# pyproject.toml is the single source of truth for the version: the bundle used
+# to carry a hard-coded string that drifted from the tag being released.
+_APP_VERSION = tomllib.loads(
+    Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+
+
+# The frozen app has no pyproject.toml to read, so `flix --version`, `flix self`
+# and MCP serverInfo would report 0.0.0+source. Bundle the installed package
+# metadata (copy_metadata) so importlib.metadata resolves the real version.
+try:
+    from PyInstaller.utils.hooks import copy_metadata as _copy_metadata
+    _version_datas = _copy_metadata('flixcli')
+except Exception as _exc:  # noqa: BLE001 - build-time best effort
+    print(f"[spec] flixcli metadata not bundled: {_exc}")
+    _version_datas = []
+
 a = Analysis(
     ['scripts/launch_relaydesk.py'],
     pathex=['src'],
     binaries=[],
-    datas=[],
+    datas=_version_datas,
     hiddenimports=['flixcli.cli', 'flixcli.mcp_server', 'flixcli.daemon',
                    'flixcli.ptyshell'],
     hookspath=[],
@@ -57,8 +76,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': 'RelayDesk',
         'CFBundleDisplayName': 'RelayDesk',
-        'CFBundleShortVersionString': '2.2.1',
-        'CFBundleVersion': '2.2.1',
+        'CFBundleShortVersionString': _APP_VERSION,
+        'CFBundleVersion': _APP_VERSION,
         'LSMinimumSystemVersion': '12.0',
         'NSHighResolutionCapable': True,
         # macOS 14+ asks before an app touches the local network; the daemon

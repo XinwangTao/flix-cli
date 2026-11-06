@@ -310,6 +310,25 @@ open dist/RelayDesk.app
 `xattr -dr com.apple.quarantine /Applications/RelayDesk.app`。
 状态目录为 `~/Library/Application Support/flixcli`。
 
+## 发布（多端 Release）
+
+推一个 `v*` tag 即触发 `.github/workflows/release.yml`，四端并行构建后在
+GitHub Release 一次发齐（每份附件旁边都有同名 `.sha256`）：
+
+| 端 | 产物 | 说明 |
+|---|---|---|
+| Windows | `RelayDesk-<ver>-win64.zip` | 单文件 `RelayDesk.exe`（serve / mcp / 窗口） |
+| macOS | `RelayDesk-<ver>-macos-arm64.zip`、`-x86_64.zip` | `.app`，未签名未公证 |
+| Linux | `RelayDesk-<ver>-linux-x86_64.zip` | 单文件二进制 + zip，解压即用 |
+| Android | `RelayDesk-<ver>-android.apk` | `assembleDebug` 调试签名，与平板上验证过的包一致 |
+
+门禁：`pytest tests -q --ignore=tests/e2e.py` 全绿且 `pyproject.toml` 版本与 tag 一致，
+才会进入构建；任一端缺失或失败，Release 不会创建，失败任务的 artifact 仍可下载排查。
+重跑某次失败的发布用 `workflow_dispatch` 并填已有 tag，不必重新打 tag。
+
+发布前本地流程：合入 `main` → 改 `pyproject.toml` 版本与 `CHANGELOG.md` →
+`git tag v<ver>` → `git push origin v<ver>`。
+
 ## 许可与反馈
 
 本项目以 [MIT](LICENSE) 许可发布。版本变更见 [CHANGELOG.md](CHANGELOG.md)，

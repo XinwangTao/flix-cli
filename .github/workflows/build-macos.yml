@@ -3,7 +3,8 @@ name: Build macOS app
 on:
   workflow_dispatch:
   push:
-    tags: ["v*"]
+    # Tags are built and published by .github/workflows/release.yml; this
+    # workflow only keeps a main-branch smoke build.
     branches: [main]
     paths:
       - ".github/workflows/build-macos.yml"
@@ -12,6 +13,8 @@ on:
       - "assets/**"
       - "RelayDesk-macos.spec"
       - "pyproject.toml"
+      - "RelayDesk-linux.spec"
+      - ".github/workflows/release.yml"
 
 permissions:
   contents: read
