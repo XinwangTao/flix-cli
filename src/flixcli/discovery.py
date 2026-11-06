@@ -125,6 +125,31 @@ class Discovery:
         addrs.append("255.255.255.255")
         return addrs
 
+    async def refresh_iface(self) -> bool:
+        """Re-detect the outbound interface and rebind if it moved.
+
+        A board that hops between eth0 and Wi-Fi (DHCP renew, cable replug,
+        hotspot fallback) keeps its old multicast membership otherwise: peers
+        still reach us over TCP but never see our announces again.
+        """
+        want = default_iface_ip() or None
+        if want == self.iface or not self.bound:
+            return False
+        old = self.iface
+        self.iface = want
+        try:
+            if self.transport is not None:
+                self.transport.close()
+        except Exception:
+            pass
+        self.transport = None
+        self.bound = False
+        ok = await self.start()
+        print(f"[discovery] interface {old or 'default'} -> "
+              f"{self.iface or 'default'}{'' if ok else ' (rebind failed)'}",
+              file=sys.stderr, flush=True)
+        return ok
+
     def announce(self, ident: dict, times: int = ANNOUNCE_BURST,
                  port: int = DEVICE_PORT) -> None:
         payload = build_announce(ident, port=port)

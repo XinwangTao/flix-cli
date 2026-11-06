@@ -58,3 +58,4 @@ dist-macos/
 
 # 工具/调试产物
 .lancer/
+Library/

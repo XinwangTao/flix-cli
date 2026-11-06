@@ -258,6 +258,13 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
         try:
             while True:
                 await asyncio.sleep(30)
+                try:
+                    # 板子换网（网线拔插/热点回退）后组播成员关系会失效，
+                    # TCP 还通但对端再也收不到 announce —— 每轮先核对出口网卡。
+                    await disc.refresh_iface()
+                except Exception as e:  # noqa: BLE001 - 探测失败不该拖垮守护进程
+                    print(f"[discovery] interface refresh failed: {e}",
+                          file=sys.stderr, flush=True)
                 await asyncio.to_thread(disc.announce, ident, 2, device_port)
         except asyncio.CancelledError:
             pass

@@ -297,3 +297,19 @@ open dist/RelayDesk.app
 安全问题的报告方式见 [SECURITY.md](SECURITY.md)。
 
 Issues / PR 欢迎；提交前请先在本机跑一遍 `pytest tests -q --ignore=tests/e2e.py`。
+
+## 部署到 ARM 板子（移远 QCM6490 / Qualcomm Linux）
+
+板子是 aarch64 + Python 3.10，项目要求 3.11+，所以用 uv 自带解释器，不动系统 Python。
+
+```bash
+scripts/deploy_board.sh root@quecpi-alpha          # 打包 → 传输 → uv 装 3.12 → systemd 起服务
+```
+
+- 安装位置 `/opt/flixcli`，服务 `flixd.service`（`Restart=always`、`MemoryMax=256M`、别名取主机名）。
+- 网页版：`http://<板子IP>:8892`（PIN 在 `journalctl -u flixd` 里）。
+- 设备通道 8891 对外，桌面 API 8898 仍只绑 127.0.0.1。
+- 换网自愈：announce 循环每 30s 核对出口网卡，网线拔插或热点回退后会重新加入组播，
+  否则 TCP 通、对端却再也发现不了这台机器。
+- 板载 QCA1023 Wi-Fi 的驱动不声明 802.11w(PMF)，只能连不强制 PMF 的 AP；
+  强制 PMF 的企业 AP 会握手成功后几秒内以 reason=148 踢掉。
