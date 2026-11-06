@@ -1,25 +1,33 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Dark palette: the app's default look. Selected at runtime by forcing
-     uiMode in MainActivity.attachBaseContext from prefs.theme. -->
+     uiMode in MainActivity.attachBaseContext from prefs.theme.
+
+     Tones mirror the desktop design system (src/flixcli/gui.py: PALETTES["dark"])
+     so both ends of the relay read as one product. Names are the Android-side
+     vocabulary; the parenthesised token is the desktop equivalent. Every
+     foreground/background pair below clears WCAG AA (>= 4.5:1).
+
+     `textOnAccent` is near-black, not white: the jade accent is light enough
+     that white text on it lands around 2:1. The desktop made the same call. -->
 <resources>
-    <color name="bg">#090C12</color>
-    <color name="bgHeader">#0E1219</color>
-    <color name="bgPanel">#171B22</color>
-    <color name="bgBubbleIn">#252A33</color>
-    <color name="accent">#3478F6</color>
-    <color name="textPrimary">#EDF3FF</color>
-    <color name="textMuted">#8190A8</color>
-    <color name="textOnAccent">#FFFFFF</color>
-    <color name="online">#34C759</color>
+    <color name="bg">#0B0F0E</color>              <!-- bg -->
+    <color name="bgHeader">#101615</color>        <!-- bg_side -->
+    <color name="bgPanel">#161D1B</color>         <!-- surface -->
+    <color name="bgBubbleIn">#212A27</color>      <!-- surface_2 -->
+    <color name="accent">#35B98D</color>          <!-- accent -->
+    <color name="textPrimary">#EDF3F0</color>     <!-- text -->
+    <color name="textMuted">#94A49D</color>       <!-- muted -->
+    <color name="textOnAccent">#05130E</color>    <!-- on_accent -->
+    <color name="online">#4FD3A3</color>          <!-- online -->
     <color name="mention">#FFC857</color>
-    <color name="danger">#EF5B6B</color>
-    <color name="bubbleTextFailed">#FFD7D7</color>
-    <color name="senderName">#BFD4FF</color>
-    <color name="searchHighlight">#66FFC857</color>
-    <color name="divider">#1E242E</color>
-    <color name="bgElevated">#131820</color>
-    <color name="chipBg">#222A35</color>
-    <color name="chipText">#9AA7BC</color>
-    <color name="selectedBg">#1A2536</color>
-    <color name="iconBg">#1C222C</color>
+    <color name="danger">#E2665B</color>          <!-- danger -->
+    <color name="bubbleTextFailed">#EF7B70</color><!-- danger_hi -->
+    <color name="senderName">#43CFA0</color>      <!-- accent_hi -->
+    <color name="searchHighlight">#6635B98D</color> <!-- accent, 40% -->
+    <color name="divider">#232D2A</color>         <!-- border -->
+    <color name="bgElevated">#1C2422</color>      <!-- surface_hi -->
+    <color name="chipBg">#212A27</color>          <!-- surface_2 -->
+    <color name="chipText">#BCC9C3</color>        <!-- text_dim -->
+    <color name="selectedBg">#2135B98D</color>    <!-- accent_soft, 13% -->
+    <color name="iconBg">#1C2422</color>          <!-- surface_hi -->
 </resources>

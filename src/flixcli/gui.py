@@ -34,13 +34,15 @@ from PySide6.QtWidgets import (
     QApplication, QCheckBox, QDialog, QFileDialog, QFrame, QGraphicsBlurEffect,
     QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QGraphicsPixmapItem,
     QGraphicsScene, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMainWindow, QMenu, QPushButton, QScrollArea, QSizePolicy, QStackedWidget,
+    QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea, QSizePolicy,
+    QStackedWidget,
     QStatusBar, QSystemTrayIcon, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from . import is_port_text
 from .icons import icon, logo_icon, logo_pixmap
 from .presence import is_online
+from . import __version__ as APP_VERSION
 
 
 if sys.platform == "darwin":
@@ -268,6 +270,54 @@ class ApiThread(QThread):
             self.result.emit(self.fn())
         except Exception as exc:  # worker boundary; surface the exact message
             self.failed.emit(str(exc))
+
+
+def cli_command(args: list[str]) -> list[str]:
+    """How to invoke this app's own CLI: the frozen binary re-enters itself,
+    a source checkout goes through the module. `serve`/`mcp`/`update` rely on
+    this exact split, so keep it in one place."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable, *args]
+    return [sys.executable, "-m", "flixcli.cli", *args]
+
+
+def run_cli_json(args: list[str], timeout: float = 180.0) -> dict:
+    """Run a CLI subcommand and return its JSON payload.
+
+    `update` prints a human log line before a *pretty-printed* JSON object, so
+    the payload has to be found by decoding from each candidate brace rather
+    than by taking the last line.
+    """
+    import subprocess
+    kwargs = {"capture_output": True, "text": True, "timeout": timeout}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    proc = subprocess.run(cli_command(args), **kwargs)
+    payload = parse_cli_json(proc.stdout or "")
+    if payload is None:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        raise RuntimeError(f"命令没有返回结果（退出码 {proc.returncode}）："
+                           + (detail[-1] if detail else "无输出"))
+    if not payload.get("ok"):
+        raise RuntimeError(str(payload.get("detail") or payload.get("error")
+                               or "命令失败"))
+    return payload
+
+
+def parse_cli_json(text: str) -> dict | None:
+    """First JSON object in `text` that carries an `ok` verdict."""
+    decoder = json.JSONDecoder()
+    index = text.find("{")
+    while index != -1:
+        try:
+            obj, _end = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            index = text.find("{", index + 1)
+            continue
+        if isinstance(obj, dict) and "ok" in obj:
+            return obj
+        index = text.find("{", index + 1)
+    return None
 
 
 # Avatar discs are intentionally dark in both themes so the white glyph stays
@@ -757,11 +807,19 @@ class MainWindow(QMainWindow):
         self.payload: dict = {}
         self.self_id = ""
         self.current: dict | None = None
+        # Which rail section the user is looking at. It decides whether a data
+        # poll may (re)show the transcript: opening a chat must not yank a
+        # reader off the settings or transfers page.
+        self.mode = "devices"
         self.media_seq = 0
         self._drag_pos: QPoint | None = None
         self.offline_mode = False
         self._auto_start_tried = False
         self._seen_bubbles: set[str] | None = None
+        self._update_worker: ApiThread | None = None
+        self._prefetch_worker: ApiThread | None = None
+        self._update_info: dict | None = None
+        self._update_ready = False
         self._tray = None
         self._toasts: list[Toast] = []
         # Rebuilding the transcript every poll destroys any text selection, so
@@ -796,6 +854,7 @@ class MainWindow(QMainWindow):
             self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
         self.setObjectName("rootWindow")
         self._build()
+        self.install_shortcuts()
         self._enable_round_corners()
         self.refresh()
         self.timer = QTimer(self)
@@ -814,7 +873,9 @@ class MainWindow(QMainWindow):
         self.timer.stop()
         self.offline_mode = True  # stop the refresh/discovery churn
         for worker in (self.worker, self.action_worker,
-                       getattr(self, "_discovery_worker", None)):
+                       getattr(self, "_discovery_worker", None),
+                       getattr(self, "_update_worker", None),
+                       getattr(self, "_prefetch_worker", None)):
             if worker is not None:
                 try:
                     worker.quit()
@@ -891,6 +952,8 @@ class MainWindow(QMainWindow):
         self.title_bar = TitleBar(self)
         self.title_bar.setVisible(sys.platform != "darwin")
         outer.addWidget(self.title_bar)
+        self.update_banner = self._build_update_banner()
+        outer.addWidget(self.update_banner)
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
@@ -905,6 +968,43 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("正在连接本机服务…")
         self.apply_theme(self.theme)
 
+    def _build_update_banner(self):
+        """A window-wide line for the one update state that needs a decision.
+
+        Not a modal dialog: the app is a chat client, and a check that happens
+        on every launch must never block someone from reading a message.
+        """
+        banner = QFrame()
+        banner.setObjectName("updateBanner")
+        banner.hide()
+        row = QHBoxLayout(banner)
+        row.setContentsMargins(18, 8, 14, 8)
+        row.setSpacing(10)
+        mark = QLabel("↑")
+        mark.setObjectName("updateBannerMark")
+        self.update_banner_text = QLabel("")
+        self.update_banner_text.setObjectName("updateBannerText")
+        self.update_banner_action = QPushButton("重启并安装")
+        self.update_banner_action.setObjectName("primaryBtn")
+        self.update_banner_action.setCursor(Qt.PointingHandCursor)
+        self.update_banner_action.clicked.connect(self.install_update)
+        dismiss = QPushButton("稍后")
+        dismiss.setObjectName("secondaryButton")
+        dismiss.setCursor(Qt.PointingHandCursor)
+        dismiss.clicked.connect(banner.hide)
+        self.update_banner_dismiss = dismiss
+        row.addWidget(mark)
+        row.addWidget(self.update_banner_text, 1)
+        row.addWidget(self.update_banner_action)
+        row.addWidget(dismiss)
+        return banner
+
+    def _show_update_banner(self, text: str, *, action: bool):
+        self.update_banner_text.setText(text)
+        self.update_banner_action.setVisible(action)
+        self.update_banner_action.setEnabled(action)
+        self.update_banner.show()
+
     def _build_rail(self):
         rail = QFrame()
         rail.setObjectName("rail")
@@ -917,11 +1017,15 @@ class MainWindow(QMainWindow):
         box.addWidget(logo, 0, Qt.AlignHCenter)
         box.addSpacing(12)
         self.rail_buttons = []
-        for name, tip, mode in (
+        # The tooltip doubles as the shortcut hint: the Ctrl+<n> bindings are
+        # invisible otherwise, and nobody reads the changelog to find them.
+        for number, (name, tip, mode) in enumerate((
             ("devices", "设备会话", "devices"), ("search", "搜索", "search"),
             ("groups", "群组", "groups"), ("transfers", "传输任务", "transfers"),
-            ("android", "Android / ADB", "adb"), ("settings", "设置与状态", "settings"),
-        ):
+            ("android", "Android / ADB", "adb"),
+            ("settings", "设置与状态", "settings"),
+        ), 1):
+            tip = f"{tip}（Ctrl+{number}）"
             button = QPushButton()
             button.setObjectName("railButton")
             button.setToolTip(tip)
@@ -1379,9 +1483,42 @@ class MainWindow(QMainWindow):
         self.notify_check.setChecked(self._load_prefs().get("notify", True) is not False)
         self.notify_check.toggled.connect(self._toggle_notify)
         card_box.addWidget(self.notify_check)
+        self.auto_update_check = QCheckBox("启动时自动检查更新（发现新版会在后台下载）")
+        self.auto_update_check.setChecked(
+            self._load_prefs().get("auto_update", True) is not False)
+        self.auto_update_check.toggled.connect(
+            lambda on: self._save_prefs(auto_update=bool(on)))
+        card_box.addWidget(self.auto_update_check)
         hint = QLabel("主题、材质和动效立即应用到整个窗口，下次启动沿用")
         hint.setObjectName("muted")
         card_box.addWidget(hint)
+
+        # The updater ships as a CLI subcommand; without this the only way to
+        # install a release is a terminal, which the windowed build cannot even
+        # open. Same binary, same verified download path.
+        card_box.addSpacing(10)
+        update_row = QHBoxLayout()
+        self.version_label = QLabel(f"客户端版本 {APP_VERSION}")
+        self.version_label.setObjectName("muted")
+        update_row.addWidget(self.version_label)
+        update_row.addSpacing(10)
+        self.check_update_button = QPushButton("检查更新")
+        self.check_update_button.setObjectName("secondaryButton")
+        self.check_update_button.setCursor(Qt.PointingHandCursor)
+        self.check_update_button.clicked.connect(
+            lambda: self.check_updates(silent=False))
+        self.update_now_button = QPushButton("立即更新并重启")
+        self.update_now_button.setObjectName("primaryBtn")
+        self.update_now_button.setCursor(Qt.PointingHandCursor)
+        self.update_now_button.hide()
+        self.update_now_button.clicked.connect(self.install_update)
+        update_row.addWidget(self.check_update_button)
+        update_row.addWidget(self.update_now_button)
+        update_row.addStretch()
+        card_box.addLayout(update_row)
+        self.update_hint = QLabel("更新会校验 sha256，安装失败会自动回滚")
+        self.update_hint.setObjectName("muted")
+        card_box.addWidget(self.update_hint)
         box.addWidget(card)
         box.addStretch()
         self._sync_theme_button()
@@ -1628,6 +1765,151 @@ class MainWindow(QMainWindow):
     def _toggle_notify(self, on: bool):
         self._save_prefs(notify=bool(on))
 
+    # ---------- updates ----------
+
+    def auto_check_updates(self):
+        """The launch-time check. Manual checks share the same pipeline."""
+        if self._load_prefs().get("auto_update", True) is False:
+            return
+        self.check_updates(silent=True)
+
+    def check_updates(self, silent: bool = False):
+        """Ask the bundled updater whether a newer release exists.
+
+        Runs off the UI thread: the check talks to api.github.com, and a slow
+        or blocked network must not freeze the window. A silent (startup)
+        check never touches the settings page; it either shows the banner or
+        stays out of the way.
+        """
+        if self._update_worker is not None and self._update_worker.isRunning():
+            return
+        if not silent:
+            self.check_update_button.setEnabled(False)
+            self.update_hint.setText(f"正在检查更新（当前 {APP_VERSION}）…")
+        self._update_worker = ApiThread(
+            lambda: run_cli_json(["update", "--check", "--json"]))
+        self._update_worker.result.connect(
+            lambda info: self.apply_update_check(info, silent=silent))
+        self._update_worker.failed.connect(
+            lambda detail: self.fail_update_check(detail, silent=silent))
+        self._update_worker.start()
+
+    def apply_update_check(self, info: dict, *, silent: bool = False):
+        self._update_info = info
+        self.check_update_button.setEnabled(True)
+        latest = info.get("latest") or "未知"
+        if info.get("status") == "update-available":
+            self.update_now_button.show()
+            self.update_hint.setText(
+                f"发现新版本 {latest}（当前 {info.get('current') or APP_VERSION}）")
+            self.statusBar().showMessage(f"有新版本 {latest}，正在后台下载…", 6000)
+            self._show_update_banner(
+                f"发现新版本 {latest}（当前 {info.get('current') or APP_VERSION}），"
+                "正在后台下载…", action=False)
+            self.prefetch_update()
+            return
+        self.update_now_button.hide()
+        self.update_hint.setText(f"已是最新版本 {info.get('current') or APP_VERSION}")
+        if not silent:
+            self.statusBar().showMessage("已是最新版本", 4000)
+
+    def fail_update_check(self, detail: str, *, silent: bool = False):
+        self.check_update_button.setEnabled(True)
+        self.update_now_button.setEnabled(True)
+        if silent:
+            # A launch check that cannot reach GitHub must not interrupt a
+            # working app; the manual button still reports the exact error.
+            return
+        # An install failure may have invalidated the cached archive (e.g. a
+        # sha256 mismatch deletes it), so do not keep claiming it is ready.
+        self._update_ready = False
+        self.update_hint.setText("检查失败：" + detail)
+        self.statusBar().showMessage("检查更新失败：" + detail, 8000)
+
+    def prefetch_update(self):
+        """Download and verify in the background so "install" is a relaunch.
+
+        `--dry-run` walks the real path (download, sha256, unpack, layout
+        check) and stops before the swap; the verified zip stays in the cache
+        and the real install reuses it.
+        """
+        if self._update_ready:
+            return
+        if self._prefetch_worker is not None and self._prefetch_worker.isRunning():
+            return
+        self._prefetch_worker = ApiThread(
+            lambda: run_cli_json(["update", "--dry-run", "--json"], timeout=1800.0))
+        self._prefetch_worker.result.connect(self.apply_update_ready)
+        self._prefetch_worker.failed.connect(self.fail_update_prefetch)
+        self._prefetch_worker.start()
+
+    def apply_update_ready(self, info: dict):
+        if info.get("status") != "dry-run":
+            # Another process may have installed it first, or the release was
+            # removed between the check and the download.
+            self._update_ready = False
+            self._show_update_banner(
+                "更新状态已变化，可在设置页重新检查", action=False)
+            return
+        self._update_ready = True
+        latest = ((info.get("planned") or {}).get("wouldInstall")
+                  or (self._update_info or {}).get("latest") or "新版本")
+        self.update_now_button.show()
+        self.update_now_button.setEnabled(True)
+        self.update_hint.setText(f"新版本 {latest} 已下载并校验，重启即可安装")
+        self._show_update_banner(
+            f"新版本 {latest} 已下载并校验，重启 RelayDesk 即可完成安装",
+            action=True)
+        self.statusBar().showMessage(f"新版本 {latest} 已就绪", 6000)
+
+    def fail_update_prefetch(self, detail: str):
+        self._update_ready = False
+        # Keep the action available: install_update downloads again and
+        # reports the real failure on the settings page.
+        self._show_update_banner(
+            "新版本下载未完成，点「重启并安装」会重新下载", action=True)
+
+    def install_update(self):
+        """Let the updater replace this binary and restart it.
+
+        The window is one of the processes the updater stops, so nothing after
+        `run_cli_json` may rely on this instance still being alive.
+        """
+        latest = (self._update_info or {}).get("latest") or "新版本"
+        if self._prefetch_worker is not None and self._prefetch_worker.isRunning():
+            self.update_hint.setText("正在后台下载，请稍候…")
+            self.statusBar().showMessage("正在后台下载新版本…", 4000)
+            return
+        if self._update_ready:
+            detail = (f"{latest} 已下载并校验完成，重启窗口即可安装。\n\n"
+                      "安装失败会自动回滚到当前版本。继续？")
+        else:
+            detail = (f"将下载并安装 {latest}，窗口会关闭并在安装完成后自动重开。\n\n"
+                      "下载会校验 sha256；安装失败会自动回滚到当前版本。继续？")
+        answer = QMessageBox.question(
+            self, "立即更新", detail,
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+        if self._update_worker is not None and self._update_worker.isRunning():
+            return
+        self.update_now_button.setEnabled(False)
+        self.check_update_button.setEnabled(False)
+        self.update_hint.setText(f"正在下载并安装 {latest}，完成后自动重启…")
+        self._update_worker = ApiThread(
+            lambda: run_cli_json(["update", "--json"], timeout=900.0))
+        self._update_worker.result.connect(self.apply_update_installed)
+        self._update_worker.failed.connect(self.fail_update_check)
+        self._update_worker.start()
+
+    def apply_update_installed(self, info: dict):
+        installed = info.get("installed") or info.get("latest") or "新版本"
+        self.update_hint.setText(f"已安装 {installed}，重启中…")
+        self.update_banner.hide()
+        self.statusBar().showMessage(f"已安装 {installed}", 10000)
+        self.update_now_button.hide()
+        self.check_update_button.setEnabled(True)
+
     # ---------- notifications ----------
 
     def ensure_tray(self):
@@ -1764,23 +2046,97 @@ class MainWindow(QMainWindow):
 
     # ---------- navigation ----------
 
+    # Sections whose page lives in the workspace and has nothing to do with the
+    # open conversation: (header title, header subtitle, avatar glyph).
+    PAGE_CHROME = {
+        "transfers": ("传输任务", "文件气泡与落盘状态由 flixd 统一记录", "⇅"),
+        "adb": ("Android / ADB", "USB / 无线序列号与授权状态", "◈"),
+        "settings": ("设置与状态", "主题、桌面提醒与本机信息", "⚙"),
+    }
+    PAGE_INDEX = {"transfers": 2, "adb": 3, "settings": 4, "remote": 5}
+    # The rail order doubles as the Ctrl+<n> shortcut order.
+    MODE_ORDER = ("devices", "search", "groups", "transfers", "adb", "settings")
+    SIDEBAR_TITLES = {"devices": "设备", "search": "搜索", "groups": "群组",
+                      "transfers": "会话", "adb": "Android / ADB",
+                      "settings": "会话"}
+    # A sidebar row names the section it belongs to; picking one is the same
+    # navigation intent as pressing the rail button.
+    KIND_MODES = {"device": "devices", "group": "groups", "adb": "adb"}
+
+    def install_shortcuts(self):
+        """Ctrl+1…6 jump between sections; Esc falls back to the chat.
+
+        The rail is the only other way in, and a reader who parks the pointer on
+        the transcript should not have to aim at a 44 px button to get back.
+        """
+        for number, mode in enumerate(self.MODE_ORDER, 1):
+            action = QAction(self)
+            action.setShortcut(f"Ctrl+{number}")
+            action.setShortcutContext(Qt.WindowShortcut)
+            action.triggered.connect(
+                lambda _checked=False, m=mode: self.set_mode(m))
+            self.addAction(action)
+        back = QAction(self)
+        back.setShortcut("Esc")
+        back.setShortcutContext(Qt.WindowShortcut)
+        back.triggered.connect(self.back_to_chat)
+        self.addAction(back)
+
+    def back_to_chat(self):
+        """Esc: leave a side page (or the remote view) and show the chat."""
+        if self.mode in ("devices", "search", "groups") \
+                and self.workspace_stack.currentIndex() in (0, 1):
+            return
+        kind = (self.current or {}).get("kind")
+        self.set_mode("groups" if kind == "group" else "devices")
+
     def set_mode(self, mode: str):
-        for button in self.rail_buttons:
-            button.setChecked(button.property("mode") == mode)
-        titles = {"devices": "设备", "search": "搜索", "groups": "群组",
-                  "transfers": "传输", "adb": "Android / ADB", "settings": "设置"}
-        self.sidebar_title.setText(titles.get(mode, "设备"))
-        self.mode = mode
-        if mode == "transfers":
-            index = 2
-        elif mode == "adb":
-            index = 3
-        elif mode == "settings":
-            index = 4
+        self._mark_mode(mode)
+        if mode in self.PAGE_CHROME:
+            self._switch_workspace(self.PAGE_INDEX[mode])
+            self._set_page_header(*self.PAGE_CHROME[mode])
+            self._show_chat_actions(False)
         else:
-            index = 0 if self.current is None else 1
-        self._switch_workspace(index)
+            if self.current and self.current.get("kind") == "adb":
+                self.current = None  # an ADB row is a shell, not a conversation
+            self._show_chat_actions(True)
+            if self.current is None:
+                self._switch_workspace(0)
+                self._set_page_header("选择设备或群组", "从左侧列表开始", "◉")
+            else:
+                self._switch_workspace(1)
+                # The transcript was frozen while another page was up, so its
+                # cached signature no longer describes what is on screen.
+                self._timeline_signature = None
+                self.render_current(activate=False)
         self.populate_sidebar()
+
+    def _mark_mode(self, mode: str) -> None:
+        """Move the rail highlight without rebuilding the entity list.
+
+        `set_mode` clears and refills the sidebar, which would kill the click
+        that is being handled right now.
+        """
+        self.mode = mode
+        for button in getattr(self, "rail_buttons", []):
+            button.setChecked(button.property("mode") == mode)
+        title = getattr(self, "sidebar_title", None)
+        if title is not None:
+            title.setText(self.SIDEBAR_TITLES.get(mode, "设备"))
+
+    def _set_page_header(self, title: str, subtitle: str, glyph: str = "◉") -> None:
+        self.session_title.setText(title)
+        self.session_subtitle.setText(subtitle)
+        self.session_avatar.set_identity(glyph, title)
+
+    def _show_chat_actions(self, visible: bool) -> None:
+        """Hide the send/search toolbar while a page owns the workspace.
+
+        Those buttons act on the open conversation; leaving them clickable over
+        the settings page silently messaged a chat that was not on screen.
+        """
+        self.session_search.setVisible(visible)
+        self.header_toolbar.setVisible(visible)
 
     # ---------- data refresh ----------
 
@@ -1818,8 +2174,11 @@ class MainWindow(QMainWindow):
         self.populate_transfers()
         self.populate_adb()
         self.populate_remote()
-        if self.current:
-            self.render_current()
+        # A poll may refresh the transcript, but it must never navigate: doing
+        # that pulled the reader back to the chat page every 2.5 s, making
+        # settings/transfers unreachable while a conversation was open.
+        if self.current and self.chat_page_is_showing():
+            self.render_current(activate=False)
         self.statusBar().showMessage("最后更新 " + datetime.now().strftime("%H:%M:%S"))
 
     def populate_sidebar(self):
@@ -1831,14 +2190,18 @@ class MainWindow(QMainWindow):
         self.entity_list.clear()
         mode = getattr(self, "mode", "devices")
         entities = []
-        if mode in ("devices", "search"):
+        # transfers/settings replace the workspace, not the sidebar: a dead 320
+        # px column read as "all my devices vanished". Keep the conversation
+        # list there so a click still opens the chat.
+        conversation_list = mode in ("devices", "search", "transfers", "settings")
+        if conversation_list:
             for device in self.payload.get("devices") or []:
                 title = device.get("alias") or device.get("fingerprint", "")[:8]
                 subtitle = (f"{device.get('os') or 'unknown'} · "
                             f"{device.get('ip') or '离线'}:{device.get('port') or ''}")
                 entities.append((title, subtitle, device.get("fingerprint", ""),
                                  "device", is_online(device)))
-        if mode in ("groups", "search"):
+        if conversation_list or mode == "groups":
             for group in self.payload.get("groups") or []:
                 entities.append((group.get("name") or "未命名群组",
                                  f"{len(group.get('members', []))} 位成员 · 支持 @指纹",
@@ -1888,8 +2251,23 @@ class MainWindow(QMainWindow):
     def select_entity(self, current, _previous):
         if current is None:
             return
-        self.current = current.data(Qt.UserRole)
+        data = current.data(Qt.UserRole) or {}
+        self.current = data
+        kind = data.get("kind")
+        mode = self.KIND_MODES.get(kind)
+        if mode and mode != self.mode:
+            self._mark_mode(mode)
         self._follow_tail = True  # opening a conversation starts at the newest message
+        # An explicit pick is a navigation intent: show its page, restore the
+        # chat toolbar the side page hid, and un-freeze the transcript that the
+        # poll skips while another page is up.
+        self._timeline_signature = None
+        if kind == "adb":
+            self._set_page_header(*self.PAGE_CHROME["adb"])
+            self._show_chat_actions(False)
+            self.render_current()
+            return
+        self._show_chat_actions(True)
         self.render_current()
 
     def _on_entity_clicked(self, item):
@@ -1903,15 +2281,36 @@ class MainWindow(QMainWindow):
         self._follow_tail = True
         self.jump_to_latest()
 
-    def render_current(self):
+    def chat_page_is_showing(self) -> bool:
+        """True when the transcript page is the visible one."""
+        stack = getattr(self, "workspace_stack", None)
+        return stack is not None and stack.currentIndex() == 1
+
+    def render_current(self, *, activate: bool = True):
+        """Draw the open conversation.
+
+        `activate=False` refreshes the transcript in place without changing
+        the visible page, which is what a background poll must do: navigation
+        belongs to the user's clicks, not to a timer.
+        """
         if not self.current:
-            self.workspace_stack.setCurrentIndex(0)
+            if activate:
+                self.workspace_stack.setCurrentIndex(0)
             return
         kind, key = self.current["kind"], self.current["key"]
         if kind == "adb":
-            self.workspace_stack.setCurrentIndex(3)
+            if activate:
+                self.workspace_stack.setCurrentIndex(3)
             return
-        self.workspace_stack.setCurrentIndex(1)
+        if activate:
+            self.workspace_stack.setCurrentIndex(1)
+        # The in-conversation search belongs to the conversation it was typed
+        # in: carrying it over to the next one silently hides every message
+        # that does not match, which reads as an empty/broken transcript.
+        previous = getattr(self, "_timeline_session", None)
+        if previous is not None and previous != (kind, key) \
+                and self.session_search.text():
+            self.session_search.clear()
         if kind == "device":
             device = next((d for d in self.payload.get("devices", [])
                            if d.get("fingerprint") == key), {})
@@ -2797,7 +3196,9 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("请选择一台设备")
             return
         caps = ["view"] + (["control"] if self.remote_control.isChecked() else [])
-        self.workspace_stack.setCurrentIndex(5)
+        self.workspace_stack.setCurrentIndex(self.PAGE_INDEX["remote"])
+        self._set_page_header("远程会话", "只显示被批准观看的设备画面 · Esc 返回对话", "⌁")
+        self._show_chat_actions(False)
         self.run_action(lambda: self.api.post("/api/media/request",
                                               {"deviceId": target, "capabilities": caps}))
 
@@ -2995,6 +3396,10 @@ def main(argv: list[str] | None = None, *, api_port: int = 8898) -> int:
     window = MainWindow(api_port, snapshot=snapshot)
     window.setWindowIcon(logo_icon())
     window.show()
+    # After the window is on screen, never before: the launch check must not
+    # delay first paint, and tests that construct MainWindow directly stay
+    # offline (the check only lives here, not in __init__).
+    QTimer.singleShot(3000, window.auto_check_updates)
     return app.exec()
 
 
@@ -3208,6 +3613,14 @@ QPushButton#winBtn:hover { background: $surface_hi; }
 QPushButton#winBtn:pressed { background: $surface_2; }
 QPushButton#closeBtn:hover { background: $danger; }
 QPushButton#closeBtn:pressed { background: $danger_hi; }
+
+/* ----------------------------------------------------------- update banner */
+QFrame#updateBanner {
+    background: $accent_soft;
+    border-bottom: 1px solid $accent_line;
+}
+QLabel#updateBannerMark { color: $accent; font-size: $fs_lg; font-weight: 700; }
+QLabel#updateBannerText { color: $text; font-size: $fs_md; }
 
 /* ------------------------------------------------------------------ rail */
 QFrame#rail { background: $bg_rail; border-right: 1px solid $border; }

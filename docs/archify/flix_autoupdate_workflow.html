@@ -1,0 +1,834 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RelayDesk 内置自动更新：启动检查、后台下载、重启安装（L1 流程变更）</title>
+<style>
+  :root {
+    --bg: #070b14;
+    --panel: #0d1628;
+    --panel-2: #121d33;
+    --line: #22304a;
+    --line-soft: #1a2740;
+    --text: #e8edf7;
+    --muted: #8ba0c2;
+    --dim: #6f84a8;
+    --green: #21c78a;
+    --blue: #5aa9ff;
+    --red: #ef5b6b;
+    --amber: #f5a524;
+    --violet: #7c5cff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background:
+      radial-gradient(900px 500px at 12% -10%, rgba(124, 92, 255, .16), transparent 60%),
+      radial-gradient(800px 460px at 92% 0%, rgba(33, 199, 138, .10), transparent 55%),
+      var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .page { max-width: 1320px; margin: 0 auto; padding: 34px 34px 46px; }
+  header .eyebrow {
+    font-size: 11px; letter-spacing: 2.6px; text-transform: uppercase;
+    color: var(--violet); font-weight: 600;
+  }
+  header h1 { margin: 8px 0 12px; font-size: 26px; line-height: 1.25; font-weight: 650; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    border: 1px solid var(--line); background: rgba(13, 22, 40, .72);
+    color: var(--muted); font-size: 11.5px; padding: 4px 10px; border-radius: 999px;
+  }
+  .chip b { color: var(--text); font-weight: 600; }
+  .chip.warn { border-color: rgba(245, 165, 36, .5); color: var(--amber); }
+  .chip.ok { border-color: rgba(33, 199, 138, .5); color: var(--green); }
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 18px; align-items: center;
+    margin: 22px 0 14px; font-size: 12px; color: var(--muted);
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .sw { width: 22px; height: 0; border-top: 2.5px solid var(--green); border-radius: 2px; }
+  .sw.aux { border-top: 2px dashed var(--blue); }
+  .sw.diag { border-top: 2px dashed var(--red); }
+  .sw.box { width: 14px; height: 14px; border: 1.5px solid var(--violet); border-radius: 4px; background: rgba(124, 92, 255, .12); }
+  .sw.box.changed { border-color: var(--amber); background: rgba(245, 165, 36, .12); }
+  .sw.box.existing { border-color: #2c3d5c; background: rgba(44, 61, 92, .25); }
+
+  .stage-wrap { overflow: auto; padding-bottom: 6px; }
+  .stage {
+    position: relative;
+    background:
+      radial-gradient(600px 300px at 20% 10%, rgba(90, 169, 255, .08), transparent 60%),
+      linear-gradient(180deg, rgba(13, 22, 40, .92), rgba(9, 15, 27, .96));
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    box-shadow: 0 26px 70px rgba(0, 0, 0, .45), inset 0 1px 0 rgba(255, 255, 255, .04);
+    overflow: hidden;
+  }
+  #lanes, #nodes { position: absolute; inset: 0; }
+  .band {
+    position: absolute; left: 14px; right: 14px;
+    border: 1px dashed var(--line-soft); border-radius: 16px;
+    background: rgba(18, 29, 51, .28); pointer-events: none;
+  }
+  .band-label {
+    position: absolute; top: 10px; left: 16px;
+    font-size: 10.5px; letter-spacing: 2px; text-transform: uppercase;
+    color: var(--dim); font-weight: 600;
+  }
+  #edges { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+  .edge-label {
+    font-size: 11px; fill: #9fb3d1;
+    paint-order: stroke; stroke: #070b14; stroke-width: 4px; stroke-linejoin: round;
+  }
+  .node {
+    position: absolute; z-index: 2;
+    display: flex; flex-direction: column; justify-content: center; gap: 5px;
+    padding: 12px 14px; border-radius: 14px;
+    background: linear-gradient(180deg, var(--panel-2), var(--panel));
+    border: 1px solid #273854;
+    box-shadow: 0 10px 26px rgba(0, 0, 0, .28), inset 0 1px 0 rgba(255, 255, 255, .035);
+  }
+  .node .label { font-size: 14.5px; font-weight: 620; letter-spacing: .2px; }
+  .node .sub { font-size: 11.5px; color: var(--muted); line-height: 1.35; }
+  .node .badge {
+    position: absolute; top: 8px; right: 9px;
+    font-size: 9.5px; letter-spacing: .6px; padding: 2px 6px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--dim); background: rgba(7, 11, 20, .55);
+  }
+  .node.new { border-color: var(--violet); box-shadow: 0 0 0 1px rgba(124, 92, 255, .25), 0 12px 30px rgba(124, 92, 255, .16); }
+  .node.new .badge { color: var(--violet); border-color: rgba(124, 92, 255, .55); }
+  .node.changed { border-color: var(--amber); box-shadow: 0 0 0 1px rgba(245, 165, 36, .22), 0 12px 30px rgba(245, 165, 36, .12); }
+  .node.changed .badge { color: var(--amber); border-color: rgba(245, 165, 36, .55); }
+  .node.start { border-color: rgba(33, 199, 138, .65); }
+  .node.start .badge { color: var(--green); border-color: rgba(33, 199, 138, .45); }
+  .node.bus { background: linear-gradient(180deg, #10233a, #0c1a2c); }
+
+  .section-title {
+    display: flex; align-items: baseline; gap: 10px;
+    margin: 28px 0 12px; font-size: 13px; letter-spacing: 1.4px;
+    text-transform: uppercase; color: var(--dim); font-weight: 600;
+  }
+  .section-title small { text-transform: none; letter-spacing: 0; color: var(--dim); font-weight: 400; }
+  .changes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .change {
+    display: flex; gap: 10px; align-items: flex-start;
+    border: 1px solid var(--line-soft); border-radius: 12px;
+    background: rgba(13, 22, 40, .6); padding: 11px 13px; font-size: 12.5px;
+    color: #c3d1e6; line-height: 1.5;
+  }
+  .change .lv {
+    flex: 0 0 auto; font-size: 10px; padding: 2px 7px; border-radius: 999px;
+    border: 1px solid var(--violet); color: var(--violet); margin-top: 1px;
+  }
+  .change .lv.changed { border-color: var(--amber); color: var(--amber); }
+  .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .card {
+    border: 1px solid var(--line-soft); border-left: 3px solid var(--red);
+    border-radius: 12px; background: rgba(13, 22, 40, .6); padding: 12px 14px;
+  }
+  .card.note { border-left-color: var(--blue); }
+  .card h3 { margin: 0 0 6px; font-size: 12.5px; font-weight: 600; }
+  .card p { margin: 0; font-size: 11.5px; color: var(--muted); line-height: 1.55; }
+  footer { margin-top: 26px; font-size: 11.5px; color: var(--dim); }
+  code { font-family: "JetBrains Mono", Consolas, monospace; font-size: .94em; color: #b9c9e2; }
+  @media (max-width: 1000px) {
+    .page { padding: 24px 18px 36px; }
+    .changes, .cards { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <div class="eyebrow">Archify · L1 Workflow</div>
+    <h1 id="title">RelayDesk Android v2G：身份重建后的历史合并</h1>
+    <div class="chips">
+      <span class="chip">级别 <b>L1</b></span>
+      <span class="chip" id="status-chip">状态 <b id="status-value">待确认</b></span>
+      <span class="chip">日期 <b id="date-value">2026-10-29</b></span>
+      <span class="chip">主路径 <b id="main-count">8 节点</b></span>
+      <span class="chip">失败/兜底 <b id="fail-count">5 条</b></span>
+    </div>
+  </header>
+
+  <div class="legend">
+    <span><i class="sw"></i>主路径</span>
+    <span><i class="sw aux"></i>辅助 / 既有</span>
+    <span><i class="sw diag"></i>失败 / 降级</span>
+    <span><i class="sw box existing"></i>已上线</span>
+    <span><i class="sw box changed"></i>调整</span>
+    <span><i class="sw box"></i>新增</span>
+  </div>
+
+  <div class="stage-wrap">
+    <div class="stage" id="stage">
+      <div id="lanes"></div>
+      <svg id="edges"></svg>
+      <div id="nodes"></div>
+    </div>
+  </div>
+
+  <div class="section-title">本批改动 <small>确认后才进入实现</small></div>
+  <section class="changes" id="changes"></section>
+
+  <div class="section-title">失败出口与边界 <small>主路径之外必须可走</small></div>
+  <section class="cards" id="cards"></section>
+
+  <footer>
+    旁路 JSON：<code>docs/archify/flix_autoupdate_workflow.json</code> ·
+    Brief：<code>docs/archify/flix_autoupdate_workflow.json</code> ·
+    本页由同一份 JSON 渲染，节点/边/改动与旁路文件一致。
+  </footer>
+</div>
+
+<script id="diagram-data" type="application/json">{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RelayDesk 内置自动更新：启动检查、后台下载、重启安装（L1 流程变更）",
+    "locale": "zh-CN",
+    "level": "L1",
+    "status": "已确认",
+    "date": "2026-11-05",
+    "quality_profile": "minimal",
+    "confirmed_by": "用户 2026-11-05：要放在软件内；选「自动下载 + 提示重启」「仅启动时检查」"
+  },
+  "scope": {
+    "in": [
+      "窗口显示 3 秒后自动检查一次 GitHub Release（可在设置里关闭）",
+      "发现新版本后后台自动下载并校验 sha256，不阻塞聊天",
+      "窗口顶部常驻横幅：下载中 → 已就绪，点「重启并安装」才重启",
+      "只重启 GUI / serve / agent；mcp stdio 子进程与更新器自身跳过",
+      "重启后健康检查，失败自动回滚旧版并重启",
+      "update_state.json 记账 + update.log 追加日志"
+    ],
+    "out": [
+      "外部计划任务 / schtasks 定时拉起",
+      "运行期间的周期性复查（仅启动时检查一次）",
+      "无人值守自动重启（必须由用户点「重启并安装」）",
+      "跟随 main 分支的每次提交（只跟 Release）",
+      "代码签名校验（只校验发布资产 sha256）",
+      "macOS/Linux 安装（当前 Release 只有 Windows 资产）"
+    ]
+  },
+  "canvas": {
+    "width": 1240,
+    "height": 680
+  },
+  "lanes": [
+    {
+      "id": "boot",
+      "label": "启动检查"
+    },
+    {
+      "id": "dl",
+      "label": "后台下载与提示"
+    },
+    {
+      "id": "swap",
+      "label": "替换与重启"
+    },
+    {
+      "id": "ex",
+      "label": "失败与兜底",
+      "variant": "exception"
+    }
+  ],
+  "bands": [
+    {
+      "lane": "boot",
+      "y": 64,
+      "h": 120
+    },
+    {
+      "lane": "dl",
+      "y": 194,
+      "h": 120
+    },
+    {
+      "lane": "swap",
+      "y": 324,
+      "h": 120
+    },
+    {
+      "lane": "ex",
+      "y": 474,
+      "h": 150
+    }
+  ],
+  "mainPath": [
+    "launch",
+    "check",
+    "decide",
+    "prefetch",
+    "banner",
+    "install",
+    "swapfile",
+    "restart"
+  ],
+  "nodes": [
+    {
+      "id": "launch",
+      "lane": "boot",
+      "type": "frontend",
+      "status": "new",
+      "x": 60,
+      "y": 90,
+      "w": 250,
+      "h": 76,
+      "label": "打开 RelayDesk 窗口",
+      "sublabel": "首屏先画出来，不等待网络"
+    },
+    {
+      "id": "check",
+      "lane": "boot",
+      "type": "messagebus",
+      "status": "new",
+      "x": 350,
+      "y": 90,
+      "w": 250,
+      "h": 76,
+      "label": "3 秒后查 Release",
+      "sublabel": "启动时一次 · 可在设置关闭"
+    },
+    {
+      "id": "decide",
+      "lane": "boot",
+      "type": "process",
+      "status": "new",
+      "x": 660,
+      "y": 90,
+      "w": 270,
+      "h": 76,
+      "label": "是否需要更新",
+      "sublabel": "资产 digest → tag → 版本；不降级"
+    },
+    {
+      "id": "prefetch",
+      "lane": "dl",
+      "type": "process",
+      "status": "new",
+      "x": 660,
+      "y": 220,
+      "w": 270,
+      "h": 76,
+      "label": "后台下载 + 校验",
+      "sublabel": "--dry-run：下载→sha256→解包预检"
+    },
+    {
+      "id": "banner",
+      "lane": "dl",
+      "type": "frontend",
+      "status": "new",
+      "x": 350,
+      "y": 220,
+      "w": 250,
+      "h": 76,
+      "label": "顶部常驻横幅",
+      "sublabel": "下载中 → 已就绪，不弹模态框"
+    },
+    {
+      "id": "install",
+      "lane": "dl",
+      "type": "frontend",
+      "status": "new",
+      "x": 60,
+      "y": 220,
+      "w": 250,
+      "h": 76,
+      "label": "用户点「重启并安装」",
+      "sublabel": "复用已校验 zip · 确认后执行"
+    },
+    {
+      "id": "swapfile",
+      "lane": "swap",
+      "type": "backend",
+      "status": "new",
+      "x": 60,
+      "y": 350,
+      "w": 250,
+      "h": 76,
+      "label": "停窗口 + 换文件",
+      "sublabel": "旧版 → .prev-<stamp>；mcp 跳过"
+    },
+    {
+      "id": "restart",
+      "lane": "swap",
+      "type": "backend",
+      "status": "new",
+      "x": 350,
+      "y": 350,
+      "w": 270,
+      "h": 76,
+      "label": "重启 + 健康检查 + 记账",
+      "sublabel": "serve 验端口 / 窗口验存活"
+    },
+    {
+      "id": "current",
+      "lane": "ex",
+      "type": "external",
+      "status": "new",
+      "x": 40,
+      "y": 510,
+      "w": 220,
+      "h": 76,
+      "label": "已是最新",
+      "sublabel": "静默，不打扰"
+    },
+    {
+      "id": "checkfail",
+      "lane": "ex",
+      "type": "security",
+      "status": "new",
+      "x": 290,
+      "y": 510,
+      "w": 220,
+      "h": 76,
+      "label": "检查失败",
+      "sublabel": "静默；手动检查才显示原因"
+    },
+    {
+      "id": "badpkg",
+      "lane": "ex",
+      "type": "security",
+      "status": "new",
+      "x": 540,
+      "y": 510,
+      "w": 220,
+      "h": 76,
+      "label": "下载 / 校验失败",
+      "sublabel": "横幅提示，点击重试下载"
+    },
+    {
+      "id": "unhealthy",
+      "lane": "ex",
+      "type": "security",
+      "status": "new",
+      "x": 800,
+      "y": 510,
+      "w": 240,
+      "h": 76,
+      "label": "健康检查失败",
+      "sublabel": "换回 prev，按原参数重启旧版"
+    }
+  ],
+  "edges": [
+    {
+      "from": "launch",
+      "to": "check",
+      "kind": "main",
+      "label": "3s",
+      "labelAt": [
+        318,
+        100
+      ],
+      "points": [
+        [
+          310,
+          128
+        ],
+        [
+          350,
+          128
+        ]
+      ]
+    },
+    {
+      "from": "check",
+      "to": "decide",
+      "kind": "main",
+      "label": "release",
+      "labelAt": [
+        616,
+        100
+      ],
+      "points": [
+        [
+          600,
+          128
+        ],
+        [
+          660,
+          128
+        ]
+      ]
+    },
+    {
+      "from": "decide",
+      "to": "prefetch",
+      "kind": "main",
+      "label": "有新版",
+      "labelAt": [
+        795,
+        180
+      ],
+      "points": [
+        [
+          795,
+          166
+        ],
+        [
+          795,
+          220
+        ]
+      ]
+    },
+    {
+      "from": "prefetch",
+      "to": "banner",
+      "kind": "main",
+      "label": "下载并校验完成",
+      "labelAt": [
+        520,
+        240
+      ],
+      "points": [
+        [
+          660,
+          258
+        ],
+        [
+          600,
+          258
+        ]
+      ]
+    },
+    {
+      "from": "banner",
+      "to": "install",
+      "kind": "main",
+      "label": "用户点击",
+      "labelAt": [
+        316,
+        240
+      ],
+      "points": [
+        [
+          350,
+          258
+        ],
+        [
+          310,
+          258
+        ]
+      ]
+    },
+    {
+      "from": "install",
+      "to": "swapfile",
+      "kind": "main",
+      "label": "确认",
+      "labelAt": [
+        185,
+        310
+      ],
+      "points": [
+        [
+          185,
+          296
+        ],
+        [
+          185,
+          350
+        ]
+      ]
+    },
+    {
+      "from": "swapfile",
+      "to": "restart",
+      "kind": "main",
+      "label": "新包就位",
+      "labelAt": [
+        318,
+        370
+      ],
+      "points": [
+        [
+          310,
+          388
+        ],
+        [
+          350,
+          388
+        ]
+      ]
+    },
+    {
+      "from": "decide",
+      "to": "current",
+      "kind": "diag",
+      "label": "已最新 / 本地更新",
+      "labelAt": [
+        700,
+        470
+      ],
+      "points": [
+        [
+          795,
+          166
+        ],
+        [
+          795,
+          470
+        ],
+        [
+          150,
+          470
+        ],
+        [
+          150,
+          510
+        ]
+      ]
+    },
+    {
+      "from": "check",
+      "to": "checkfail",
+      "kind": "diag",
+      "label": "网络失败 / 限流",
+      "labelAt": [
+        430,
+        480
+      ],
+      "points": [
+        [
+          475,
+          166
+        ],
+        [
+          475,
+          510
+        ]
+      ]
+    },
+    {
+      "from": "prefetch",
+      "to": "badpkg",
+      "kind": "diag",
+      "label": "sha256 / 载荷不符",
+      "labelAt": [
+        700,
+        470
+      ],
+      "points": [
+        [
+          900,
+          296
+        ],
+        [
+          900,
+          480
+        ],
+        [
+          650,
+          480
+        ],
+        [
+          650,
+          510
+        ]
+      ]
+    },
+    {
+      "from": "restart",
+      "to": "unhealthy",
+      "kind": "diag",
+      "label": "端口未监听 / 进程退出",
+      "labelAt": [
+        760,
+        440
+      ],
+      "points": [
+        [
+          620,
+          388
+        ],
+        [
+          920,
+          388
+        ],
+        [
+          920,
+          510
+        ]
+      ]
+    },
+    {
+      "from": "unhealthy",
+      "to": "swapfile",
+      "kind": "diag",
+      "label": "回滚：prev 换回",
+      "labelAt": [
+        330,
+        600
+      ],
+      "points": [
+        [
+          800,
+          548
+        ],
+        [
+          185,
+          548
+        ],
+        [
+          185,
+          426
+        ]
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "kind": "note",
+      "title": "为什么放在软件内",
+      "body": "窗口自己检查、自己下载、自己提示重启；不再注册 schtasks 计划任务，也不需要用户维护外部脚本。关掉设置里的开关即可完全停止检查。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 · 不动正在运行的 MCP",
+      "body": "`mcp` 走客户端给的 stdin/stdout，杀掉再以脱离父进程的方式重启只会留下死服务器。更新器只停 GUI / serve / agent；旧 exe 在替换后仍可运行，客户端下次拉起 MCP 自然用新版。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 · 更新器不能杀掉自己",
+      "body": "GUI 触发的 `RelayDesk.exe update` 与目标镜像路径相同。实例列表必须排除当前 PID，否则会在换文件前把自己终止。"
+    },
+    {
+      "kind": "note",
+      "title": "判定顺序与观测",
+      "body": "先比资产 sha256，再比 tag / 版本：v2.2.1 的 exe 曾报 0.1.0，只比版本会无限重装。日志在 `%APPDATA%\\flixcli\\update.log`；下载缓存 `%TEMP%\\relaydesk-update`。"
+    }
+  ]
+}</script>
+
+<script>
+(function () {
+  const DATA = JSON.parse(document.getElementById('diagram-data').textContent);
+  const statusText = { existing: '已上线', new: '新增', changed: '调整' };
+  const laneLabel = Object.fromEntries(DATA.lanes.map(l => [l.id, l.label]));
+
+  document.getElementById('title').textContent = DATA.meta.title;
+  const statusChip = document.getElementById('status-chip');
+  document.getElementById('status-value').textContent = DATA.meta.status;
+  statusChip.className = 'chip' + (DATA.meta.status === '已确认' ? ' ok' : ' warn');
+  document.getElementById('date-value').textContent = DATA.meta.date;
+  document.getElementById('main-count').textContent = DATA.mainPath.length + ' 节点';
+  document.getElementById('fail-count').textContent =
+    DATA.cards.filter(c => c.kind === 'fail').length + ' 条';
+  const stage = document.getElementById('stage');
+  stage.style.width = DATA.canvas.width + 'px';
+  stage.style.height = DATA.canvas.height + 'px';
+
+  const lanes = document.getElementById('lanes');
+  DATA.bands.forEach(b => {
+    const el = document.createElement('div');
+    el.className = 'band';
+    el.style.top = b.y + 'px';
+    el.style.height = b.h + 'px';
+    const tag = document.createElement('span');
+    tag.className = 'band-label';
+    tag.textContent = laneLabel[b.lane] || b.lane;
+    el.appendChild(tag);
+    lanes.appendChild(el);
+  });
+
+  const svg = document.getElementById('edges');
+  const NS = 'http://www.w3.org/2000/svg';
+  svg.setAttribute('viewBox', `0 0 ${DATA.canvas.width} ${DATA.canvas.height}`);
+  svg.setAttribute('width', DATA.canvas.width);
+  svg.setAttribute('height', DATA.canvas.height);
+  const colors = { main: '#21c78a', aux: '#5aa9ff', diag: '#ef5b6b' };
+  const defs = document.createElementNS(NS, 'defs');
+  Object.entries(colors).forEach(([kind, color]) => {
+    const marker = document.createElementNS(NS, 'marker');
+    marker.setAttribute('id', 'arrow-' + kind);
+    marker.setAttribute('viewBox', '0 0 10 10');
+    marker.setAttribute('refX', '8');
+    marker.setAttribute('refY', '5');
+    marker.setAttribute('markerWidth', '7');
+    marker.setAttribute('markerHeight', '7');
+    marker.setAttribute('orient', 'auto-start-reverse');
+    const path = document.createElementNS(NS, 'path');
+    path.setAttribute('d', 'M 0 0 L 10 5 L 0 10 z');
+    path.setAttribute('fill', color);
+    marker.appendChild(path);
+    defs.appendChild(marker);
+  });
+  svg.appendChild(defs);
+
+  DATA.edges.forEach(e => {
+    const poly = document.createElementNS(NS, 'polyline');
+    poly.setAttribute('points', e.points.map(p => p.join(',')).join(' '));
+    poly.setAttribute('fill', 'none');
+    poly.setAttribute('stroke', colors[e.kind] || colors.main);
+    poly.setAttribute('stroke-width', e.kind === 'main' ? '2.4' : '1.8');
+    poly.setAttribute('stroke-linecap', 'round');
+    poly.setAttribute('stroke-linejoin', 'round');
+    poly.setAttribute('marker-end', `url(#arrow-${e.kind || 'main'})`);
+    if (e.kind !== 'main') poly.setAttribute('stroke-dasharray', '6 6');
+    svg.appendChild(poly);
+    if (e.label) {
+      const at = e.labelAt || e.points[e.points.length - 1];
+      const text = document.createElementNS(NS, 'text');
+      text.setAttribute('x', at[0]);
+      text.setAttribute('y', at[1]);
+      text.setAttribute('class', 'edge-label');
+      text.textContent = e.label;
+      svg.appendChild(text);
+    }
+  });
+
+  const nodes = document.getElementById('nodes');
+  DATA.nodes.forEach(n => {
+    const el = document.createElement('div');
+    el.className = 'node ' + (n.status || 'existing') + ' ' + (n.type || '');
+    el.style.left = n.x + 'px';
+    el.style.top = n.y + 'px';
+    el.style.width = n.w + 'px';
+    el.style.height = n.h + 'px';
+    const badge = document.createElement('span');
+    badge.className = 'badge';
+    badge.textContent = statusText[n.status] || n.status;
+    const label = document.createElement('div');
+    label.className = 'label';
+    label.textContent = n.label;
+    const sub = document.createElement('div');
+    sub.className = 'sub';
+    sub.textContent = n.sublabel || '';
+    el.append(badge, label, sub);
+    nodes.appendChild(el);
+  });
+
+  const changes = document.getElementById('changes');
+  DATA.changes.forEach(c => {
+    const el = document.createElement('div');
+    el.className = 'change';
+    const lv = document.createElement('span');
+    lv.className = 'lv' + (c.level === '调整' ? ' changed' : '');
+    lv.textContent = c.level;
+    const tx = document.createElement('span');
+    tx.textContent = c.text;
+    el.append(lv, tx);
+    changes.appendChild(el);
+  });
+
+  const cards = document.getElementById('cards');
+  DATA.cards.forEach(c => {
+    const el = document.createElement('div');
+    el.className = 'card' + (c.kind === 'note' ? ' note' : '');
+    const h = document.createElement('h3');
+    h.textContent = c.title;
+    const p = document.createElement('p');
+    p.textContent = c.body;
+    el.append(h, p);
+    cards.appendChild(el);
+  });
+})();
+</script>
+</body>
+</html>

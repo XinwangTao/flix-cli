@@ -15,6 +15,19 @@ try:  # single source of truth: the installed package metadata
 except ImportError:  # pragma: no cover - Python < 3.8
     __version__ = "0.0.0+source"
 
+# A checkout that was never `pip install`ed still has to report the version it
+# ships as: `flix --version`, `flix self` and MCP serverInfo surface this, and
+# tests/test_version.py holds it to pyproject.toml.
+if __version__ in ("0.0.0+source", "0.1.0"):
+    try:
+        import tomllib as _toml
+        from pathlib import Path as _Path
+        _pyproject = _Path(__file__).resolve().parents[2] / "pyproject.toml"
+        __version__ = str(_toml.loads(
+            _pyproject.read_text(encoding="utf-8"))["project"]["version"])
+    except Exception:  # pragma: no cover - best effort only
+        pass
+
 MULTICAST_GROUP = "224.0.0.168"      # [IDA pending: DiscoverManager] / [RT capture]
 DEVICE_PORT = 8891                    # TCP+UDP device channel
 WEB_PORT_DEFAULT = 8892

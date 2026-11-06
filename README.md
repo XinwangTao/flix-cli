@@ -134,6 +134,17 @@ ADB shell 默认只返回 `approval_required`；只有本机操作者显式加 `
 GUI 通过 `127.0.0.1:8898` Desktop API 工作，CLI/MCP 与 GUI 读取同一状态。若缺少依赖，
 执行 `pip install -e ".[gui]"`。
 
+## 自动更新
+
+RelayDesk 窗口启动后会自己检查 GitHub Release（设置里可关闭）：发现新版本就在后台下载、
+校验 sha256，窗口顶部出现横幅；点「重启并安装」才替换 `RelayDesk.exe` 并按原参数重启，
+起不来自动回滚。下载期间不阻塞聊天，MCP 进程不会被重启。
+
+同一套引擎也可以用 CLI 手动执行：`flix update --check` 只查（有新版本退出码 10），
+`flix update` 直接安装，`--dry-run` 停在替换前。源码检出可
+`python scripts\autoupdate.py --check`。状态与日志在 `%APPDATA%\flixcli`，细节见
+[docs/autoupdate.md](docs/autoupdate.md)。
+
 ## 自动应答（flix agent）
 
 `flix mcp` 是被动的：AI 会话被唤醒才会收发。要无人值守地互相应答，用 `flix agent`——
@@ -247,6 +258,7 @@ python scripts/audit_rounds.py tools  # R94-R100
 | 3 | 网络失败（无设备/超时/不可达） |
 | 4 | 对端拒绝（传输被拒等） |
 | 5 | 本机环境/协议未就绪（端口占用、防火墙） |
+| 10 | `flix update --check`：发现新版本 |
 | 130 | Ctrl+C |
 
 ## 目录

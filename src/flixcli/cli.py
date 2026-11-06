@@ -16,6 +16,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from pathlib import Path
 
 from . import DEVICE_PORT, __version__, is_port_text, local_ip
 from .adb import AdbClient, AdbError
@@ -366,6 +367,52 @@ async def cmd_upgrade(args) -> int:
     if result.get("ok"):
         return 0
     return 4 if result.get("error") == "not-paired" else 3
+
+
+def cmd_update(args) -> int:
+    """Install a newer build from the GitHub release page.
+
+    Exit codes: 10 means an update exists but `--check` was asked for, so the
+    caller can tell "nothing to do" from "act now".
+    """
+    from . import autoupdate as au
+
+    def emit_safely(payload: dict) -> None:
+        # The GUI that launched us may have been stopped to swap its own exe;
+        # its stdout pipe is then closed and must not crash the updater.
+        try:
+            emit(payload, args.json)
+        except (OSError, ValueError):
+            pass
+
+    mirrors = tuple(args.mirror) if args.mirror else au.MIRRORS
+    state_dir = Path(args.state_dir) if args.state_dir else None
+    log_path = (state_dir / "update.log") if state_dir else au.LOG_PATH
+    try:
+        result = au.run_update(
+            repo=args.repo, api_base=args.api_base,
+            token=args.token or os.environ.get("GITHUB_TOKEN"),
+            mirror_list=mirrors, exe=args.exe, check_only=args.check,
+            force=args.force, dry_run=args.dry_run,
+            restart=not args.no_restart, start_when_idle=args.start,
+            include_prerelease=args.pre, asset_pattern=args.asset,
+            wait_s=args.wait, installed_version=args.installed_version,
+            state_path=(state_dir / "update_state.json") if state_dir else au.STATE_PATH,
+            log_path=log_path,
+            downloads_dir=args.downloads_dir, echo=not args.quiet)
+    except au.UpdateError as exc:
+        # A headless run has no console: leave the reason in the log too.
+        au.log_line(f"failed {exc.kind}: {exc.detail}", path=log_path)
+        if not args.quiet:
+            emit_safely({"ok": False, "error": exc.kind, "detail": exc.detail})
+        return exc.code
+    if not args.quiet:
+        emit_safely(result)
+    if not result.get("ok"):
+        return au.EXIT_INSTALL
+    if args.check and result.get("status") == "update-available":
+        return au.EXIT_UPDATE_AVAILABLE
+    return 0
 
 
 async def cmd_send_files(args) -> int:
@@ -1029,6 +1076,45 @@ def main(argv: list[str] | None = None) -> int:
                         "restart (needed for new native deps, but on some hosts "
                         "the fresh unpack never comes up)")
     p.add_argument("--port", type=int, default=DEVICE_PORT)
+
+    p = add("update", "update this install from the GitHub release page "
+                      "(sha256 + health check + rollback)", cmd_update)
+    p.add_argument("--check", action="store_true",
+                   help="report whether a newer release exists, install nothing "
+                        "(exit 10 when one does)")
+    p.add_argument("--force", action="store_true",
+                   help="reinstall even when the running build matches the release")
+    p.add_argument("--dry-run", action="store_true",
+                   help="download and verify, then stop before touching the exe")
+    p.add_argument("--exe", default=None, metavar="PATH",
+                   help="RelayDesk.exe to update (default: detect running/known copy)")
+    p.add_argument("--asset", default=None, metavar="REGEX",
+                   help="pick the release asset by name (default: this platform's zip)")
+    p.add_argument("--repo", default="XinwangTao/flix-cli",
+                   help="owner/name to poll (default: XinwangTao/flix-cli)")
+    p.add_argument("--api-base", default="https://api.github.com")
+    p.add_argument("--token", default=None,
+                   help="GitHub token (or GITHUB_TOKEN) to lift the 60 req/h limit")
+    p.add_argument("--mirror", action="append", default=None, metavar="PREFIX",
+                   help="download mirror prefix tried after a direct failure "
+                        "(repeatable; default gh-proxy.com, ghfast.top)")
+    p.add_argument("--pre", action="store_true", help="allow pre-releases")
+    p.add_argument("--no-restart", action="store_true",
+                   help="update the files but do not relaunch what was stopped")
+    p.add_argument("--start", action="store_true",
+                   help="launch the app after updating even if it was not running")
+    p.add_argument("--wait", type=float, default=60.0,
+                   help="seconds to wait for a restarted build to come up (60)")
+    p.add_argument("--installed-version", default=None,
+                   help="treat this as the installed version (when no state file "
+                        "exists and the windowed build cannot print --version)")
+    p.add_argument("--state-dir", default=None, metavar="DIR",
+                   help="where update_state.json / update.log live "
+                        "(default: %%APPDATA%%\\flixcli)")
+    p.add_argument("--downloads-dir", default=None, metavar="DIR",
+                   help="where the release zip is cached (default: %%TEMP%%\\relaydesk-update)")
+    p.add_argument("--quiet", action="store_true",
+                   help="log to file only (for scheduled tasks)")
 
     p = add("send", "send file(s) to a device (bubble + POST /file)", cmd_send_files)
     p.add_argument("to")
