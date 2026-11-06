@@ -17,7 +17,7 @@ from .media_session import SessionManager
 from .media_transport import MediaRuntime
 from .channel import PeerError, ping_v2, post_bubble, post_intent
 from .desktop_api import serve_desktop_api
-from .discovery import Discovery
+from .discovery import Discovery, EndpointTracker
 from .server import serve_channel
 
 # Kept as thin aliases: the clipboard backends moved to flixcli.clipboard so
@@ -60,7 +60,7 @@ async def clip_sync_loop(store, ident: dict, state: dict,
 
 
 def record_announce(store, ident: dict, devices: dict[str, dict],
-                    dev: dict) -> bool:
+                    dev: dict, endpoints=None, now_ms: int | None = None) -> bool:
     """Fold one discovery datagram into the device table.
 
     Returns True only when the device is new or its modal changed; callers use
@@ -71,10 +71,28 @@ def record_announce(store, ident: dict, devices: dict[str, dict],
     keeps seenAt fresh even when the peer's inbound TCP 8891 is firewalled and
     our /ping_v2 probe can never reach it (presence must not read offline for
     a host that keeps announcing every 30s).
+
+    ``endpoints`` (an EndpointTracker) keeps one TCP port per fingerprint when
+    the same identity announces from several local daemons, e.g. 8891 and
+    RelayDesk's coexisting 18991. Without it the row's port follows whichever
+    instance announced last, twice a minute.
     """
     fp = dev.get("fingerprint")
     if not fp or fp == ident["fingerprint"]:
         return False
+    if endpoints is not None:
+        ip = str(dev.get("ip") or dev.get("source") or "")
+        try:
+            port = int(dev.get("port") or 0)
+        except (TypeError, ValueError):
+            port = 0
+        endpoints.remember(fp, ip, port, now_ms)
+        selected = endpoints.select(fp, ip, now_ms)
+        if selected and (selected[0], selected[1]) != (ip, port):
+            # Keep the announce's alias/model/version but route to the stable
+            # port. The next datagram from the other instance then normalizes
+            # to the same dict and is treated as an ordinary heartbeat.
+            dev = dict(dev, ip=selected[0], port=selected[1])
     if devices.get(fp) == dev:
         store.touch_device(fp)
         return False
@@ -90,11 +108,12 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
                      announce: bool = True, clip_sync: bool = True,
                      web_port: int = 0, multicast_if: str | None = None) -> int:
     devices: dict[str, dict] = {}
+    endpoints = EndpointTracker()
 
     def on_device(dev: dict) -> None:
         fp = dev.get("fingerprint")
         try:
-            changed = record_announce(store, ident, devices, dev)
+            changed = record_announce(store, ident, devices, dev, endpoints)
         except Exception as e:  # noqa: BLE001 - 一个坏行的写失败不该杀掉收包路径
             print(f"[store] {e}", file=sys.stderr, flush=True)
             return

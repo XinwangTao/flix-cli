@@ -14,7 +14,8 @@ from pathlib import Path
 
 from flixcli.config import Store
 from flixcli.daemon_runtime import record_announce
-from flixcli.presence import is_online
+from flixcli.discovery import EndpointTracker
+from flixcli.presence import PRESENCE_TTL_MS, is_online
 
 ME = "me-0000-1111-2222-333333333333"
 PEER = "peer-0000-1111-2222-333333333333"
@@ -85,8 +86,50 @@ class RecordAnnounceTests(unittest.TestCase):
         record_announce(self.store, self.ident, self.devices,
                         _announce(port=8891))
         self.assertTrue(record_announce(self.store, self.ident, self.devices,
-                                        _announce(port=18991)))
-        self.assertEqual(self.store.devices()[0]["port"], 18991)
+                                        _announce(alias="renamed")))
+        self.assertEqual(self.store.devices()[0]["alias"], "renamed")
+
+    def test_multiple_live_ports_keep_the_default_endpoint(self):
+        """Same identity on 8891 and 18991 must not rewrite the port each burst."""
+        endpoints = EndpointTracker()
+        self.assertTrue(record_announce(self.store, self.ident, self.devices,
+                                        _announce(port=18991), endpoints))
+        self.assertTrue(record_announce(self.store, self.ident, self.devices,
+                                        _announce(port=8891), endpoints))
+        self.assertEqual(self.store.devices()[0]["port"], 8891)
+        # The 18991 instance announces again 30s later: it is a heartbeat, not
+        # a device change, and routing stays on the protocol default port.
+        self.assertFalse(record_announce(self.store, self.ident, self.devices,
+                                         _announce(port=18991), endpoints))
+        self.assertEqual(self.store.devices()[0]["port"], 8891)
+        self.assertFalse(record_announce(self.store, self.ident, self.devices,
+                                         _announce(port=8891), endpoints))
+        self.assertEqual(self.store.devices()[0]["port"], 8891)
+
+    def test_endpoint_tracker_switches_only_after_the_ttl(self):
+        tracker = EndpointTracker(ttl_ms=90_000)
+        t0 = 1_000_000
+        tracker.remember(PEER, "192.168.137.1", 18991, t0)
+        tracker.remember(PEER, "192.168.137.1", 8891, t0)
+        self.assertEqual(tracker.select(PEER, "192.168.137.1", t0 + 1),
+                         ("192.168.137.1", 8891))
+        # 8891 stopped announcing but is still inside the TTL: no flapping.
+        self.assertEqual(tracker.select(PEER, "192.168.137.1", t0 + 60_000),
+                         ("192.168.137.1", 8891))
+        # 18991 kept announcing; once 8891 expires, the survivor takes over.
+        tracker.remember(PEER, "192.168.137.1", 18991, t0 + 60_000)
+        self.assertEqual(tracker.select(PEER, "192.168.137.1", t0 + 100_000),
+                         ("192.168.137.1", 18991))
+        self.assertIsNone(tracker.select(PEER, "10.0.0.9", t0 + 100_000))
+
+    def test_endpoint_selection_is_scoped_to_the_announced_ip(self):
+        tracker = EndpointTracker(ttl_ms=PRESENCE_TTL_MS)
+        tracker.remember(PEER, "192.168.137.1", 8891, 1_000)
+        tracker.remember(PEER, "10.0.0.9", 18991, 1_000)
+        self.assertEqual(tracker.select(PEER, "10.0.0.9", 1_100),
+                         ("10.0.0.9", 18991))
+        self.assertEqual(tracker.select(PEER, "192.168.137.1", 1_100),
+                         ("192.168.137.1", 8891))
 
     def test_own_and_fingerprintless_announces_are_ignored(self):
         self.assertFalse(record_announce(self.store, self.ident, self.devices,

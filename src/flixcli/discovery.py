@@ -20,10 +20,12 @@ import json
 import socket
 import struct
 import sys
+import time
 from typing import Callable
 
 from . import (ANNOUNCE_BURST, DEVICE_PORT, MULTICAST_GROUP, local_ipv4_table,
                default_iface_ip)
+from .presence import PRESENCE_TTL_MS
 
 
 def build_announce(ident: dict, port: int = DEVICE_PORT, app_version: int = 1) -> bytes:
@@ -61,6 +63,65 @@ def parse_datagram(data: bytes, src_ip: str) -> dict | None:
         return dev
     except (ValueError, UnicodeDecodeError):
         return None
+
+
+class EndpointTracker:
+    """Remember every TCP endpoint a fingerprint announced from.
+
+    One machine can run more than one flixd with the same identity: the default
+    daemon on 8891 plus ``RelayDesk.exe serve --device-port 18991`` (the
+    documented coexistence layout), or a debug instance.  Both re-announce
+    every 30 s, so "last announce wins" rewrote ``persistence_devices.port``
+    twice a minute.  Routing, outbox, clipboard sync and the file-confirm ack
+    then raced between the two ports -- harmless while both processes live,
+    but messages to a stopped instance failed until the survivor's next
+    announce.  It also spammed ``[discover]`` and ``devicesChanged`` for what
+    is really one unchanged device.
+
+    Keep every (ip, port) alive for the presence TTL and pick the lowest port
+    on the announced IP.  8891 is the protocol default, so a coexisting
+    daemon on 18991 never steals traffic.  Selection only moves after the
+    chosen endpoint has been silent for a whole TTL (e.g. the default daemon
+    was stopped, leaving only 18991), or when a lower port comes back.
+    """
+
+    def __init__(self, ttl_ms: int = PRESENCE_TTL_MS):
+        self.ttl_ms = int(ttl_ms)
+        self._seen: dict[str, dict[tuple[str, int], int]] = {}
+
+    def remember(self, fingerprint: str, ip: str, port: int,
+                 now_ms: int | None = None) -> None:
+        if not fingerprint or not ip or not port:
+            return
+        now = _now_ms(now_ms)
+        rows = self._seen.setdefault(fingerprint, {})
+        rows[(ip, int(port))] = now
+        cutoff = now - self.ttl_ms
+        for key, seen in list(rows.items()):
+            if seen < cutoff:
+                del rows[key]
+
+    def select(self, fingerprint: str, ip: str,
+               now_ms: int | None = None) -> tuple[str, int] | None:
+        rows = self._seen.get(fingerprint) or {}
+        if not rows:
+            return None
+        now = _now_ms(now_ms)
+        cutoff = now - self.ttl_ms
+        live = [(ep_ip, ep_port) for (ep_ip, ep_port), seen in rows.items()
+                if ep_ip == ip and seen >= cutoff]
+        if not live:
+            return None
+        return min(live, key=lambda ep: ep[1])
+
+    def forget(self, fingerprint: str) -> None:
+        self._seen.pop(fingerprint, None)
+
+
+def _now_ms(now_ms: int | None = None) -> int:
+    if now_ms is not None:
+        return int(now_ms)
+    return int(time.time() * 1000)
 
 
 class Discovery:
