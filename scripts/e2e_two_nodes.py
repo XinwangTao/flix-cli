@@ -95,6 +95,14 @@ def main() -> int:
     out = ssh(args.ssh, "%s send-text %s '%s'" % (BOARD_FLIX, args.pc_ip, marker2))
     results.append(check("板→PC 文本送达", "state: delivered" in out, out))
 
+    # 按 IP 寻址的命令必须映射回已配对设备的指纹：resolve_target 曾把 IP 原样当
+    # deviceId 返回，`flix shell <ip>` 明明已配对却回 not-paired，气泡的 to 字段
+    # 也变成 IP（协议里应是指纹，官方客户端按它判断收件人）。
+    shell_marker = "e2e-shell-%d" % int(time.time())
+    out = run(PC_FLIX + ["shell", args.board_ip, "--", "echo " + shell_marker])
+    results.append(check("PC→板 远程执行（按 IP 寻址，需已配对）",
+                         shell_marker in out, out))
+
     out = run(PC_FLIX + ["discover", "--timeout", "35"])
     results.append(check("PC 发现板子广播", args.board_ip in out or "linux" in out, out))
 
