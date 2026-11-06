@@ -16,7 +16,12 @@ BOARD_FLIX = "/opt/flixcli/.venv/bin/flix"
 
 
 def run(cmd, timeout=60):
-    p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    # 两端都是 UTF-8：板子的 Python 在 POSIX locale 下仍按 UTF-8 输出，PC 侧若按
+    # 本地代码页（cp936）解码，读回中文剪贴板时会抛 UnicodeDecodeError，表现成
+    # "远端什么都没输出"，把真正的编码问题藏起来。errors="replace" 保证诊断输出
+    # 永远不会让脚本自己崩掉。
+    p = subprocess.run(cmd, capture_output=True, timeout=timeout,
+                       encoding="utf-8", errors="replace")
     return (p.stdout or "") + (p.stderr or "")
 
 
@@ -81,6 +86,38 @@ def main() -> int:
 
     out = ssh(args.ssh, "%s discover --timeout 35" % BOARD_FLIX)
     results.append(check("板子发现 PC 广播", "windows" in out or args.pc_ip in out, out))
+
+    # 剪贴板：双向逐字符比对。中文 + 符号是重点——PC 端曾用 clip.exe 落剪贴板，
+    # 控制台代码页把 UTF-16 正文变成 "????"，发送方却一直是 success。
+    clip_pc2board = "e2e-剪贴板-pc2board-%d ✓" % int(time.time())
+    out = run(PC_FLIX + ["clipboard", args.board_ip, clip_pc2board])
+    if "sender not paired" in out:
+        print("SKIP PC→板 剪贴板（PC 未在板上配对）")
+    else:
+        time.sleep(1.0)
+        got = ssh_script(args.ssh,
+                         "from pathlib import Path\n"
+                         "import os\n"
+                         "p = Path.home() / 'flixcli' / 'clipboard.txt'\n"
+                         "print(p.read_text(encoding='utf-8') if p.exists() else '<missing>')\n")
+        board_clip = got.strip().splitlines()[-1] if got.strip() else ""
+        results.append(check("PC→板 剪贴板无损", board_clip == clip_pc2board,
+                             "sent=%r got=%r" % (clip_pc2board, board_clip)))
+
+    clip_board2pc = "e2e-剪贴板-board2pc-%d ✓" % int(time.time())
+    out = ssh(args.ssh, "%s clipboard %s '%s'" % (BOARD_FLIX, args.pc_ip, clip_board2pc))
+    if "sender not paired" in out:
+        print("SKIP 板→PC 剪贴板（板子未在 PC 上配对）")
+    else:
+        from flixcli import clipboard as pc_clipboard
+        local = None
+        for _ in range(10):
+            time.sleep(0.3)
+            local = pc_clipboard.read_text()
+            if local == clip_board2pc:
+                break
+        results.append(check("板→PC 剪贴板无损", local == clip_board2pc,
+                             "sent=%r got=%r" % (clip_board2pc, local)))
 
     # 文件：需要双方已配对；未配对时算 SKIP 而不是 FAIL
     tmp = "e2e_file.txt"

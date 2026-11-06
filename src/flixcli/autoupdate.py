@@ -919,11 +919,15 @@ def install_from_source(tag: str, repo: str = REPO_DEFAULT,
         cmd = [uv, "pip", "install", "--python", sys.executable, "--reinstall", str(src)]
     else:
         # uv 建的 venv 默认没有 pip：先补一个再说
+        # uv/pip spew UTF-8 (paths may contain non-ASCII: 用户目录、中文路径);
+        # text=True 会按 Windows 本地代码页解码并在更新自检里抛 UnicodeDecodeError。
         subprocess.run([sys.executable, "-m", "ensurepip", "--upgrade"],
-                       capture_output=True, text=True, timeout=300)
+                       capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=300)
         cmd = [sys.executable, "-m", "pip", "install", "--force-reinstall",
                "--no-input", str(src)]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    proc = subprocess.run(cmd, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=600)
     if proc.returncode != 0:
         raise UpdateError("install-failed", (proc.stderr or proc.stdout)[-400:])
     return tag.lstrip("vV")

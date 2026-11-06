@@ -51,7 +51,9 @@ announce，因此 flixd 每 60s 对库内设备做一次 `/ping_v2` 探活并刷
 
 ## 跨平台剪贴板
 
-`flixd` 的自动同步在 Windows 上走 user32 + `clip.exe`；Linux 桌面在 Wayland 下用
+`flixd` 的自动同步在 Windows 上全程走 user32 的 `CF_UNICODETEXT`（读写都不再经过
+`clip.exe`：子进程会按控制台代码页重编码 stdin，实测把中文变成 `????`，而发送端仍收到
+success）；Linux 桌面在 Wayland 下用
 `wl-clipboard`，X11 下用 `xclip`/`xsel`；macOS 用 `pbpaste`/`pbcopy`。**无 GUI 的 Linux 板子**
 （QCM6490 在 systemd/tty 下运行，没有 X/Wayland）拿不到剪贴板，收到远端剪贴板后不再静默丢弃，
 而是原子写入 `~/flixcli/clipboard.txt`（0600，UTF-8），journal 打印

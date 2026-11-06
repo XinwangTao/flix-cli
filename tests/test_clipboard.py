@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import stat
+import sys
 import tempfile
 import types
 import unittest
@@ -123,6 +124,33 @@ class ReadTests(unittest.TestCase):
                     mock.patch.object(clipboard.shutil, "which", lambda n: None):
                 # Re-reading the spool would broadcast stale text on restart.
                 self.assertIsNone(clipboard.read_text())
+
+
+@unittest.skipUnless(sys.platform.startswith("win"), "needs user32")
+class WindowsRoundTripTests(unittest.TestCase):
+    """Regression: clip.exe re-encoded stdin via the console code page.
+
+    A remote clipboard send of ``board-clip-测试-17599`` reached the Windows
+    clipboard as ``'﻿??????'`` while the board logged the full text, i.e. the
+    corruption happened only on the receiving side. Writing through user32
+    keeps the payload UTF-16 end to end.
+    """
+
+    def setUp(self):
+        self._saved = clipboard.read_text()
+
+    def tearDown(self):
+        if self._saved is not None:
+            clipboard.write_text(self._saved)
+
+    def test_chinese_survives_write(self):
+        for text in ("board-clip-测试-17599", "中文剪贴板 ✓", "plain ascii"):
+            self.assertEqual(clipboard.write_text(text), "win32")
+            self.assertEqual(clipboard.read_text(), text)
+
+    def test_written_text_has_no_bom(self):
+        clipboard.write_text("剪贴板")
+        self.assertEqual(clipboard.read_text(), "剪贴板")
 
 
 class HealthTests(unittest.TestCase):

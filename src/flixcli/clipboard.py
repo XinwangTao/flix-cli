@@ -1,9 +1,15 @@
 """Local clipboard access shared by flixd / ``flix serve``.
 
-Windows keeps the original implementation: user32 ``CF_UNICODETEXT`` for
-reads and ``clip.exe`` (UTF-16LE with BOM) for writes.  Linux desktops go
-through the usual Wayland/X11 helpers when a session is present; macOS uses
-``pbpaste``/``pbcopy``.
+Windows uses user32 directly for both directions: ``CF_UNICODETEXT`` to read
+and ``SetClipboardData`` to write.  Round-tripping through ``clip.exe`` looked
+equivalent but is not: the child converts stdin from the *console code page*,
+so a UTF-16LE payload (or UTF-8, or GBK) carrying Chinese came back as
+``'﻿??????'`` on the receiving machine even though the board logged the
+full text.  Going through user32 keeps the text UTF-16 end to end, spawns no
+extra process and cannot flash a console window.
+
+Linux desktops go through the usual Wayland/X11 helpers when a session is
+present; macOS uses ``pbpaste``/``pbcopy``.
 
 A headless Linux box (the QCM6490 board runs flixd under systemd without
 X/Wayland) has no clipboard at all.  Returning ``None`` there made every
@@ -73,6 +79,22 @@ def _run(argv: tuple[str, ...], data: bytes | None = None,
         return None
 
 
+def _open_clipboard(u32, tries: int = 25, delay: float = 0.02) -> bool:
+    """OpenClipboard with a short retry window.
+
+    Clipboard managers, Office and our own clip-sync poller hold the clipboard
+    for milliseconds at a time; a single false from OpenClipboard used to drop
+    an incoming sync to the spool (or make clip-sync read ``None``) at random.
+    """
+    import time
+    for i in range(tries):
+        if u32.OpenClipboard(None):
+            return True
+        if i + 1 < tries:
+            time.sleep(delay)
+    return False
+
+
 def _read_windows() -> str | None:
     import ctypes
     from ctypes import wintypes
@@ -87,7 +109,7 @@ def _read_windows() -> str | None:
     k32.GlobalLock.argtypes = [wintypes.HGLOBAL]
     k32.GlobalLock.restype = wintypes.LPVOID
     k32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
-    if not u32.OpenClipboard(0):
+    if not _open_clipboard(u32):
         return None
     try:
         h = u32.GetClipboardData(CF_UNICODETEXT)
@@ -97,16 +119,71 @@ def _read_windows() -> str | None:
         if not p:
             return None
         try:
-            return ctypes.wstring_at(p)
+            text = ctypes.wstring_at(p)
         finally:
             k32.GlobalUnlock(h)
     finally:
         u32.CloseClipboard()
+    # A leading U+FEFF is a leftover from whoever wrote the clipboard through
+    # clip.exe; it is invisible in the UI and must not be broadcast as content.
+    return text[1:] if text.startswith("﻿") else text
 
 
 def _write_windows(text: str) -> bool:
-    proc = _run(("clip",), b"\xff\xfe" + text.encode("utf-16-le"))
-    return bool(proc is not None and proc.returncode == 0)
+    """Set the clipboard to *text* through user32 (no child process).
+
+    ``clip.exe`` is deliberately not used: it re-encodes stdin via the console
+    code page, which turned Chinese into ``????`` even for a correct UTF-16LE
+    payload. Returns False when the clipboard is unavailable, so the caller can
+    fall back to spooling the text instead of reporting a bogus success.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    u32 = ctypes.windll.user32
+    k32 = ctypes.windll.kernel32
+    CF_UNICODETEXT = 13
+    GMEM_MOVEABLE = 0x0002
+
+    u32.OpenClipboard.argtypes = [wintypes.HWND]
+    u32.OpenClipboard.restype = wintypes.BOOL
+    u32.EmptyClipboard.restype = wintypes.BOOL
+    u32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+    u32.SetClipboardData.restype = wintypes.HANDLE
+    k32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+    k32.GlobalAlloc.restype = wintypes.HGLOBAL
+    k32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+    k32.GlobalLock.restype = wintypes.LPVOID
+    k32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+    k32.GlobalFree.argtypes = [wintypes.HGLOBAL]
+
+    data = text.encode("utf-16-le") + b"\x00\x00"
+    handle = k32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+    if not handle:
+        return False
+    ptr = k32.GlobalLock(handle)
+    if not ptr:
+        k32.GlobalFree(handle)
+        return False
+    ctypes.memmove(ptr, data, len(data))
+    k32.GlobalUnlock(handle)
+
+    # Another process (clipboard managers, Office) can hold the clipboard for
+    # a few milliseconds; retrying beats dropping an incoming sync.
+    if not _open_clipboard(u32):
+        k32.GlobalFree(handle)
+        return False
+    try:
+        if not u32.EmptyClipboard():
+            k32.GlobalFree(handle)
+            return False
+        if not u32.SetClipboardData(CF_UNICODETEXT, handle):
+            k32.GlobalFree(handle)
+            return False
+        # Ownership passed to the system on success; do not free *handle*.
+        return True
+    finally:
+        u32.CloseClipboard()
 
 
 def read_text() -> str | None:
