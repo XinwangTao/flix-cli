@@ -7,12 +7,16 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SCAN_CACHE = "/run/wifi-scan.txt"
 WPACONF = "/etc/wpa_supplicant.conf"
 AP_START = "/opt/flixcli/scripts/wifi_ap_setup.sh"
+
+# 最近一次配网结果：页面断开重连后靠它看究竟是成功还是失败
+LAST_RESULT = {}
 
 PAGE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -59,14 +63,48 @@ async function apply(){
   const msg=document.getElementById('msg');
   if(!ssid){msg.textContent='请填网络名称';return;}
   msg.textContent='正在连接 '+ssid+' …（约 30 秒）';
-  const r=await fetch('/apply',{method:'POST',headers:{'content-type':'application/json'},
-    body:JSON.stringify({ssid:ssid,psk:psk})});
-  const j=await r.json();
-  msg.textContent=j.ok?('已连接，板子地址 '+j.ip+'；可以断开本热点去访问它。'):
-    ('连接失败：'+(j.error||'未知原因')+'；已退回配网模式。');
+  try{
+    const r=await fetch('/apply',{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({ssid:ssid,psk:psk})});
+    const j=await r.json();
+    msg.textContent=j.hint||'正在切换…';
+  }catch(e){
+    msg.textContent='热点即将断开，这是正常的；30 秒后重新连回本热点再刷新。';
+  }
+  // 重连回热点后，用 /status 里带回来的结果给个结论
+  setTimeout(async()=>{
+    try{
+      const s=await (await fetch('/status')).json();
+      const res=s.result||{};
+      if(res.ok===true) msg.textContent='已连接，板子地址 '+(res.ip||'')+'；可以断开本热点去访问它。';
+      else if(res.ok===false) msg.textContent='连接失败：'+(res.error||'未知原因')+'；已退回配网模式。';
+    }catch(e){}
+  },15000);
 }
 </script></body></html>"""
 
+
+PID_HOSTAPD = "/run/hostapd-relaydesk.pid"
+PID_DNSMASQ = "/run/dnsmasq-relaydesk.pid"
+PID_SELF = "/run/wifi-provision.pid"
+
+
+def kill_pidfile(path):
+    """按 pidfile 精确杀进程。
+
+    不能用 pkill -f：它的模式会匹配到命令行里恰好带同样字符串的
+    ssh/shell（包括调用本脚本的那个会话），之前就是这样把执行中的会话掐断的。
+    """
+    try:
+        pid = int(open(path, encoding="utf-8").read().strip())
+    except (OSError, ValueError):
+        return
+    if pid != os.getpid():
+        sh("kill %d 2>/dev/null" % pid, 5)
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 def sh(cmd, timeout=40):
     try:
@@ -130,23 +168,39 @@ def connect(iface, ssid, psk):
         f.write('network={\n    ssid="%s"\n%s    scan_ssid=1\n}\n' % (ssid, body))
     os.chmod(WPACONF, 0o600)
 
-    sh("pkill -f hostapd-relaydesk")
-    sh("pkill -f dnsmasq-relaydesk")
+    kill_pidfile(PID_HOSTAPD)
+    kill_pidfile(PID_DNSMASQ)
     sh("ip addr flush dev %s" % iface)
     sh("pkill -x wpa_supplicant")
     time.sleep(1)
     sh("wpa_supplicant -B -i %s -D nl80211 -c %s -O /run/wpa_supplicant" % (iface, WPACONF), 20)
-    for _ in range(30):
+    deadline = time.time() + 45
+    while time.time() < deadline:
         time.sleep(2)
-        _, out = sh("wpa_cli -p /run/wpa_supplicant -i %s status" % iface)
+        # wpa_cli 在控制口不存在时会一直等，必须给短超时
+        _, out = sh("wpa_cli -p /run/wpa_supplicant -i %s status" % iface, 5)
         if "wpa_state=COMPLETED" in out:
             sh("udhcpc -i %s -b -R -t 6 -T 3" % iface, 40)
             time.sleep(2)
             _, addr = sh("ip -4 -o addr show %s" % iface)
             m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", addr)
+            # 配好网之后下次开机应该直接连 STA，而不是又发热点
+            # 解开 AP 模式期间的运行时 mask，并让 STA 接管
+            sh("systemctl unmask --runtime wifi-sta 2>/dev/null", 10)
+            sh("systemctl enable wifi-sta 2>/dev/null", 15)
+            sh("systemctl disable --no-block wifi-provision 2>/dev/null", 10)
             return {"ok": True, "ip": m.group(1) if m else "已连接但未取到地址"}
-    sh("nohup bash %s >/var/log/wifi-ap.log 2>&1 &" % AP_START, 10)
+    # 先把失败原因回给客户端，再恢复 AP：恢复 AP 会重建 wlan0，
+    # 连在这个热点上的连接会一起断，同步恢复的话客户端永远收不到响应。
+    threading.Timer(4.0, _restore_ap, args=(iface,)).start()
     return {"ok": False, "error": "连不上（密码错误、信号太弱，或该热点要求 PMF）"}
+
+
+def _restore_ap(iface):
+    sh("systemctl stop --no-block wifi-sta 2>/dev/null", 10)
+    sh("pkill -x wpa_supplicant", 10)
+    time.sleep(1)
+    sh("SKIP_PAGE=1 bash %s >>/var/log/wifi-ap.log 2>&1" % AP_START, 90)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -165,7 +219,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         nets = parse_scan()
         if self.path.startswith("/status"):
-            body = json.dumps({"iface": self.iface, "nets": nets}, ensure_ascii=False)
+            body = json.dumps({"iface": self.iface, "nets": nets,
+                               "result": LAST_RESULT}, ensure_ascii=False)
             return self._send(200, body.encode(), "application/json; charset=utf-8")
         page = PAGE.replace("__NETS__", json.dumps(nets, ensure_ascii=False))
         self._send(200, page.encode(), "text/html; charset=utf-8")
@@ -178,10 +233,26 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length) or b"{}")
         except Exception:
             return self._send(400, b'{"ok":false,"error":"bad request"}', "application/json")
-        result = connect(self.iface, str(payload.get("ssid", "")).strip(),
-                         str(payload.get("psk", "")))
-        self._send(200, json.dumps(result, ensure_ascii=False).encode(),
+        ssid = str(payload.get("ssid", "")).strip()
+        psk = str(payload.get("psk", ""))
+        # AP 与 STA 共用一张网卡：一按连接，这个页面自己的链路就会断，
+        # 所以先回 202，再在后台切换；客户端连回热点后看 /result。
+        LAST_RESULT.clear()
+        threading.Thread(target=_apply_async, args=(self.iface, ssid, psk),
+                         daemon=True).start()
+        hint = {"ok": True, "pending": True,
+                "hint": "正在切换：热点会断开约 30 秒，连回来刷新本页看结果"}
+        self._send(202, json.dumps(hint, ensure_ascii=False).encode(),
                    "application/json; charset=utf-8")
+
+
+def _apply_async(iface, ssid, psk):
+    try:
+        result = connect(iface, ssid, psk)
+    except Exception as exc:  # noqa: BLE001 - 后台线程兜底，别让页面永远转圈
+        result = {"ok": False, "error": str(exc)}
+    LAST_RESULT.clear()
+    LAST_RESULT.update(result)
 
 
 def main():
@@ -208,8 +279,19 @@ def main():
             f.write(str(server.server_address[1]))
     except OSError:
         pass
+    try:
+        with open(PID_SELF, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+    except OSError:
+        pass
     print("配网页面监听 %d" % server.server_address[1], flush=True)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        try:
+            os.remove(PID_SELF)
+        except OSError:
+            pass
     return 0
 
 

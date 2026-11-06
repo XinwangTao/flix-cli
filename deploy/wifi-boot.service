@@ -1,0 +1,14 @@
+# 开机决策：有配置先连 STA，连不上（或没配置）就发 AP 配网热点。
+[Unit]
+Description=RelayDesk Wi-Fi boot decision
+After=network-pre.target
+Before=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/flixcli/scripts/wifi_boot.sh 30
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

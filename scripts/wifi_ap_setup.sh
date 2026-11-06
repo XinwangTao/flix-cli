@@ -13,11 +13,28 @@ AP_IP="${3:-10.42.0.1}"
 IFACE="${IFACE:-${WIFI_IFACE:-wlan0}}"
 DIR="${DIR:-/opt/flixcli}"
 
+PID_HOSTAPD=/run/hostapd-relaydesk.pid
+PID_DNSMASQ=/run/dnsmasq-relaydesk.pid
+PID_PAGE=/run/wifi-provision.pid
+
+# 按 pidfile 精确杀，不用 pkill -f：pkill -f 会把命令行里含同样字符串的
+# ssh/shell 一起杀掉（之前正是它把执行脚本的会话掐断）
+kill_pid() {
+  local pf="$1" pid=""
+  [ -f "$pf" ] || return 0
+  pid="$(cat "$pf" 2>/dev/null || true)"
+  if [ -n "$pid" ] && [ "$pid" != "$$" ]; then
+    kill "$pid" 2>/dev/null || true
+  fi
+  rm -f "$pf"
+  return 0
+}
+
 need() { command -v "$1" >/dev/null 2>&1 || { echo "缺少依赖: $1" >&2; exit 2; }; }
 need hostapd; need dnsmasq
 
 # 1) 让出网卡：板上可能同时有 NM、board-wifi.service、D-Bus 激活的 supplicant
-for unit in board-wifi.service wifi-wlan0.service; do
+for unit in wifi-sta.service board-wifi.service wifi-wlan0.service; do
   systemctl stop "$unit" 2>/dev/null || true
 done
 if command -v nmcli >/dev/null 2>&1; then
@@ -61,14 +78,28 @@ rsn_pairwise=CCMP
 ignore_broadcast_ssid=0
 CONF
 
-pkill -f hostapd-relaydesk 2>/dev/null || true
-hostapd -B -P /run/hostapd-relaydesk.pid /run/hostapd-relaydesk.conf
+kill_pid "$PID_HOSTAPD"
+for attempt in 1 2 3; do
+  hostapd -B -P /run/hostapd-relaydesk.pid /run/hostapd-relaydesk.conf || true
+  sleep 2
+  if pgrep -f hostapd-relaydesk >/dev/null 2>&1; then break; fi
+  echo "hostapd 第 $attempt 次没起来，重试" >&2
+  ip link set "$IFACE" down; sleep 1; ip link set "$IFACE" up
+done
+pgrep -f hostapd-relaydesk >/dev/null 2>&1 || echo "hostapd 始终没起来，检查 /var/log/wifi-ap.log" >&2
 sleep 1
 
 # 4) 地址必须在 hostapd 之后配：驱动切 AP 模式时会清掉旧地址
 ip addr flush dev "$IFACE"
 ip addr add "$AP_IP/24" dev "$IFACE"
 ip link set "$IFACE" up
+# 残留的 169.254.x 之类地址会让客户端看到两个地址，只保留 AP 网段
+for addr in $(ip -4 -o addr show dev "$IFACE" 2>/dev/null | awk '{print $4}'); do
+  case "$addr" in
+    "$AP_IP"/*) ;;
+    *) ip addr del "$addr" dev "$IFACE" 2>/dev/null || true ;;
+  esac
+done
 
 # 5) DHCP（只做 DHCP，不抢 53 端口，系统 dnsmasq 还在跑）
 cat > /run/dnsmasq-relaydesk.conf <<CONF
@@ -81,12 +112,17 @@ dhcp-option=6,$AP_IP
 dhcp-authoritative
 dhcp-leasefile=/run/dnsmasq-relaydesk.leases
 CONF
-pkill -f dnsmasq-relaydesk 2>/dev/null || true
+kill_pid "$PID_DNSMASQ"
 dnsmasq --conf-file=/run/dnsmasq-relaydesk.conf --pid-file=/run/dnsmasq-relaydesk.pid \
   || echo "dnsmasq 启动失败（页面仍可用，可手动设静态 IP）" >&2
 
 # 6) 配网页面（python 标准库；80 常被 nginx 占，端口由脚本自己挑）
-pkill -f wifi_provision.py 2>/dev/null || true
+# 由配网页面自己触发重启时（SKIP_PAGE=1）不要再起一份，否则会把正在响应请求的进程杀掉
+if [ "${SKIP_PAGE:-0}" = "1" ]; then
+  echo "配网模式已恢复：SSID=$SSID 密码=$PASS（页面沿用已运行的实例）"
+  exit 0
+fi
+kill_pid "$PID_PAGE"
 rm -f /run/wifi-provision.port
 nohup python3 "$DIR/scripts/wifi_provision.py" --iface "$IFACE"       >>/var/log/wifi-provision.log 2>&1 &
 sleep 2

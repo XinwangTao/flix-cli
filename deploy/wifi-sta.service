@@ -1,0 +1,18 @@
+# 正常模式：按 /etc/wpa_supplicant.conf 连 Wi-Fi 并取地址。
+[Unit]
+Description=RelayDesk Wi-Fi STA
+After=network-pre.target
+Before=network.target
+
+Conflicts=wifi-provision.service
+
+[Service]
+Type=simple
+ExecStartPre=-/sbin/ip link set wlan0 up
+ExecStart=/usr/sbin/wpa_supplicant -i wlan0 -D nl80211 -c /etc/wpa_supplicant.conf -O /run/wpa_supplicant
+ExecStartPost=/bin/sh -c 'for i in $(seq 1 6); do /sbin/udhcpc -i wlan0 -n -q -t 3 -T 2 >/dev/null 2>&1 && break; sleep 3; done'
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

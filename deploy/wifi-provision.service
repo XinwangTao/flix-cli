@@ -7,12 +7,14 @@ Description=RelayDesk Wi-Fi provisioning AP
 After=network.target
 Before=board-wifi.service
 
+Conflicts=wifi-sta.service
+
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/opt/flixcli/scripts/wifi_ap_setup.sh
-ExecStop=/usr/bin/pkill -f hostapd-relaydesk
-ExecStop=/usr/bin/pkill -f wifi_provision.py
+ExecStop=/bin/sh -c '[ -f /run/hostapd-relaydesk.pid ] && kill $(cat /run/hostapd-relaydesk.pid) 2>/dev/null || true'
+ExecStop=/bin/sh -c '[ -f /run/wifi-provision.pid ] && kill $(cat /run/wifi-provision.pid) 2>/dev/null || true'
 
 [Install]
 WantedBy=multi-user.target
