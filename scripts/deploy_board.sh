@@ -51,6 +51,7 @@ ExecStart=$DIR/.venv/bin/flixd --web-port $WEB_PORT
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
+Environment=HOSTNAME=%H
 MemoryMax=384M
 TasksMax=256
 Nice=5
