@@ -81,8 +81,20 @@ class TransferSecurityTests(unittest.TestCase):
                         await client.post("http://127.0.0.1:19592/bubble", json=bubble)
                         r = await client.post("http://127.0.0.1:19592/file",
                                               params={"share_id": rid, "file_name": "safe.bin"}, data=b"new!")
-                        self.assertEqual(r.status, 409)
+                        # A resend must succeed, but never clobber the old file.
+                        self.assertEqual(r.status, 200)
                     self.assertEqual(target.read_bytes(), b"original")
+                    self.assertEqual((downloads / "safe (1).bin").read_bytes(), b"new!")
+                    # And a third copy keeps counting instead of reusing the name.
+                    rid = str(uuid.uuid4())
+                    bubble["id"] = rid
+                    bubble["content"]["meta"]["resourceId"] = rid
+                    async with ClientSession() as client:
+                        await client.post("http://127.0.0.1:19592/bubble", json=bubble)
+                        r = await client.post("http://127.0.0.1:19592/file",
+                                              params={"share_id": rid, "file_name": "safe.bin"}, data=b"3rd!")
+                        self.assertEqual(r.status, 200)
+                    self.assertEqual((downloads / "safe (2).bin").read_bytes(), b"3rd!")
                 finally:
                     await runner.cleanup(); store.close()
         asyncio.run(run())

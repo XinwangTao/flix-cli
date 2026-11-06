@@ -82,6 +82,29 @@ def _safe_destination(store, name: str) -> tuple[str, str] | None:
     return root, dest
 
 
+def _reserve_destination(root: str, wanted: str) -> str | None:
+    """Reserve a free path under `root`, auto-suffixing on name collisions.
+
+    A repeated send of the same file name must not fail the transfer: the
+    official clients are used by people who resend "photo.jpg" all the time,
+    and a second PC→board e2e run used to die on 409 "destination exists".
+    Existing files are still never overwritten — the newcomer lands as
+    "photo (1).jpg". O_EXCL makes the pick atomic, so concurrent transfers
+    cannot both claim the same name.
+    """
+    base = os.path.basename(wanted)
+    stem, ext = os.path.splitext(base)
+    for n in range(1000):
+        candidate = os.path.join(root, base if n == 0 else f"{stem} ({n}){ext}")
+        try:
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            continue
+        os.close(fd)
+        return candidate
+    return None
+
+
 def make_app(store, ident: dict, publish: Callable[[str, dict], None],
              clipboard_setter=None, device_port: int = DEVICE_PORT,
              signal_hub=None, media_manager=None, media_runtime=None) -> web.Application:
@@ -460,14 +483,18 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
         if safe is None or os.path.basename(supplied_name.replace("\\", "/")) != os.path.basename(expected_name):
             return web.Response(status=400, text="bad file name")
         root, dest = safe
-        if os.path.exists(dest):
-            return web.Response(status=409, text="destination exists")
         declared = _to_int(declared, -1)
         maximum = _max_file_bytes(store)
         if declared < 0 or declared > maximum:
             return web.Response(status=413, text="file too large")
+        # Never overwrite, but don't reject a resend either: reserve a unique
+        # name ("report.pdf" -> "report (1).pdf") before streaming.
         temp_dir = os.path.join(root, ".flix-incoming")
         os.makedirs(temp_dir, exist_ok=True)
+        dest = _reserve_destination(root, dest)
+        if dest is None:
+            return web.Response(status=409, text="destination exists")
+        saved_name = os.path.basename(dest)
         dest_tmp = os.path.join(temp_dir, f"{uuid.uuid4().hex}.part")
         got = 0
         try:
@@ -481,23 +508,26 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
                 os.fsync(f.fileno())
             if got != declared:
                 raise ValueError(f"size mismatch: {got} != {declared}")
-            if os.path.exists(dest):
-                raise FileExistsError(dest)
             os.replace(dest_tmp, dest)
         except (ConnectionResetError, asyncio.CancelledError):
             with contextlib.suppress(OSError):
                 os.unlink(dest_tmp)
+            with contextlib.suppress(OSError):
+                os.unlink(dest)
             return web.Response(status=400, text="transfer aborted")
         except (OSError, ValueError) as error:
             with contextlib.suppress(OSError):
                 os.unlink(dest_tmp)
+            with contextlib.suppress(OSError):
+                os.unlink(dest)
             return web.Response(status=400, text=str(error))
         store.con.execute(
             "UPDATE file_contents SET path=?, progress=1.0, waiting_for_accept=0 WHERE resource_id=?",
             (dest, rid))
         store.con.commit()
         publish("fileReceived", {"resourceId": rid, "name": expected_name,
-                                 "size": declared, "received": got, "path": dest})
+                                 "savedAs": saved_name, "size": declared,
+                                 "received": got, "path": dest})
         return web.Response(text="ok")
 
     async def group_command_post(request: web.Request) -> web.Response:

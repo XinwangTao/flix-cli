@@ -59,3 +59,6 @@ dist-macos/
 # 工具/调试产物
 .lancer/
 Library/
+
+# e2e artifacts
+/e2e_file.txt

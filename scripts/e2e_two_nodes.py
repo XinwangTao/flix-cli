@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""PC ↔ 板子的双向互通实测（发现、握手、文本、文件）。
+
+    python scripts/e2e_two_nodes.py 192.168.137.162 [--ssh quecpi-alpha]
+
+退出码 0 = 全过；非 0 = 有失败项（打印明细）。
+板子侧用 /opt/flixcli/.venv/bin/flix，PC 侧用本仓库的 venv。
+"""
+import argparse
+import subprocess
+import sys
+import time
+
+PC_FLIX = [sys.executable, "-m", "flixcli.cli"]
+BOARD_FLIX = "/opt/flixcli/.venv/bin/flix"
+
+
+def run(cmd, timeout=60):
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    return (p.stdout or "") + (p.stderr or "")
+
+
+def ssh(host, remote_cmd, timeout=90):
+    return run(["ssh", "-o", "BatchMode=yes", host, remote_cmd], timeout)
+
+
+def ssh_script(host, code, timeout=90):
+    """Run a Python snippet on the board without fighting shell quoting."""
+    import base64
+    blob = base64.b64encode(code.encode("utf-8")).decode("ascii")
+    return ssh(host, "echo %s | base64 -d | /opt/flixcli/.venv/bin/python -" % blob,
+               timeout)
+
+
+def check(name, ok, detail=""):
+    print(("PASS " if ok else "FAIL ") + name + ((" | " + detail.strip()[:160]) if detail else ""), flush=True)
+    return ok
+
+
+
+def ensure_pc_daemon():
+    """板子要能主动发消息过来，PC 侧必须有 daemon 在跑；没跑就拉一个。"""
+    import socket
+    with socket.socket() as sk:
+        sk.settimeout(1.0)
+        if sk.connect_ex(("127.0.0.1", 8891)) == 0:
+            return None
+    proc = subprocess.Popen(PC_FLIX + ["serve", "--web-port", "8892"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(20):
+        time.sleep(0.5)
+        with socket.socket() as sk:
+            sk.settimeout(0.5)
+            if sk.connect_ex(("127.0.0.1", 8891)) == 0:
+                return proc
+    return proc
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("board_ip")
+    ap.add_argument("--ssh", default="quecpi-alpha")
+    ap.add_argument("--pc-ip", default="192.168.137.1", help="板子看到的 PC 地址")
+    args = ap.parse_args()
+    results = []
+    _pc_daemon = ensure_pc_daemon()
+
+    out = run(PC_FLIX + ["ping", args.board_ip])
+    results.append(check("PC→板 握手", "ok: True" in out, out))
+
+    marker = "e2e-pc2board-%d" % int(time.time())
+    out = run(PC_FLIX + ["send-text", args.board_ip, marker])
+    results.append(check("PC→板 文本送达", "state: delivered" in out, out))
+
+    marker2 = "e2e-board2pc-%d" % int(time.time())
+    out = ssh(args.ssh, "%s send-text %s '%s'" % (BOARD_FLIX, args.pc_ip, marker2))
+    results.append(check("板→PC 文本送达", "state: delivered" in out, out))
+
+    out = run(PC_FLIX + ["discover", "--timeout", "35"])
+    results.append(check("PC 发现板子广播", args.board_ip in out or "linux" in out, out))
+
+    out = ssh(args.ssh, "%s discover --timeout 35" % BOARD_FLIX)
+    results.append(check("板子发现 PC 广播", "windows" in out or args.pc_ip in out, out))
+
+    # 文件：需要双方已配对；未配对时算 SKIP 而不是 FAIL
+    tmp = "e2e_file.txt"
+    open(tmp, "w", encoding="utf-8").write("relaydesk e2e file\n")
+
+    def board_copy_count():
+        out = ssh_script(args.ssh, (
+            "import os\n"
+            "from flixcli.config import Store\n"
+            "st = Store()\n"
+            "d = st.prefs().get('saveDir') or os.path.expanduser('~/Downloads')\n"
+            "print(sum(1 for n in os.listdir(d) if n.startswith('e2e_file')))\n"))
+        last = out.strip().splitlines()[-1] if out.strip() else ""
+        return int(last) if last.isdigit() else -1, out
+
+    before, before_raw = board_copy_count()
+    out = run(PC_FLIX + ["send", args.board_ip, tmp])
+    if "sender not paired" in out:
+        print("SKIP 文件传输（PC 未在板上配对）")
+    else:
+        results.append(check("PC→板 文件传输", '"ok": True' in out or "ok: True" in out, out))
+        # 同名重发：板上已有同名文件时必须改名落盘，不能 409 拒绝
+        out2 = run(PC_FLIX + ["send", args.board_ip, tmp])
+        results.append(check("PC→板 同名文件重发", '"ok": True' in out2 or "ok: True" in out2, out2))
+        after, after_raw = board_copy_count()
+        results.append(check("板端新增两份副本", before >= 0 and after == before + 2,
+                             "before=%s after=%s | %s" % (before, after, after_raw)))
+
+    ok = all(results)
+    print("RESULT: %d/%d 通过" % (sum(1 for r in results if r), len(results)))
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
