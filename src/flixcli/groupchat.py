@@ -24,6 +24,38 @@ def find_group(store, gid_or_name: str) -> dict | None:
     return None
 
 
+def adopt_group(store, ident: dict, group_id: str, sender: str) -> bool:
+    """Register a group this node only knows second-hand, from a bubble.
+
+    Headless boards have no GUI and ``flix group create`` used to write only
+    the local row, so a group created on the PC arrived there as bubbles
+    tagged with a ``groupId`` that no local group row matched: the thread was
+    in the DB (``bubble_entities.group_id``) but ``flix group list`` printed
+    nothing and ``flix group history <gid>`` answered ``no-group`` -- the
+    messages looked lost even though they had been delivered. The bubble was
+    already accepted, so registering the smallest honest snapshot (us + the
+    sender) cannot widen what the peer could do; it only makes the stored
+    thread reachable. ``rev`` 0 loses against any real ``rdGroupSync``
+    (``rev`` = epoch ms), which then replaces the placeholder name and adds
+    the remaining members.
+
+    Only a paired sender may conjure a group: same trust gate as /intent.
+    """
+    try:
+        uuid.UUID(str(group_id))
+    except (TypeError, ValueError, AttributeError):
+        return False
+    if not sender or not group_id:
+        return False
+    if store.group_rev(group_id) >= 0:
+        return False
+    if not store.is_paired(sender):
+        return False
+    me = (ident or {}).get("fingerprint") or ""
+    members = [m for m in (me, sender) if m]
+    return store.merge_group_sync(group_id, "群组 %s" % group_id[:8], members, 0)
+
+
 def _mention_targets(members: list[str], text: str) -> list[str]:
     """Resolve @<fingerprint prefix> mentions without changing wire shape."""
     tokens = {part[1:].rstrip(",.!?:;，。！？：；")

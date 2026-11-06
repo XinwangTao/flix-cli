@@ -18,6 +18,16 @@
   （sha256 校验 + 健康检查 + 失败回滚），窗口内无需终端；同时显示当前客户端版本。
 
 ### 修复
+- 群组状态只在一端生效：GUI 建群会推 `rdGroupSync`，CLI 的 `flix group create --member` /
+  `group add` 只写本机库，于是 PC 上建好群、`group send` 也 `delivered`，板子上
+  `flix group list` 却是空的、`flix group history <gid>` 回 `no-group`——气泡其实已经
+  按 `groupId` 落库，只是没有群行（实测板端积压了多个这样的孤儿群，消息"收到但看不见"）。
+  现在两个 CLI 入口与 GUI 一致：本地写完立即把快照推给成员并报告
+  `delivered/total/results`。接收端再补一层兜底：只收到带 `groupId` 的气泡、从未收到快照时
+  按**已配对发送方**登记最小群组（本机 + 发送方，`rev=0`），线程立刻可查，后续真实快照
+  覆盖占位名与成员表；未配对发送方不建群（同 `/intent` 信任边界）。单测
+  `tests/test_groupchat.py`（`AdoptGroupTests`/`CliGroupPushTests`），e2e 新增
+  “CLI 建群把快照推给板子 / 板子按群查得到跨端群消息 / 板子自动登记只收到气泡的陌生群组”。
 - 对端文件名里的反斜杠被当成路径分隔符：Linux 允许 `back\slash.txt` 是一个普通文件，
   板上发送后 PC 却落成 `slash.txt`（前缀消失），`a\x.txt` 与 `b\x.txt` 还会撞名成
   `x (1).txt`；同一套 `os.path.basename(supplied.replace("\\","/"))` 比较也让 POSIX

@@ -125,7 +125,7 @@ NTFS 是 255 个 UTF-16 单元（没开长路径时整条路径还得 <260 字�
 | 剪贴板投递（TransIntent clipboard） | `flix clipboard` | flix_send_clipboard | ✅ |
 | 文件传输（bubble + POST /file，share_id=bubbleId，.flixdownload 原子写） | `flix send` | flix_send_files | ✅ 配对后官方自动收 |
 | 剪贴板自动同步（官方 sendClipboard 语义） | flixd 内置（`--no-clip-sync` 关） | — | ✅ 官方实测到达 |
-| 群组（本地群表 + bubble+groupId 逐发） | `flix group create/add/join/leave/list/send/history` | flix_group_* | ✅ 官方可收 |
+| 群组（本地群表 + rdGroupSync 快照 + bubble+groupId 逐发） | `flix group create/add/join/leave/list/send/history` | flix_group_* | ✅ 官方可收 |
 | 配对二维码 | `flix qrcode [--decode]`（flix2:// payload） | — | flixcli 间 |
 | 自动应答（轮询收件 → `--cmd` → 回发，带防自激护栏） | `flix agent --cmd "…"` | — | — |
 | 远程执行（rdShell，exec-only，配对即可执行） | `flix shell <设备> -- <命令>` | flix_shell | flixcli 间 |
@@ -135,6 +135,24 @@ NTFS 是 255 个 UTF-16 单元（没开长路径时整条路径还得 <260 字�
 | Windows 桌面控制台 | `flix gui`（PySide6 Essentials） | — | 自有 GUI |
 | Android ADB 设备/报告 | `flix adb devices|report` | flix_adb_devices / flix_adb_report | 本机 USB/无线 ADB |
 | ADB 文件往返 | `flix adb push|pull` | flix_adb_push / flix_adb_pull | 本机授权设备 |
+
+## 跨端群组状态
+
+群组不是"官方服务端下发"的对象：每个节点各存一份群表，消息仍是 `bubble + groupId`
+逐成员发送。所以**建群/加人必须主动把快照推给成员**（`rdGroupSync`，`rev` 取毫秒时间戳，
+严格新者胜）。桌面 GUI 一直这样推，CLI 的 `flix group create --member` / `flix group add`
+原先只写本机库：PC 上建好群、消息也 `delivered`，板子上 `flix group list` 却是空的、
+`flix group history <gid>` 报 `no-group`——气泡其实按 `groupId` 落库了，只是没有对应的群行，
+等于"收到但看不见"（实测板端积压了多个这样的孤儿群）。现在两个 CLI 入口与 GUI 一致，
+建群/加人后立即推送并逐个报告 `delivered/total/results`。
+
+接收端还有兜底：只收到带 `groupId` 的气泡、却从没收到过快照时（旧版对端、或对方直接
+`group send`），按**已配对发送方**补登记一个最小群组（本机 + 发送方，`rev=0`），让
+`flix group list/history` 立刻能查到这条线程；之后任何真实快照（`rev`>0）都会覆盖占位名与
+成员表。未配对发送方的气泡仍不建群（与 `/intent` 的信任边界一致）。板子上
+`flix group history <gid> --json` 是排查"群里发了消息但对方说没看到"的第一站：先确认群行
+在不在，再看 `bubble_entities.group_id`。e2e 的“CLI 建群把快照推给板子 / 板子按群查得到
+跨端群消息 / 板子自动登记只收到气泡的陌生群组”三项覆盖整条链路。
 
 ## AI 接入（MCP）
 

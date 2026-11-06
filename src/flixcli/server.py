@@ -26,6 +26,7 @@ from typing import Callable
 from aiohttp import web
 
 from . import DEVICE_PORT, model
+from .groupchat import adopt_group as _adopt_group
 from .media_session import SessionError
 from . import ptyshell
 from .remoteshell import DEFAULT_TIMEOUT_S, run_command
@@ -293,6 +294,8 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
         if btype == model.BUBBLE_TEXT and isinstance(content, str):
             store.add_text_bubble(bubble["id"], bubble["from"],
                                   str(bubble.get("to") or ""), content, ts, gid)
+            if gid and _adopt_group(store, ident, gid, bubble["from"]):
+                publish("groupsChanged", {"groupId": gid})
             publish("bubbleChanged", {"bubbleId": bubble["id"], "type": "text",
                                       "groupId": gid})
         elif btype == model.BUBBLE_FILE and isinstance(content, dict):
@@ -317,6 +320,8 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
                 " type, time, group_id) VALUES (?,?,?,3,?,?)",
                 (bubble["id"], bubble["from"], str(bubble.get("to") or ""), ts, gid))
             store.con.commit()
+            if gid and _adopt_group(store, ident, gid, bubble["from"]):
+                publish("groupsChanged", {"groupId": gid})
             publish("bubbleChanged", {"bubbleId": bubble["id"], "type": "file",
                                       "groupId": gid})
             # Only a paired sender may auto-arm the raw /file phase. Unpaired

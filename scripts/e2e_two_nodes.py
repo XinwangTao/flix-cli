@@ -479,6 +479,54 @@ def main() -> int:
                              "expected=%r savedAs=%r body=%r"
                              % (bs_expected, bs_base, bs_got[:60])))
 
+    # 群组跨端：GUI 建群会把 rdGroupSync 推给成员，CLI 建群原先只写本机库，
+    # 板子上 `flix group list` 永远是空的、`group history` 报 no-group，可群气泡
+    # 其实已经按 groupId 落库（实测板上积压了好几个这样的"孤儿群"）。这里要求
+    # CLI 建群后板子认识这个群，群消息也能按群查到。
+    if pc_fp and board_fp:
+        import asyncio
+        import re
+        group_name = "e2e-grp-%d" % int(time.time())
+        out = run(PC_FLIX + ["group", "create", group_name,
+                             "--member", board_fp, "--json"])
+        match = re.search(r'"id":\s*"([0-9a-fA-F-]{36})"', out)
+        gid = match.group(1) if match else ""
+        listed = ssh(args.ssh, "%s group list 2>/dev/null" % BOARD_FLIX)
+        results.append(check("CLI 建群把快照推给板子",
+                             bool(gid) and gid in listed and group_name in listed,
+                             out + listed))
+
+        group_marker = "e2e-group-msg-%d" % int(time.time())
+        out = run(PC_FLIX + ["group", "send", group_name, group_marker])
+        hist = ssh(args.ssh, "%s group history %s 2>/dev/null"
+                   % (BOARD_FLIX, gid))
+        results.append(check("板子按群查得到跨端群消息",
+                             "delivered: 1" in out and group_marker in hist,
+                             out[:120] + hist[:120]))
+
+        # 只收到带 groupId 的气泡（旧版对端或不推快照的 CLI）时，板子也必须把
+        # 这个群画出来，而不是把已经收到的消息藏在未知 groupId 下面。
+        from flixcli.channel import post_bubble
+        from flixcli.model import text_bubble
+        ghost_gid = str(_uuid.uuid4())
+        ghost_marker = "e2e-ghost-grp-%d" % int(time.time())
+        ghost = text_bubble(pc_fp, board_fp, ghost_marker, group_id=ghost_gid)
+        try:
+            reply = asyncio.run(post_bubble(args.board_ip, ghost, port=8891))
+        except Exception as exc:  # noqa: BLE001 - report, do not crash the run
+            reply = "error: %s" % exc
+        listed = ssh(args.ssh, "%s group list 2>/dev/null" % BOARD_FLIX)
+        hist = ssh(args.ssh, "%s group history %s 2>/dev/null"
+                   % (BOARD_FLIX, ghost_gid))
+        results.append(check("板子自动登记只收到气泡的陌生群组",
+                             ghost_gid in listed and ghost_marker in hist,
+                             "%s %s" % (str(reply)[:60], (listed + hist)[:120])))
+
+        # 清理：两端都不留下测试群（气泡本来就长期保留）
+        run(PC_FLIX + ["group", "leave", gid])
+        ssh(args.ssh, "%s group leave %s 2>/dev/null" % (BOARD_FLIX, gid))
+        ssh(args.ssh, "%s group leave %s 2>/dev/null" % (BOARD_FLIX, ghost_gid))
+
     ok = all(results)
     print("RESULT: %d/%d 通过" % (sum(1 for r in results if r), len(results)))
     return 0 if ok else 1

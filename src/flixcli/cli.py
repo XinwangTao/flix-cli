@@ -779,28 +779,43 @@ async def cmd_pair(args) -> int:
 # --- group chat -------------------------------------------------------------
 
 
-def cmd_group_create(args) -> int:
-    from .groupchat import new_group
+async def cmd_group_create(args) -> int:
+    from .groupchat import new_group, update_group
     store = Store()
     try:
-        g = new_group(store, args.name, args.member or [])
-        emit(g, args.json)
+        ident = load_or_create_identity(store)
+        created = new_group(store, args.name, args.member or [])
+        # The GUI path (desktop_api's POST /api/groups) pushes the snapshot to
+        # every member right after creating the group; the CLI wrote only the
+        # local row, so the other end -- typically a headless board with no way
+        # to create groups -- never registered it and its `flix group list`
+        # stayed empty while group bubbles piled up under an unknown groupId.
+        sync = await update_group(store, ident, created["id"])
+        emit({"ok": True, "id": created["id"], "name": sync.get("name") or created["name"],
+              "members": store.group_members(created["id"]),
+              "rev": sync.get("rev"), "delivered": sync.get("delivered", 0),
+              "total": sync.get("total", 0), "results": sync.get("results", [])},
+             args.json)
         return 0
     finally:
         store.close()
 
 
-def cmd_group_add(args) -> int:
+async def cmd_group_add(args) -> int:
+    from .groupchat import update_group
     store = Store()
     try:
-        from .groupchat import find_group
-        g = find_group(store, args.group)
-        if g is None:
-            emit({"error": "no-group", "detail": args.group}, args.json)
+        ident = load_or_create_identity(store)
+        # update_group adds the member locally *and* ships rdGroupSync, so the
+        # other end learns the membership instead of only ever seeing bubbles.
+        result = await update_group(store, ident, args.group, add=(args.fingerprint,))
+        if not result.get("ok"):
+            emit({"error": result.get("error"), "detail": result.get("detail")},
+                 args.json)
             return 2
-        store.add_group_member(g["id"], args.fingerprint)
-        emit({"ok": True, "group": g["id"],
-              "members": store.group_members(g["id"])}, args.json)
+        emit({"ok": True, "group": result["group"], "members": result["members"],
+              "rev": result["rev"], "delivered": result["delivered"],
+              "total": result["total"], "results": result["results"]}, args.json)
         return 0
     finally:
         store.close()
