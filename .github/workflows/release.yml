@@ -74,10 +74,18 @@ jobs:
       - name: Build
         run: pyinstaller RelayDesk.spec --noconfirm --clean
 
+      # A windowed (console=False) exe does not hand its exit code back to the
+      # calling shell reliably, so assert on the version it prints instead.
       - name: Smoke test
+        shell: pwsh
         run: |
-          dist\RelayDesk.exe --version
-          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $want = $env:VERSION.TrimStart('v')
+          $out = & dist\RelayDesk.exe --version 2>&1 | Out-String
+          Write-Output $out
+          if ($out -notmatch [regex]::Escape($want)) {
+            Write-Error "expected version $want, got: $out"
+            exit 1
+          }
 
       - name: Package
         shell: pwsh
