@@ -75,6 +75,12 @@ success）；Linux 桌面在 Wayland 下用
 `/healthz` 的 `clipboard` 字段给出实际落地方式（`win32` / `wl-clipboard` / `xclip` /
 `xsel` / `pbcopy` / `file` / `none`），多端排障时先看这一项。
 
+`flix clipboard <ip> -`、`flix send-text <ip> -`、`flix group send <group> -` 都从 stdin
+读正文，且**按 UTF-8 解**（BOM 去掉、CRLF 折成 LF；真不是 UTF-8 时才退回本机代码页）。
+Windows 上重定向的 stdin 默认按控制台代码页解码，管道里的 UTF-8 中文会变成孤立代理字符，
+`json.dumps` 当场抛 `UnicodeEncodeError`，对端什么都收不到——这也是"剪贴板发了但板上是空的"
+的常见原因之一，先看发送端有没有 traceback。长正文请走 `-`：Windows 命令行只有 32767 字符。
+
 ## 跨平台文件名
 
 接收端按**本机**的规则清洗对端文件名，对端库里/气泡里的名字保持原样，

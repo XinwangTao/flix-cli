@@ -18,6 +18,16 @@
   （sha256 校验 + 健康检查 + 失败回滚），窗口内无需终端；同时显示当前客户端版本。
 
 ### 修复
+- 管道输入的正文按控制台代码页解码，中文剪贴板/文本直接发不出去：`flix clipboard <ip> -`
+  用 `sys.stdin.read()`，Windows 上重定向的 stdin 按 cp936 解码，管道里的 UTF-8 中文变成
+  孤立代理字符，随后在 `json.dumps(...).encode("utf-8")` 处抛
+  `UnicodeEncodeError: … '\udcad'` 退出，对端一个字符都收不到（板上 `clipboard.txt`
+  仍是上一次的内容）；`flix send-text` 更连 `-` 都不认，`echo hi | flix send-text <ip> -`
+  把字面量 `-` 发了出去，而且 Windows 命令行 32767 字符上限让长正文根本无法走 argv。
+  现在 CLI 统一用 `_read_stdin_text()`：先按 UTF-8 解码（Windows 控制台本身就是 UTF-8），
+  失败再退回 locale 编码，识别并去掉 UTF-8/UTF-16 BOM，CRLF 折叠成 LF（与旧文本模式一致）；
+  `send-text`、`clipboard`、`group send` 三个入口共用。单测见 `tests/test_cli_stdin.py`，
+  e2e 新增“PC→板 管道文本按 UTF-8 送达（send-text -）”与“PC→板 剪贴板无损（管道输入）”。
 - 以 IP 为 peer 排队的文本永远不重投：`flix send-text 192.168.137.162 …` 在板子还没
   announce 过时，队列行的 `peer` 就是地址；`outbox.flush` 用 `device_ip(peer)` 只按指纹
   精确匹配，IP 键每 30 秒都查不到地址、被静默 skip，消息一直 `queued` 到 7 天 TTL 过期

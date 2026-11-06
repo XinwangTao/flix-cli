@@ -29,13 +29,16 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 
-def run(cmd, timeout=60):
+def run(cmd, timeout=60, stdin_text=None):
     # 两端都是 UTF-8：板子的 Python 在 POSIX locale 下仍按 UTF-8 输出，PC 侧若按
     # 本地代码页（cp936）解码，读回中文剪贴板时会抛 UnicodeDecodeError，表现成
     # "远端什么都没输出"，把真正的编码问题藏起来。errors="replace" 保证诊断输出
     # 永远不会让脚本自己崩掉。
+    # stdin_text 交给被调用进程的 stdin（按 encoding="utf-8" 编码后写入）：带中文
+    # 的管道输入必须是 UTF-8 字节，由被测程序自己决定怎么解码——PC 上曾按 cp936
+    # 解，直接 UnicodeEncodeError。
     p = subprocess.run(cmd, capture_output=True, timeout=timeout,
-                       encoding="utf-8", errors="replace")
+                       encoding="utf-8", errors="replace", input=stdin_text)
     return (p.stdout or "") + (p.stderr or "")
 
 
@@ -102,6 +105,19 @@ def main() -> int:
     marker = "e2e-pc2board-%d" % int(time.time())
     out = run(PC_FLIX + ["send-text", args.board_ip, marker])
     results.append(check("PC→板 文本送达", "state: delivered" in out, out))
+
+    # 管道输入：`send-text <ip> -` 要从 stdin 读正文，而且必须按 UTF-8 解。
+    # 旧实现既不认 "-"（把字面量 "-" 发出去），PC 侧 `sys.stdin.read()` 在重定向
+    # 时又按控制台代码页（cp936）解码 UTF-8 字节，中文变成孤立代理字符，随后
+    # json.dumps 抛 UnicodeEncodeError，板上什么都没收到。
+    marker_stdin = "e2e-stdin-%d-中文✓" % int(time.time())
+    out = run(PC_FLIX + ["send-text", args.board_ip, "-"],
+              stdin_text=marker_stdin + "\n")
+    seen_on_board = ssh(args.ssh, "%s bubbles 2>/dev/null | grep -F '%s' || true"
+                        % (BOARD_FLIX, marker_stdin))
+    results.append(check("PC→板 管道文本按 UTF-8 送达（send-text -）",
+                         "state: delivered" in out and marker_stdin in seen_on_board,
+                         out))
 
     marker2 = "e2e-board2pc-%d" % int(time.time())
     out = ssh(args.ssh, "%s send-text %s '%s'" % (BOARD_FLIX, pc_target, marker2))
@@ -240,6 +256,26 @@ def main() -> int:
         board_clip = got.strip().splitlines()[-1] if got.strip() else ""
         results.append(check("PC→板 剪贴板无损", board_clip == clip_pc2board,
                              "sent=%r got=%r" % (clip_pc2board, board_clip)))
+
+        # 同一份中文正文改走 stdin（`clipboard <ip> -`）：PC 侧曾用
+        # sys.stdin.read()，重定向时按控制台代码页解 UTF-8，中文成了代理字符，
+        # json.dumps 抛 UnicodeEncodeError，板上一个字符都没落地。
+        clip_stdin = "e2e-剪贴板-stdin-%d ✓" % int(time.time())
+        out = run(PC_FLIX + ["clipboard", args.board_ip, "-"],
+                  stdin_text=clip_stdin)
+        if "sender not paired" in out:
+            print("SKIP PC→板 剪贴板（stdin）")
+        else:
+            time.sleep(1.0)
+            got = ssh_script(args.ssh,
+                             "from pathlib import Path\n"
+                             "p = Path.home() / 'flixcli' / 'clipboard.txt'\n"
+                             "print(p.read_text(encoding='utf-8') if p.exists() else '<missing>')\n")
+            board_clip = got.strip().splitlines()[-1] if got.strip() else ""
+            results.append(check("PC→板 剪贴板无损（管道输入）",
+                                 board_clip == clip_stdin,
+                                 "sent=%r got=%r out=%r" % (clip_stdin, board_clip,
+                                                            out.strip()[-120:])))
 
     clip_board2pc = "e2e-剪贴板-board2pc-%d ✓" % int(time.time())
     out = ssh(args.ssh, "%s clipboard %s '%s'" % (BOARD_FLIX, pc_target, clip_board2pc))
