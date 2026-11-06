@@ -59,6 +59,33 @@ async def clip_sync_loop(store, ident: dict, state: dict,
                   file=sys.stderr, flush=True)
 
 
+def record_announce(store, ident: dict, devices: dict[str, dict],
+                    dev: dict) -> bool:
+    """Fold one discovery datagram into the device table.
+
+    Returns True only when the device is new or its modal changed; callers use
+    that to publish devicesChanged and log the sighting. An identical announce
+    is still a heartbeat: bursts and the 30s re-announce arrive over multicast
+    plus the broadcast fallback, so the row would otherwise be touched many
+    times per minute. ``touch_device`` throttles that to one write per 15s and
+    keeps seenAt fresh even when the peer's inbound TCP 8891 is firewalled and
+    our /ping_v2 probe can never reach it (presence must not read offline for
+    a host that keeps announcing every 30s).
+    """
+    fp = dev.get("fingerprint")
+    if not fp or fp == ident["fingerprint"]:
+        return False
+    if devices.get(fp) == dev:
+        store.touch_device(fp)
+        return False
+    devices[fp] = dev
+    store.upsert_device(fp, alias=dev.get("alias", ""),
+                        device_model=dev.get("deviceModel", ""),
+                        port=dev.get("port"), version=dev.get("version"),
+                        ip=dev.get("ip", ""), os_name=dev.get("os", ""))
+    return True
+
+
 async def run_daemon(store, ident, device_port: int, api_port: int,
                      announce: bool = True, clip_sync: bool = True,
                      web_port: int = 0, multicast_if: str | None = None) -> int:
@@ -66,18 +93,12 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
 
     def on_device(dev: dict) -> None:
         fp = dev.get("fingerprint")
-        if not fp or fp == ident["fingerprint"]:
-            return
-        if devices.get(fp) == dev:
-            return
-        devices[fp] = dev
         try:
-            store.upsert_device(fp, alias=dev.get("alias", ""),
-                                device_model=dev.get("deviceModel", ""),
-                                port=dev.get("port"), version=dev.get("version"),
-                                ip=dev.get("ip", ""), os_name=dev.get("os", ""))
-        except Exception as e:
+            changed = record_announce(store, ident, devices, dev)
+        except Exception as e:  # noqa: BLE001 - 一个坏行的写失败不该杀掉收包路径
             print(f"[store] {e}", file=sys.stderr, flush=True)
+            return
+        if not changed:
             return
         if api_publish:
             api_publish({"type": "devicesChanged",

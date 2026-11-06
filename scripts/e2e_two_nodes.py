@@ -101,6 +101,57 @@ def main() -> int:
     out = ssh(args.ssh, "%s discover --timeout 35" % BOARD_FLIX)
     results.append(check("板子发现 PC 广播", "windows" in out or args.pc_ip in out, out))
 
+    # announce 也是心跳。对端防火墙挡住入站 8891 时，板上 /ping_v2 永远连不上，
+    # 而设备仍在每 30s 广播；旧代码只在探活成功时刷新 seenAt，90s 后就把还在
+    # 广播的设备画成离线。这里注入一条指向"没人监听"端口的 announce（保证探活
+    # 必然失败），隔 20s（超过板上 15s 心跳节流）再发逐字节相同的一份，要求
+    # 板上 seenAt 前进。
+    from flixcli.discovery import build_announce
+    keep_fp = "e2e-heartbeat-%d" % int(time.time())
+    keep_packet = build_announce(
+        {"alias": "e2e-heartbeat", "deviceModel": "Linux",
+         "deviceType": "desktop", "fingerprint": keep_fp, "os": "linux"},
+        port=45999)
+
+    def put_announce() -> None:
+        import socket
+        sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sk.sendto(keep_packet, (args.board_ip, 8891))
+        finally:
+            sk.close()
+
+    def board_seen_at():
+        out = ssh_script(args.ssh, (
+            "from flixcli.config import Store\n"
+            "st = Store()\n"
+            "rows = [r['seenAt'] for r in st.devices()\n"
+            "        if r['fingerprint'] == %r]\n"
+            "st.close()\n"
+            "print(rows[0] if rows else None)\n" % keep_fp))
+        last = out.strip().splitlines()[-1] if out.strip() else ""
+        return int(last) if last.isdigit() else None
+
+    put_announce()
+    time.sleep(2.5)
+    first_seen = board_seen_at()
+    time.sleep(20)
+    put_announce()
+    time.sleep(2.5)
+    second_seen = board_seen_at()
+    results.append(check("重复 announce 续期在线状态（探活不可达仍在线）",
+                         bool(first_seen) and bool(second_seen)
+                         and second_seen > first_seen,
+                         "first=%s second=%s" % (first_seen, second_seen)))
+    ssh_script(args.ssh, (
+        "from flixcli.config import Store\n"
+        "st = Store()\n"
+        "st.con.execute('DELETE FROM persistence_devices WHERE fingerprint=?',\n"
+        "               (%r,))\n"
+        "st.con.commit()\n"
+        "st.close()\n"
+        "print('cleaned')\n" % keep_fp))
+
     # 剪贴板：双向逐字符比对。中文 + 符号是重点——PC 端曾用 clip.exe 落剪贴板，
     # 控制台代码页把 UTF-16 正文变成 "????"，发送方却一直是 success。
     clip_pc2board = "e2e-剪贴板-pc2board-%d ✓" % int(time.time())

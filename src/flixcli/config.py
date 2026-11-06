@@ -175,6 +175,30 @@ class Store:
              int(time.time() * 1000), "", ""))
         self.con.commit()
 
+    def touch_device(self, fingerprint: str, *, throttle_ms: int = 15_000,
+                     now_ms: int | None = None) -> bool:
+        """Refresh seenAt for a device that just announced itself.
+
+        Announce is proof of life and it is sometimes the ONLY contact we get:
+        a peer whose inbound TCP 8891 is blocked by its firewall still hears our
+        discovery datagrams and can push text/files to us, while our /ping_v2
+        probe can never reach it. Refreshing seenAt solely from the probe let
+        the 90s presence TTL paint such a peer offline (and its RelayDesk row
+        grey) although it kept announcing every 30s.
+
+        Throttled because one announce reaches us several times (multicast plus
+        two broadcast fallbacks, two rounds per burst) every 30s — the burst
+        must not turn into a row write per datagram. Unknown fingerprints are
+        not inserted here; the caller upserts first.
+        """
+        now = int(time.time() * 1000) if now_ms is None else int(now_ms)
+        cur = self.con.execute(
+            "UPDATE persistence_devices SET insert_or_update_time=?"
+            " WHERE fingerprint=? AND insert_or_update_time < ?",
+            (now, fingerprint, now - throttle_ms))
+        self.con.commit()
+        return cur.rowcount > 0
+
     def devices(self) -> list[dict]:
         cur = self.con.execute(
             "SELECT fingerprint, alias, device_model, port, version, ip, os,"

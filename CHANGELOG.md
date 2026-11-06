@@ -18,6 +18,13 @@
   （sha256 校验 + 健康检查 + 失败回滚），窗口内无需终端；同时显示当前客户端版本。
 
 ### 修复
+- 仍在广播的设备被 90s TTL 误判离线：`seenAt` 原先只由 `/ping_v2` 探活刷新，收到与上次
+  相同的 announce（突发副本、30s 重发、广播兜底）直接 return，不落库。对端防火墙挡住
+  入站 8891 时探活永远失败，而设备仍在每 30s 广播——它听得见我们、也能主动发消息过来，
+  RelayDesk 却把它画成离线。现在相同 announce 也刷新 `seenAt`（`Store.touch_device`，
+  15s 节流，避免多播+两条广播的突发放大成每包一次写库），`devicesChanged` 与日志仍只在
+  设备新增/模态变化时触发。e2e 新增“重复 announce 续期在线状态（探活不可达仍在线）”，
+  单测见 `tests/test_presence_announce.py`。
 - 长文件名跨端整次传输作废：PC 上的 `长文件名×30.txt`（364 字节）合法，板子 ext4 的
   `NAME_MAX` 只有 255 字节，接收端 `O_EXCL` 占位抛 `ENAMETOOLONG` 后被吞成
   409 `destination exists`（正文一个字节都没落盘），发送端只看到 `upload-failed`。
