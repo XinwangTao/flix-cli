@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import tempfile
 import unittest
 import uuid
@@ -12,7 +13,8 @@ from aiohttp import ClientSession, web
 
 from flixcli.config import Store
 from flixcli.model import BUBBLE_FILE
-from flixcli.server import _sanitize_file_name, make_app
+from flixcli.server import (_SUFFIX_RESERVE, _encoded_len, _fit_file_name,
+                            _name_capacity, _sanitize_file_name, make_app)
 
 
 class FileNameSanitizeTests(unittest.TestCase):
@@ -45,6 +47,101 @@ class FileNameSanitizeTests(unittest.TestCase):
         self.assertEqual(_sanitize_file_name("../../etc/passwd"), "passwd")
         self.assertEqual(_sanitize_file_name(r"C:\tmp\evil.txt", windows=True), "evil.txt")
         self.assertEqual(_sanitize_file_name(r"..\evil.txt", windows=False), "evil.txt")
+
+
+class FileNameLengthTests(unittest.TestCase):
+    """A name that is legal on the sender may not fit on the receiver.
+
+    ext4 caps a component at NAME_MAX = 255 *bytes*, NTFS at 255 UTF-16 units
+    (plus MAX_PATH when long paths are off). A Windows peer sends
+    "长文件名…×30.txt" = 364 bytes: the board's os.open(O_EXCL) failed with
+    ENAMETOOLONG, the receiver swallowed it and answered 409 "destination
+    exists", so the sender reported upload-failed for a perfectly good file.
+    """
+
+    @staticmethod
+    def _budget(root) -> int:
+        return _name_capacity(root) - _SUFFIX_RESERVE
+
+    def test_long_name_is_fitted_not_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for raw in ("长文件名" * 30 + ".txt", "a" * 400 + ".bin",
+                        "长" * 200 + "."):
+                with self.subTest(raw=raw[:12]):
+                    fitted = _fit_file_name(raw, tmp)
+                    self.assertTrue(fitted)
+                    self.assertLessEqual(_encoded_len(fitted), self._budget(tmp))
+                    self.assertEqual(fitted.encode("utf-8").decode("utf-8"), fitted)
+                    ext = os.path.splitext(raw)[1]
+                    if ext and len(ext) <= 32:
+                        self.assertTrue(fitted.endswith(ext), fitted)
+                    self.assertNotIn(fitted, (".", ".."))
+
+    def test_short_names_are_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in ("a.txt", "长文件名.txt", "linux:colon?.txt"):
+                with self.subTest(name=name):
+                    self.assertEqual(_fit_file_name(name, tmp), name)
+
+    def test_overlong_transfer_succeeds_with_fitted_saved_name(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                downloads = root / "downloads"
+                downloads.mkdir()
+                store = Store(root / "db.sqlite")
+                store.set_pref("saveDir", str(downloads))
+                sender = "sender"
+                ident = {"fingerprint": "self", "alias": "test",
+                         "deviceModel": "Windows"}
+                store.upsert_device(sender, ip="127.0.0.1", port=19594)
+                store.add_pair(sender, "0000")
+                app = make_app(store, ident, lambda *_: None)
+                runner = web.AppRunner(app)
+                await runner.setup()
+                await web.TCPSite(runner, "127.0.0.1", 19594).start()
+                try:
+                    raw = "长文件名" * 30 + ".txt"
+                    body = b"overlong name still arrives"
+                    saved = []
+                    for _ in range(2):  # a resend must fit in the same budget
+                        rid = str(uuid.uuid4())
+                        bubble = {"id": rid, "from": sender, "to": "self",
+                                  "type": BUBBLE_FILE, "time": 1, "groupId": "",
+                                  "content": {"state": 2,
+                                              "meta": {"resourceId": rid, "name": raw,
+                                                       "size": len(body),
+                                                       "mimeType": "text/plain"},
+                                              "waitingForAccept": True}}
+                        async with ClientSession() as client:
+                            r = await client.post("http://127.0.0.1:19594/bubble",
+                                                  json=bubble)
+                            self.assertEqual(r.status, 200)
+                            r = await client.post("http://127.0.0.1:19594/file",
+                                                  params={"share_id": rid,
+                                                          "file_name": raw},
+                                                  data=body)
+                            self.assertEqual(r.status, 200, await r.text())
+                        row = store.con.execute(
+                            "SELECT path FROM file_contents WHERE resource_id=?",
+                            (rid,)).fetchone()
+                        self.assertTrue(row and row[0], "nothing recorded on disk")
+                        saved.append(Path(row[0]))
+                    self.assertEqual(len(set(saved)), 2, saved)
+                    for path in saved:
+                        self.assertTrue(path.exists(), path)
+                        self.assertEqual(path.read_bytes(), body)
+                        self.assertLessEqual(_encoded_len(path.name),
+                                             self._budget(str(downloads)))
+                    # The declared name is what the sender wrote, untouched.
+                    name = store.con.execute(
+                        "SELECT name FROM file_contents WHERE resource_id=?",
+                        (rid,)).fetchone()[0]
+                    self.assertEqual(name, raw)
+                finally:
+                    await runner.cleanup()
+                    store.close()
+        asyncio.run(run())
 
 
 class TransferSecurityTests(unittest.TestCase):

@@ -106,22 +106,113 @@ _WINDOWS_DEVICE_NAMES = frozenset({
     *(f"LPT{i}" for i in range(1, 10)),
 })
 
+# Room kept free for the " (999)" collision suffix so a fitted name can still
+# be de-duplicated without pushing the file system over its own limit.
+_SUFFIX_RESERVE = 8
 
-def _safe_destination(store, name: str) -> tuple[str, str] | None:
+
+def _windows_long_paths_enabled() -> bool:
+    """True when this Windows host created files past MAX_PATH for us."""
+    if os.name != "nt":
+        return True
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SYSTEM\CurrentControlSet\Control\FileSystem") as key:
+            return bool(winreg.QueryValueEx(key, "LongPathsEnabled")[0])
+    except (ImportError, OSError, ValueError, AttributeError):
+        return False
+
+
+def _name_capacity(root: str) -> int:
+    """How big one on-disk name under `root` may be (bytes / UTF-16 units)."""
+    if os.name == "nt":
+        # NTFS caps a component at 255 UTF-16 units. Without the long-path
+        # opt-in the *whole path* also has to stay under MAX_PATH (260), so a
+        # 255-byte POSIX name dropped into a deep Downloads folder used to die
+        # with WinError 206 after the payload had already arrived.
+        capacity = 255
+        if not _windows_long_paths_enabled():
+            capacity = min(capacity, 259 - len(os.path.abspath(root)) - 1)
+        return max(capacity, 32)
+    try:
+        return int(os.pathconf(root, "PC_NAME_MAX")) or 255
+    except (OSError, ValueError, AttributeError):
+        return 255
+
+
+def _encoded_len(text: str) -> int:
+    if os.name == "nt":
+        return len(text.encode("utf-16-le")) // 2
+    return len(text.encode("utf-8"))
+
+
+def _truncate_to(text: str, limit: int) -> str:
+    """Cut `text` to `limit` on-disk units without splitting a character."""
+    if limit <= 0:
+        return ""
+    if _encoded_len(text) <= limit:
+        return text
+    if os.name == "nt":
+        # Astral characters are two UTF-16 units, so walk code points.
+        out, used = [], 0
+        for ch in text:
+            n = len(ch.encode("utf-16-le")) // 2
+            if used + n > limit:
+                break
+            out.append(ch)
+            used += n
+        return "".join(out)
+    return text.encode("utf-8")[:limit].decode("utf-8", "ignore")
+
+
+def _fit_file_name(name: str, root: str) -> str:
+    """Shorten a peer name until this file system can actually create it.
+
+    A board sends `长文件名…×30.txt`: 364 UTF-8 bytes, legal on ext4 only up
+    to NAME_MAX (255). The receiver used to hand that straight to
+    os.open(O_EXCL), swallow ENAMETOOLONG and answer 409 "destination
+    exists" — the sender saw "upload-failed" for a name that was merely too
+    long, and nothing was ever written. Fit the name instead: keep the
+    extension, cut the stem on a character boundary, leave room for the
+    " (n)" suffix. The declared name in the DB stays as the sender wrote it
+    and `fileReceived.savedAs` reports the fitted one.
+    """
+    budget = _name_capacity(root) - _SUFFIX_RESERVE
+    if _encoded_len(name) <= budget:
+        return name
+    stem, ext = os.path.splitext(name)
+    # Only treat it as an extension if it plausibly is one.
+    if not ext or _encoded_len(ext) > 32 or ext in (".", ".."):
+        stem, ext = name, ""
+    room = budget - _encoded_len(ext)
+    if room <= 0:  # ".averyveryvery…" — extension alone blows the budget
+        stem, ext, room = name, "", budget
+    fitted = _truncate_to(stem, room).rstrip(" .") + ext
+    if not fitted or fitted in (".", ".."):
+        fitted = "file" + ext
+    return fitted
+
+
+def _safe_destination(store, name: str) -> tuple[str, str, str] | None:
+    """Resolve a peer name to (root, destination, on-disk basename)."""
     clean = _sanitize_file_name(name)
     if not clean or clean in (".", ".."):
         return None
     root = os.path.realpath(_save_dir(store))
+    clean = _fit_file_name(clean, root)
     dest = os.path.realpath(os.path.join(root, clean))
     try:
         if os.path.commonpath((root, dest)) != root:
             return None
     except ValueError:
         return None
-    return root, dest
+    return root, dest, clean
 
 
-def _reserve_destination(root: str, wanted: str) -> str | None:
+def _reserve_destination(root: str, wanted: str) -> tuple[str | None, str]:
     """Reserve a free path under `root`, auto-suffixing on name collisions.
 
     A repeated send of the same file name must not fail the transfer: the
@@ -130,6 +221,10 @@ def _reserve_destination(root: str, wanted: str) -> str | None:
     Existing files are still never overwritten — the newcomer lands as
     "photo (1).jpg". O_EXCL makes the pick atomic, so concurrent transfers
     cannot both claim the same name.
+
+    Returns (path, "") on success and (None, reason) otherwise, so the caller
+    can answer with the real problem instead of blaming a name clash for what
+    is really ENAMETOOLONG or a full disk.
     """
     base = os.path.basename(wanted)
     stem, ext = os.path.splitext(base)
@@ -139,13 +234,13 @@ def _reserve_destination(root: str, wanted: str) -> str | None:
             fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
             continue
-        except OSError:
-            # e.g. ENAMETOOLONG or a name the filesystem still rejects: no
+        except OSError as error:
+            # e.g. ENAMETOOLONG or a name the file system still rejects: no
             # suffix will make it creatable, so stop instead of looping.
-            return None
+            return None, error.strerror or str(error)
         os.close(fd)
-        return candidate
-    return None
+        return candidate, ""
+    return None, "too many files with that name"
 
 
 def make_app(store, ident: dict, publish: Callable[[str, dict], None],
@@ -525,7 +620,7 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
         safe = _safe_destination(store, expected_name)
         if safe is None or os.path.basename(supplied_name.replace("\\", "/")) != os.path.basename(expected_name):
             return web.Response(status=400, text="bad file name")
-        root, dest = safe
+        root, dest, _fitted = safe
         declared = _to_int(declared, -1)
         maximum = _max_file_bytes(store)
         if declared < 0 or declared > maximum:
@@ -534,9 +629,11 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
         # name ("report.pdf" -> "report (1).pdf") before streaming.
         temp_dir = os.path.join(root, ".flix-incoming")
         os.makedirs(temp_dir, exist_ok=True)
-        dest = _reserve_destination(root, dest)
+        dest, why = _reserve_destination(root, dest)
         if dest is None:
-            return web.Response(status=409, text="destination exists")
+            # Real reason (ENAMETOOLONG, ENOSPC, …) — "destination exists"
+            # made operators chase a name clash that was never there.
+            return web.Response(status=400, text=f"cannot reserve destination: {why}")
         saved_name = os.path.basename(dest)
         dest_tmp = os.path.join(temp_dir, f"{uuid.uuid4().hex}.part")
         got = 0

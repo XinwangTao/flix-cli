@@ -74,6 +74,16 @@ NTFS 把它当**数据流**分隔符，占位文件建成了另一个名字（`~
 所以板上仍能收到带 `:` 的原名。端到端回归见 `scripts/e2e_two_nodes.py` 的
 "板→PC 文件（Windows 非法名）" 三项。
 
+名字合法还不够——**长度**也得按接收端算。ext4 的 `NAME_MAX` 是 255 **字节**，
+NTFS 是 255 个 UTF-16 单元（没开长路径时整条路径还得 <260 字符）。PC 上一个
+`长文件名×30.txt`（364 字节）在 Windows 上完全合法，往板上发时接收端 `O_EXCL` 占位直接
+`ENAMETOOLONG`，旧代码把它吞成 409 `destination exists`（其实一个字节都没写），发送端只看到
+`upload-failed`。现在接收端先按 `os.pathconf(..., PC_NAME_MAX)`（Windows 按组件 255 +
+长路径开关）**收窄**：保留扩展名、在 UTF-8/UTF-16 字符边界上截断主体、留出 8 字节给
+`" (n)"` 同名后缀，`fileReceived.savedAs` 报收窄后的名字，气泡/库里仍是原名。占位失败也改报
+真实原因（`cannot reserve destination: File name too long`），不再一律甩 409。
+两端回归见 e2e 的 "PC→板 超长文件名送达 / 板端按 NAME_MAX 收窄且内容一致"。
+
 ## 功能矩阵
 
 | 功能 | CLI | MCP 工具 | 官方互通 |

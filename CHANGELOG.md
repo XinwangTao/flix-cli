@@ -18,6 +18,14 @@
   （sha256 校验 + 健康检查 + 失败回滚），窗口内无需终端；同时显示当前客户端版本。
 
 ### 修复
+- 长文件名跨端整次传输作废：PC 上的 `长文件名×30.txt`（364 字节）合法，板子 ext4 的
+  `NAME_MAX` 只有 255 字节，接收端 `O_EXCL` 占位抛 `ENAMETOOLONG` 后被吞成
+  409 `destination exists`（正文一个字节都没落盘），发送端只看到 `upload-failed`。
+  现接收端按本机 `PC_NAME_MAX`（Windows 为组件 255，且未开长路径时整条路径 <260）收窄：
+  保留扩展名、在字符边界截断主体、留 8 字节给 `" (n)"` 同名后缀，`fileReceived.savedAs`
+  报实际落盘名；占位失败改报真实原因（`cannot reserve destination: …`）而不是一律 409。
+  e2e 新增 “PC→板 超长文件名送达 / 板端按 NAME_MAX 收窄且内容一致” 两项
+  （`tests/test_transfer_security.py::FileNameLengthTests`）。
 - 板子（Linux）发来 Windows 非法文件名时整次传输作废：`linux:colon?.txt` 里的 `:` 被 NTFS
   当成数据流分隔符，占位文件建成了 `~/Downloads/linux`，正文收完后 `os.replace` 报
   WinError 123、接收端回 400 `upload-failed`，发送方以为文件没发出去，磁盘上还留一个空文件。

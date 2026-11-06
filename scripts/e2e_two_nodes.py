@@ -7,9 +7,11 @@
 板子侧用 /opt/flixcli/.venv/bin/flix，PC 侧用本仓库的 venv。
 """
 import argparse
+import ast
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 PC_FLIX = [sys.executable, "-m", "flixcli.cli"]
@@ -157,6 +159,49 @@ def main() -> int:
         after, after_raw = board_copy_count()
         results.append(check("板端新增两份副本", before >= 0 and after == before + 2,
                              "before=%s after=%s | %s" % (before, after, after_raw)))
+
+        # 超长文件名：Windows 上 100 个汉字（300 字节）合法，ext4 的 NAME_MAX
+        # 是 255 字节。接收端曾把 ENAMETOOLONG 吞掉、回 409 "destination
+        # exists"，发送端只看到 upload-failed，文件其实一个字节都没落盘。
+        # 现在接收端按本机规则收窄（保留扩展名、留出 " (n)" 位），savedAs
+        # 报实际落盘名。
+        long_tag = "e2e-long-%d" % int(time.time())
+        long_name = long_tag + "-" + "长" * 100 + ".txt"
+        long_payload = "long-name payload %d" % int(time.time())
+        long_src = None
+        for base in (tempfile.gettempdir(), os.path.expanduser("~")):
+            try:
+                candidate = os.path.join(base, long_name)
+                with open(candidate, "w", encoding="utf-8") as fh:
+                    fh.write(long_payload)
+                long_src = candidate
+                break
+            except OSError as error:
+                print("NOTE 本机建不出超长文件名（%s），换目录重试" % error)
+        if long_src is None:
+            print("SKIP PC→板 超长文件名（本机无法创建 300 字节文件名）")
+        else:
+            out = run(PC_FLIX + ["send", args.board_ip, long_src])
+            results.append(check("PC→板 超长文件名送达",
+                                 '"ok": True' in out or "ok: True" in out, out))
+            got = ssh_script(args.ssh, (
+                "import os\n"
+                "d = os.path.expanduser('~/Downloads')\n"
+                "hits = sorted(n for n in os.listdir(d) if n.startswith(%r))\n"
+                "print(repr((len(hits), [len(n.encode()) for n in hits])))\n"
+                "print(open(os.path.join(d, hits[-1]), encoding='utf-8').read() if hits else '')\n"
+                % long_tag))
+            lines = got.strip().splitlines()
+            meta = lines[0] if lines else ""
+            body = lines[1] if len(lines) > 1 else ""
+            try:
+                count, sizes = ast.literal_eval(meta) if meta else (0, [])
+            except (ValueError, SyntaxError):
+                count, sizes = 0, []
+            ok = (count >= 1 and all(0 < s <= 255 for s in sizes)
+                  and body == long_payload)
+            results.append(check("板端按 NAME_MAX 收窄且内容一致", ok,
+                                 "count=%s sizes=%s body=%r" % (count, sizes, body[:60])))
 
     # 板→PC 文件，且文件名用 Linux 合法、Windows 非法的字符（":" 与 "?"）。
     # NTFS 把 "linux:colon?.txt" 解释成文件 "linux" 的数据流：接收端曾因此把
