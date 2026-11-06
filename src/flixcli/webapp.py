@@ -204,6 +204,23 @@ setInterval(poll, 3000); poll();
 </script></body></html>"""
 
 
+def health_payload(ident: dict, started_at: float, now: float,
+                   device_count: int, channel_port: int) -> dict:
+    """Small, stable probe payload for deploy checks and monitoring.
+
+    Kept as a pure function so the shape can be asserted without a running
+    server; the route only feeds it live values.
+    """
+    return {
+        "ok": True,
+        "alias": ident.get("alias", ""),
+        "fingerprint": ident.get("fingerprint", ""),
+        "version": ident.get("version", 1),
+        "channelPort": channel_port,
+        "uptime": max(0, int(now - started_at)),
+        "devices": device_count,
+    }
+
 def make_web_app(store, ident: dict, on_web_text: Callable[[str], None],
                  save_dir_fn, channel_port: int,
                  send_text_fn=None) -> tuple[web.Application, Callable[[str], None]]:
@@ -217,6 +234,7 @@ def make_web_app(store, ident: dict, on_web_text: Callable[[str], None],
     from . import DEVICE_PORT
 
     sockets: set[web.WebSocketResponse] = set()
+    started_at = time.time()
 
     def push_text(text: str) -> None:
         for ws in list(sockets):
@@ -385,7 +403,16 @@ def make_web_app(store, ident: dict, on_web_text: Callable[[str], None],
 
     app = web.Application()
     app["fails"] = {}
+    async def healthz(request: web.Request) -> web.Response:
+        try:
+            count = len(store.devices())
+        except Exception:
+            count = -1
+        return web.json_response(
+            health_payload(ident, started_at, time.time(), count, channel_port))
+
     app.router.add_get("/", index)
+    app.router.add_get("/healthz", healthz)
     app.router.add_post("/validate-code", validate)
     # these must register before the /{pin} catch-all
     app.router.add_get("/group", group_list_page)
