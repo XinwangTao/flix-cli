@@ -98,6 +98,54 @@ def _usable(ip: str, mask: str | None) -> bool:
     return mask is None or mask != "255.255.255.255"
 
 
+def _linux_ipv4_table() -> list[tuple[str, str]]:
+    """[(address, netmask)] from SIOCGIFADDR/SIOCGIFNETMASK (empty off-Linux)."""
+    if not sys.platform.startswith("linux"):
+        return []
+    try:
+        import fcntl
+    except ImportError:
+        return []
+    out: list[tuple[str, str]] = []
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        for _idx, name in socket.if_nameindex():
+            req = struct.pack("256s", name.encode()[:15])
+            try:
+                addr = socket.inet_ntoa(fcntl.ioctl(s.fileno(), 0x8915, req)[20:24])
+                mask = socket.inet_ntoa(fcntl.ioctl(s.fileno(), 0x891b, req)[20:24])
+            except OSError:
+                continue
+            out.append((addr, mask))
+    except OSError:
+        return out
+    finally:
+        s.close()
+    return out
+
+
+def local_ipv4_table() -> list[tuple[str, str]]:
+    """[(address, netmask)] for LAN-capable interfaces, best effort.
+
+    Announce/join has to cover every interface a peer might share with us:
+    a host on Wi-Fi plus a wired board on ICS only ever sees the board if the
+    Ethernet link is included, and the default route alone would skip it.
+    """
+    rows: list[tuple[str, str | None]] = list(_win_ipv4_table())
+    if not rows:
+        rows = list(_linux_ipv4_table())
+    if not rows:
+        routed = _routed_ip()
+        if routed:
+            rows = [(routed, None)]
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for ip, mask in rows:
+        if _usable(ip, mask) and ip not in seen:
+            seen.add(ip)
+            out.append((ip, mask or ""))
+    return out
+
 def default_iface_ip() -> str:
     """LAN IPv4 to use for multicast join + send, best effort.
 

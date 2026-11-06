@@ -22,7 +22,7 @@ import struct
 import sys
 from typing import Callable
 
-from . import (ANNOUNCE_BURST, DEVICE_PORT, MULTICAST_GROUP, _win_ipv4_table,
+from . import (ANNOUNCE_BURST, DEVICE_PORT, MULTICAST_GROUP, local_ipv4_table,
                default_iface_ip)
 
 
@@ -79,7 +79,16 @@ class Discovery:
     def __init__(self, on_device: Callable[[dict], None],
                  iface_ip: str | None = None):
         self.on_device = on_device
-        self.iface = iface_ip or default_iface_ip() or None
+        # Every LAN-capable address, not just the default route: a host can sit
+        # on Wi-Fi and a wired subnet at once, and peers on the second one only
+        # hear us if we join and announce there too.
+        self._pinned = iface_ip is not None
+        self.ifaces: list[str] = ([iface_ip] if iface_ip
+                                  else [ip for ip, _mask in local_ipv4_table()])
+        self.iface = iface_ip or (self.ifaces[0] if self.ifaces
+                                  else (default_iface_ip() or None))
+        if self.iface and self.iface not in self.ifaces:
+            self.ifaces.insert(0, self.iface)
         self.transport: asyncio.DatagramTransport | None = None
         self.bound = False
 
@@ -87,9 +96,16 @@ class Discovery:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(("", DEVICE_PORT))
-        mreq = (socket.inet_aton(MULTICAST_GROUP)
-                + socket.inet_aton(self.iface or "0.0.0.0"))
-        s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        joined = 0
+        for ip in (self.ifaces or ["0.0.0.0"]):
+            mreq = (socket.inet_aton(MULTICAST_GROUP) + socket.inet_aton(ip))
+            try:
+                s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+                joined += 1
+            except OSError:
+                continue
+        if not joined:
+            raise OSError("no interface accepted the multicast join")
         s.setblocking(False)
         return s
 
@@ -108,20 +124,22 @@ class Discovery:
         return True
 
     def _broadcast_addrs(self) -> list[str]:
-        """Subnet-directed broadcast first (pinned to the multicast NIC), then
-        the limited broadcast as a catch-all."""
+        """Subnet-directed broadcast for each joined interface, then the
+        limited broadcast as a catch-all."""
         addrs: list[str] = []
-        if self.iface:
+        rows = local_ipv4_table()
+        for ip in self.ifaces:
+            mask = next((m for a, m in rows if a == ip), "")
+            if not mask or mask == "255.255.255.255":
+                continue
             try:
-                n = struct.unpack(">I", socket.inet_aton(self.iface))[0]
-                for ip, mask in _win_ipv4_table():
-                    if ip == self.iface and mask != "255.255.255.255":
-                        m = struct.unpack(">I", socket.inet_aton(mask))[0]
-                        addrs.append(socket.inet_ntoa(
-                            struct.pack(">I", n | (~m & 0xFFFFFFFF))))
-                        break
+                n = struct.unpack(">I", socket.inet_aton(ip))[0]
+                m = struct.unpack(">I", socket.inet_aton(mask))[0]
+                bc = socket.inet_ntoa(struct.pack(">I", n | (~m & 0xFFFFFFFF)))
             except OSError:
-                pass
+                continue
+            if bc not in addrs:
+                addrs.append(bc)
         addrs.append("255.255.255.255")
         return addrs
 
@@ -132,11 +150,18 @@ class Discovery:
         hotspot fallback) keeps its old multicast membership otherwise: peers
         still reach us over TCP but never see our announces again.
         """
+        want_list = [ip for ip, _mask in local_ipv4_table()]
         want = default_iface_ip() or None
-        if want == self.iface or not self.bound:
+        if self._pinned:
+            moved = want != self.iface
+        else:
+            moved = want != self.iface or (bool(want_list) and want_list != self.ifaces)
+        if not moved or not self.bound:
             return False
         old = self.iface
         self.iface = want
+        self.ifaces = ([want] if self._pinned
+                       else (want_list or ([want] if want else [])))
         try:
             if self.transport is not None:
                 self.transport.close()
@@ -156,16 +181,20 @@ class Discovery:
         tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             tx.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 8)
-            if self.iface:
-                tx.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
-                              socket.inet_aton(self.iface))
             tx.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             # Wire dst port is DEVICE_PORT [RT capture_discovery.txt]: every
             # listener (official + flixcli) binds 8891 for discovery regardless
             # of its TCP channel port; `port` only labels the payload modal.
-            targets = [(MULTICAST_GROUP, DEVICE_PORT)]
-            targets += [(bc, DEVICE_PORT) for bc in self._broadcast_addrs()]
+            targets = [(bc, DEVICE_PORT) for bc in self._broadcast_addrs()]
             for _ in range(times):
+                for ip in (self.ifaces or [None]):
+                    if ip:
+                        with contextlib.suppress(OSError):
+                            tx.setsockopt(socket.IPPROTO_IP,
+                                          socket.IP_MULTICAST_IF,
+                                          socket.inet_aton(ip))
+                    with contextlib.suppress(OSError):
+                        tx.sendto(payload, (MULTICAST_GROUP, DEVICE_PORT))
                 for dst in targets:
                     with contextlib.suppress(OSError):
                         tx.sendto(payload, dst)
