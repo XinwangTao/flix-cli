@@ -10,7 +10,7 @@ Conflicts=wifi-provision.service
 Type=simple
 ExecStartPre=-/sbin/ip link set wlan0 up
 ExecStart=/usr/sbin/wpa_supplicant -i wlan0 -D nl80211 -c /etc/wpa_supplicant.conf -O /run/wpa_supplicant
-ExecStartPost=/bin/sh -c 'for i in $(seq 1 6); do /sbin/udhcpc -i wlan0 -n -q -t 3 -T 2 >/dev/null 2>&1 && break; sleep 3; done'
+ExecStartPost=/opt/flixcli/scripts/wlan_static.sh
 Restart=always
 RestartSec=10
 

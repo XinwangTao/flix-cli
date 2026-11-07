@@ -31,3 +31,26 @@ sudo systemctl disable --now wifi-provision           # 配好网后关掉，改
 - 板载 QCA1023 驱动不支持 802.11w(PMF)，**强制 PMF 的企业 AP 连不上**；
   手机热点、家宽路由、Windows 热点这类不强制 PMF 的都能连。
 - AP 与 STA 不能同时用同一个网卡：切过去之后配网热点就没了，失败会自己回来。
+
+## 固定 IP
+
+三处地址都能固定，互不冲突：
+
+| 网卡/模式 | 怎么固定 | 默认值 |
+|---|---|---|
+| wlan0 连固定网（STA） | `/etc/relaydesk/wlan.conf` 里写 `STATIC=1` + `IP`/`GW`/`DNS`，`wifi-sta.service` 启动时由 `scripts/wlan_static.sh` 应用；不配就回退 DHCP | DHCP |
+| wlan0 配网热点（AP） | 脚本第三个参数或默认值 | `10.42.0.1` |
+| eth0（网线） | NetworkManager 连接里的静态地址 | `192.168.137.162`（PC 的 ICS 侧） |
+
+示例：Mac 用手机热点调试板子，热点网段通常是 `192.168.43.0/24`：
+
+```ini
+# /etc/relaydesk/wlan.conf
+STATIC=1
+IP=192.168.43.50/24
+GW=192.168.43.1
+DNS=192.168.43.1
+```
+
+改完 `systemctl restart wifi-sta` 生效；要回 DHCP 把 `STATIC` 改成 `0` 或删掉这几行。
+mDNS 名 `qcm6490-idp.local` 仍然可用，所以固定 IP 主要是方便记和写进脚本。
