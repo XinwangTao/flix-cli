@@ -48,6 +48,7 @@
     "max_comment_chars": 2000,
     "max_output_chars": 8000,
     "untrusted_disallowed": "Read,Write,Edit,MultiEdit,Bash,BashOutput,KillShell,Glob,Grep,LS,NotebookRead,NotebookEdit,WebFetch,WebSearch,Task,Skill,SlashCommand",
-    "dangerous_tools": "Bash,Write,Edit,MultiEdit,WebFetch,WebSearch,Task,NotebookEdit"
+    "dangerous_tools": "Bash,Write,Edit,MultiEdit,WebFetch,WebSearch,Task,NotebookEdit",
+    "max_runs_per_day": 120
   }
 }
