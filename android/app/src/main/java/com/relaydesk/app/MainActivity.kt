@@ -2014,6 +2014,12 @@ class MainActivity : Activity() {
             val outgoing = msg.optString("from") == fingerprint
             val wrap = convertView as? FrameLayout ?: FrameLayout(this@MainActivity)
             wrap.removeAllViews()
+            // Long-press anywhere on the row, not only the painted bubble:
+            // the menu (copy / open / retry / delete) is the row's action.
+            wrap.setOnLongClickListener {
+                showMessageMenu(msg)
+                true
+            }
             val failed = msg.optInt("status") == 2
             if (msg.optInt("type") != Wire.TYPE_TEXT &&
                 Media.isImage(msg.optString("fileName")) &&
@@ -2451,15 +2457,21 @@ class MainActivity : Activity() {
         val imageMsg = !isText && Media.isImage(msg.optString("fileName"))
         val labels = mutableListOf<String>()
         val actions = mutableListOf<() -> Unit>()
-        if (isText) {
-            labels += "复制文字"
-            actions += { copyText(msg.optString("text")) }
-        } else if (imageMsg && hasPath) {
+        val copyValue = if (isText)
+            msg.optString("text").ifEmpty { msg.optString("content") }
+        else msg.optString("filePath").ifEmpty { msg.optString("fileName") }
+        if (copyValue.isNotEmpty()) {
+            labels += if (isText) "复制文字"
+            else if (msg.optString("filePath").isNotEmpty()) "复制路径"
+            else "复制文件名"
+            actions += { copyText(copyValue) }
+        }
+        if (!isText && imageMsg && hasPath) {
             labels += "查看大图"
             actions += { openImagePreview(msg) }
             labels += "保存到相册"
             actions += { saveImageToDownloads(msg) }
-        } else if (hasPath) {
+        } else if (!isText && hasPath) {
             labels += "打开文件"
             actions += { openFile(msg.optString("filePath")) }
             labels += "另存为…"

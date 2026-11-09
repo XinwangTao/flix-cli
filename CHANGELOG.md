@@ -9,6 +9,7 @@
 - Android 液态玻璃界面：全屏玉青/蓝紫氛围光，玻璃头部/标签/卡片/输入栏，渐变头像与沉浸系统栏。
 
 ### 修复
+- Android：消息长按现在整行响应；文字消息菜单可复制正文，文件消息可复制路径/文件名。
 - Android：前台服务改为 `connectedDevice` 类型，并持 partial wake lock + HIGH_PERF Wi-Fi 锁；
   关屏 45s 后 PC→平板文本/文件仍可送达（`relaydesk-bg-file.txt` 32B 落盘）。
 - Android：文件接收在 `MediaStore.openOutputStream()` 返回 null（Android 17/HyperOS）时改用
