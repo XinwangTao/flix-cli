@@ -190,16 +190,16 @@ JSON
 |---|---|---|
 | 仓库协作者（OWNER/MEMBER/COLLABORATOR） | 允许 `Read,Grep,Glob` | 可查仓库代码，质量更高 |
 | 其他人 | `--disallowedTools` 显式禁用整套工具 | 只能基于正文回答，读不到任何文件 |
+| 非协作者的 `@claude` 追问 | 不调用模型 | 直接回一句固定说明，避免刷额度 |
 
 所有调用都额外加 `--restricted --strict-mcp-config --bare`：
 文件工具被**限制在工作目录内**（实测读不到 `C:\Windows\win.ini`）、忽略仓库自带的
 `.claude/settings.json`、不加载 MCP；`--bare` 还会跳过 CLAUDE.md 自动发现（实测：
 PR 里塞一个 `CLAUDE.md` 会让内容进入评审上下文，加 `--bare` 后不会）。
 
-另有一道**按天成本上限**（`reply.max_runs_per_day`，默认 120）：当天本工作流运行次数
-超过上限就直接跳过，防止公开仓库被刷额度。权限策略一律从 `main` 读取，取不到就失败，
-不回落到检出目录（避免 PR 用自身内容决定自身权限）。
-| 非协作者的 `@claude` 追问 | 不调用模型 | 直接回一句固定说明，避免刷额度 |
+**按天成本上限**（`reply.max_runs_per_day`，默认 120）只约束**外部来源**的 issue 分诊：
+既防刷额度，又不会把维护者自己挡在门外（协作者与 PR 评审不计入）。
+权限策略一律从 `main` 读取，取不到就失败，不回落到检出目录。
 
 判定侧（`gh-bot-approve.yml`）的硬规则：
 

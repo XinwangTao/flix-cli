@@ -86,16 +86,21 @@ jobs:
           $maxBody = if ($p.max_issue_body_chars) { [int]$p.max_issue_body_chars } else { 8000 }
           $trustedList = if ($p.trusted_associations) { $p.trusted_associations } else { @('OWNER','MEMBER','COLLABORATOR') }
 
-          # 全局预算：今天本工作流的运行次数超过上限就跳过，防止被刷成本（按天统计，避免时区解析问题）
-          $cap = if ($p.max_runs_per_day) { [int]$p.max_runs_per_day } else { 120 }
-          try {
+          $trusted = $trustedList -contains $env:ASSOC
+
+          # 成本上限只约束外部来源：既防刷额度，又不会把维护者自己挡在门外
+          if (-not $trusted) {
+            $cap = if ($p.max_runs_per_day) { [int]$p.max_runs_per_day } else { 120 }
             $since = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')
             $n = gh api "repos/$env:GITHUB_REPOSITORY/actions/workflows/gh-bot-reply.yml/runs?created=%3E%3D$since&per_page=1" --jq '.total_count' 2>$null
-            if ([int]$n -gt $cap) { Write-Host "今日已运行 $n 次，超过上限 $cap，跳过"; exit 0 }
-          } catch { Write-Host "预算检查失败，按未超限处理" }
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($n)) {
+              Write-Warning "预算计数失败（exit=$LASTEXITCODE），本次按未超限继续"
+            } elseif ([int]$n -gt $cap) {
+              Write-Host "今日已运行 $n 次，超过上限 $cap，跳过"; exit 0
+            }
+          }
           if ($env:ISSUE_BODY.Length -gt $maxBody) { Write-Host "正文过长，跳过"; exit 0 }
 
-          $trusted = $trustedList -contains $env:ASSOC
           if ($trusted) { $toolArgs = @('--allowedTools', $tools) }
           else { $toolArgs = @('--disallowedTools', $noTool) }
           Write-Host "作者关系=$($env:ASSOC) 是否可信=$trusted"
@@ -245,14 +250,6 @@ jobs:
           $maxCmt = if ($p.max_comment_chars) { [int]$p.max_comment_chars } else { 2000 }
           $trustedList = if ($p.trusted_associations) { $p.trusted_associations } else { @('OWNER','MEMBER','COLLABORATOR') }
 
-          # 全局预算：今天本工作流的运行次数超过上限就跳过，防止被刷成本（按天统计，避免时区解析问题）
-          $cap = if ($p.max_runs_per_day) { [int]$p.max_runs_per_day } else { 120 }
-          try {
-            $since = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')
-            $n = gh api "repos/$env:GITHUB_REPOSITORY/actions/workflows/gh-bot-reply.yml/runs?created=%3E%3D$since&per_page=1" --jq '.total_count' 2>$null
-            if ([int]$n -gt $cap) { Write-Host "今日已运行 $n 次，超过上限 $cap，跳过"; exit 0 }
-          } catch { Write-Host "预算检查失败，按未超限处理" }
-          $trusted = $trustedList -contains $env:ASSOC
           $danger = if ($p.dangerous_tools) { $p.dangerous_tools } else { 'Bash,Write,Edit,MultiEdit,WebFetch,WebSearch,Task,NotebookEdit' }
 
           # 非协作者不消耗模型额度：公开仓库上任何人刷 @claude 都会变成成本放大器

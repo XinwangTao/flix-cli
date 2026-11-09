@@ -56,7 +56,7 @@ jobs:
           script: |
             const { owner, repo } = context.repo;
             const defaultBranch = context.payload.repository?.default_branch || 'main';
-            const AUTO_LABEL = 'gh-bot-needs-human';
+            let AUTO_LABEL = 'gh-bot-needs-human';
             const MARK = '<!-- gh-bot:blocked -->';
 
             // ── 0. policy 一律从默认分支读（workflow_dispatch 可选任意 ref，不能信检出目录）
@@ -77,6 +77,7 @@ jobs:
               core.setFailed(`policy 缺必需字段: ${missing.join(', ')}`);
               return;
             }
+            if (policy.auto_block_label) AUTO_LABEL = policy.auto_block_label;
             if (!policy.enabled) { core.notice('auto_approve.enabled=false，跳过'); return; }
 
             // ── 1. 定位 PR ────────────────────────────────
@@ -133,11 +134,14 @@ jobs:
                 owner, repo, pull_number: prNumber, per_page: 100,
               });
               const last = commits[commits.length - 1];
-              const lastLogin = last?.author?.login || last?.commit?.author?.name;
-              if (lastLogin && !authors.includes(String(lastLogin).toLowerCase())) {
+              const lastLogin = last?.author?.login;   // 只认 GitHub 账号，不认 git 里可随意填的 author.name
+              if (!lastLogin) reasons.push('取不到最后提交的 GitHub 账号，无法确认推送者');
+              else if (!authors.includes(String(lastLogin).toLowerCase())) {
                 reasons.push(`最后提交作者 ${lastLogin} 不在白名单`);
               }
-            } catch (e) { core.warning(`查提交失败: ${e.message}`); }
+            } catch (e) {
+              reasons.push(`查提交失败，无法确认推送者: ${e.message}`);
+            }
 
             const labels = pr.labels.map(l => l.name.toLowerCase());
             const humanBlocks = (policy.blocking_labels || [])
@@ -164,8 +168,11 @@ jobs:
               const { data: tree } = await github.rest.git.getTree({
                 owner, repo, tree_sha: pr.head.sha, recursive: 'true',
               });
+              if (tree.truncated) reasons.push('文件树被截断，无法确认符号链接/子模块');
               for (const e of tree.tree || []) modeByPath.set(e.path, e.mode);
-            } catch (e) { core.warning(`取文件树失败，按无模式信息处理: ${e.message}`); }
+            } catch (e) {
+              reasons.push(`取文件树失败，无法确认符号链接/子模块: ${e.message}`);
+            }
 
             // 简易 glob：**/ 为零到多级目录，* 不跨目录；用 s 让 . 也匹配换行
             const globToRe = (pattern) => {
