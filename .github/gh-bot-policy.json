@@ -1,0 +1,35 @@
+{
+  "_comment": "GitHub Bot 放行策略。改这个文件即改行为，不需要动 workflow。serve 于 .github/workflows/gh-bot-approve.yml。",
+  "version": 1,
+  "auto_approve": {
+    "enabled": true,
+    "authors": ["dependabot[bot]", "XinwangTao"],
+    "paths": [
+      "docs/**",
+      "**/*.md",
+      "tests/**",
+      "requirements*.txt",
+      "poetry.lock",
+      "uv.lock",
+      "package-lock.json",
+      "yarn.lock"
+    ],
+    "blocked_paths": [
+      ".github/workflows/**",
+      "src/**",
+      "scripts/**",
+      "pyproject.toml",
+      "**/*.spec"
+    ],
+    "max_files": 25,
+    "max_additions": 600,
+    "blocking_labels": ["needs-human"],
+    "require_ci": true,
+    "ci_workflow_name": "CI"
+  },
+  "reply": {
+    "model": "ccs-claude-openai--deepseek-v4.1-flash",
+    "max_issue_body_chars": 8000,
+    "allowed_tools": "Read,Grep,Glob"
+  }
+}
