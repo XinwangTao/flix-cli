@@ -30,14 +30,27 @@ jobs:
     # 纯 GitHub API 调用，不碰本机代理，跑官方 runner 即可
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      # 配了 GitHub App 凭据就走独立身份；没配则退回降级评论
+      HAS_BOT_APP: ${{ secrets.BOT_APP_ID != '' }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: 换取 bot 身份 token
+        id: bot
+        if: env.HAS_BOT_APP == 'true'
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
 
       - name: 规则判定
         uses: actions/github-script@v7
         with:
-          # 优先用独立机器人身份的 PAT；没有就退回 github.token（批自己 PR 不生效）
-          github-token: ${{ secrets.GH_BOT_TOKEN || github.token }}
+          # 优先级：App 身份 → 手配 PAT → 仓库自带 token（最后这个不能批准）
+          github-token: ${{ steps.bot.outputs.token || secrets.GH_BOT_TOKEN || github.token }}
           script: |
             const fs = require('fs');
             const policy = JSON.parse(
