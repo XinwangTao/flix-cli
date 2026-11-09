@@ -218,7 +218,7 @@ jobs:
               const status = e.status || (e.response && e.response.status) || 0;
               const permissionIssue =
                 status === 403 ||
-                /not permitted (to create or )?approve/i.test(msg) ||
+                /not permitted .*approve/i.test(msg) ||
                 /cannot approve your own/i.test(msg) ||
                 /resource not accessible by integration/i.test(msg) ||
                 /status:?\s*403/i.test(msg);
