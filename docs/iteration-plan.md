@@ -10,16 +10,15 @@ Android 改动必须跑 `F:/projects/_agent-runs/android-deploy.sh <apk> com.rel
 来源：`fix/relaydesk-hardening` 中尚未进主干的修复（已核对的等价移植见文末）。均为防御性校验/
 限流，不改状态机与对外契约语义，按 L0 处理。
 
-1. discovery 输入/输出校验：`parse_datagram` 拒绝非字符串指纹、非法端口；`build_announce`
-   截断 alias/deviceModel/os 并按 1–65535 兜底（移植 fb4c5f7/9d83530/8d685c0/7e14f07）。
-2. Web 上传按 `max_receive_bytes` 拒绝超限文件（移植 8d4bd37）。
-3. `/healthz` 在 update/clipboard 探测异常时仍返回 200（移植 e7def48）。
-4. `daemon.py` 校验 `--device-port`/`--api-port` 1–65535、`--web-port` 0–65535（移植 2d66d4e）。
-5. 自动更新：源码包下载上限 64 MiB（移植 6767cb4）。
-6. 自动更新：按运行架构选择 release 资产（移植 ec73373；当前只按平台匹配）。
-7. 自动更新：systemd 服务重启校验与 `execv` 回退（移植 f3415e9）。
-8. 部署脚本：本地/远端私有暂存包 + healthz 轮询 30s（移植 ccf8093）。
-9. Web 上传临时文件唯一化：并发同名上传不再共用 `<name>.flixdownload`（L0，非安卓单测）。
+1. Web 上传按 `max_receive_bytes` 拒绝超限文件（移植 8d4bd37）。
+2. `/healthz` 在 update/clipboard 探测异常时仍返回 200（移植 e7def48）。
+3. `daemon.py` 校验 `--device-port`/`--api-port` 1–65535、`--web-port` 0–65535（移植 2d66d4e）。
+4. 自动更新：源码包下载上限 64 MiB（移植 6767cb4）。
+5. 自动更新：按运行架构选择 release 资产（移植 ec73373；当前只按平台匹配）。
+6. 自动更新：systemd 服务重启校验与 `execv` 回退（移植 f3415e9）。
+7. 部署脚本：本地/远端私有暂存包 + healthz 轮询 30s（移植 ccf8093）。
+8. Web 上传临时文件唯一化：并发同名上传不再共用 `<name>.flixdownload`（L0，非安卓单测）。
+9. `EndpointTracker` 定期清理过期空指纹（移植 49c205d；当前只在 remember 时清自己的行）。
 10. 板子重复部署清理已删除模块（L1，先补 Archify 图并确认；并行任务已备
     `flix_board_deploy_workflow` 草稿）。
 11. Web 同名上传自动改名（L1，先补图确认）。
@@ -33,13 +32,14 @@ Android 改动必须跑 `F:/projects/_agent-runs/android-deploy.sh <apk> com.rel
 
 ## 第 20 轮状态
 
-- 本地 `main` 38bfdd1，领先 `origin/main` 38 个提交（v2.4.0 合并 + 本地迭代，均未推送）。
-- 测试：363 passed + 111 subtests（e2e 与缺 hypothesis 的 fuzz 除外）。
+- 本地 `main` 领先 `origin/main`，本地迭代均未推送。
+- 测试：376 passed + 125 subtests（e2e 与缺 hypothesis 的 fuzz 除外）。
 - 手机：PKJ110 运行 2.4.6 (9)；截图 `device-shot-copy-menu.png`、`device-shot-copy-pasted.png`、
   `device-shot-final.png`（均在 `F:/projects/_agent-runs/`）。第 16–20 轮无 Android 改动，无需重装。
 - 已完成：液态玻璃 UI、长按复制、文件 `openFileDescriptor` fallback、8891 通道自愈、关屏保活、
   自动更新解包防穿越/最高版本/per_page 100/404 回退/token/源码版本校验、Web 设备刷新/上传详情/
-  群页面错误、`/send` 失败保留输入与 JSON 502、群聊网页同毫秒消息按 id 去重。
+  群页面错误、`/send` 失败保留输入与 JSON 502、群聊网页同毫秒消息按 id 去重、发现报文
+  指纹/端口/显示字段边界校验。
 
 ### hardening 已核对等价（无需再移植）
 

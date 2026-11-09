@@ -28,11 +28,29 @@ from . import (ANNOUNCE_BURST, DEVICE_PORT, MULTICAST_GROUP, local_ipv4_table,
 from .presence import PRESENCE_TTL_MS
 
 
+_TEXT_FIELD_LIMITS = {"alias": 128, "deviceModel": 64, "os": 32}
+_MAX_FINGERPRINT_CHARS = 128
+
+
+def _bounded_ident(ident: dict, key: str, default: str) -> str:
+    value = ident.get(key, default)
+    if value is None:
+        value = default
+    return (value if isinstance(value, str) else str(value))[
+        :_TEXT_FIELD_LIMITS[key]]
+
+
 def build_announce(ident: dict, port: int = DEVICE_PORT, app_version: int = 1) -> bytes:
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        port = DEVICE_PORT
+    if not 1 <= port <= 65535:
+        port = DEVICE_PORT
     inner = {
         "deviceModal": {
-            "alias": ident.get("alias", ""),
-            "deviceModel": ident.get("deviceModel", "Windows"),
+            "alias": _bounded_ident(ident, "alias", ""),
+            "deviceModel": _bounded_ident(ident, "deviceModel", "Windows"),
             "deviceType": ident.get("deviceType", "desktop"),
             "fingerprint": ident.get("fingerprint", ""),
             "port": port,
@@ -40,7 +58,7 @@ def build_announce(ident: dict, port: int = DEVICE_PORT, app_version: int = 1) -
             "ip": "",
             "host": "",
             "from": "",
-            "os": ident.get("os", "windows"),
+            "os": _bounded_ident(ident, "os", "windows"),
         }
     }
     return json.dumps(json.dumps(inner, separators=(",", ":")),
@@ -54,14 +72,44 @@ def parse_datagram(data: bytes, src_ip: str) -> dict | None:
         if isinstance(outer, str):
             outer = json.loads(outer)
         modal = outer.get("deviceModal") if isinstance(outer, dict) else None
-        if not isinstance(modal, dict) or not modal.get("fingerprint"):
+        if not isinstance(modal, dict):
+            return None
+        fingerprint = modal.get("fingerprint")
+        if not isinstance(fingerprint, str):
+            return None
+        fingerprint = fingerprint.strip()
+        if not fingerprint or len(fingerprint) > _MAX_FINGERPRINT_CHARS:
             return None
         dev = dict(modal)
+        dev["fingerprint"] = fingerprint
+        # Bound peer-controlled display strings: an alias close to the UDP
+        # limit would otherwise bloat sqlite, logs and every GUI/web refresh.
+        for key, limit in _TEXT_FIELD_LIMITS.items():
+            if key in dev:
+                value = dev[key]
+                if value is None:
+                    dev[key] = ""
+                else:
+                    dev[key] = (value if isinstance(value, str)
+                                else str(value))[:limit]
+        # A bad port must not reach the device table or routing: non-numeric,
+        # zero and out-of-range values all mean "use the protocol default".
+        raw_port = dev.get("port")
+        if isinstance(raw_port, bool):
+            port = DEVICE_PORT
+        else:
+            try:
+                port = int(raw_port or DEVICE_PORT)
+            except (TypeError, ValueError):
+                port = DEVICE_PORT
+        if not 1 <= port <= 65535:
+            port = DEVICE_PORT
+        dev["port"] = port
         if not dev.get("ip"):
             dev["ip"] = src_ip
         dev["source"] = src_ip
         return dev
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, TypeError):
         return None
 
 
