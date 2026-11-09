@@ -9,8 +9,10 @@
 #   和 D:\GitHubBot\bot-app.pem）。而 issue/评论正文完全由外部人控制。
 #   所以这里的原则是「能力必须跟着信任走」：
 #     - 仓库协作者（OWNER/MEMBER/COLLABORATOR）：允许 Read/Grep/Glob 查仓库
-#     - 其他人：显式 --disallowedTools，拿不到任何文件读取能力
-#   另外 mention 只对协作者自动回答，避免公开仓库被用来刷额度。
+#     - 其他人：显式禁用整套工具（实测 headless 下 Read 默认允许，补集式黑名单不安全）
+#
+# 配置容错：policy 文件从检出目录读，而 pr-review 刻意检出 base 分支，
+# 所以**每次读字段都必须带默认值**，否则新旧版本不同步时会静默出空内容。
 name: GH Bot · 回复与评审
 
 on:
@@ -67,14 +69,19 @@ jobs:
           $OutputEncoding = [Console]::OutputEncoding = [Text.Encoding]::UTF8
           if (-not $env:CLAUDE_EXE) { throw "未设置仓库变量 CLAUDE_EXE，见 docs/GH-BOT.md 2.5" }
 
-          $policy = (Get-Content .github/gh-bot-policy.json -Raw -Encoding UTF8 | ConvertFrom-Json).reply
-          if ($env:ISSUE_BODY.Length -gt [int]$policy.max_issue_body_chars) {
-            Write-Host "正文过长，跳过"; exit 0
-          }
+          $p = (Get-Content .github/gh-bot-policy.json -Raw -Encoding UTF8 | ConvertFrom-Json).reply
+          $model  = if ($p.model)  { $p.model }  else { 'ccs-claude-openai--deepseek-v4.1-flash' }
+          $tools  = if ($p.tools)  { $p.tools }  else { 'Read,Grep,Glob' }
+          $noTool = if ($p.untrusted_disallowed) { $p.untrusted_disallowed } else { 'Read,Write,Edit,MultiEdit,Bash,BashOutput,KillShell,Glob,Grep,LS,WebFetch,WebSearch,Task,NotebookEdit' }
+          $maxOut = if ($p.max_output_chars) { [int]$p.max_output_chars } else { 8000 }
+          $maxBody = if ($p.max_issue_body_chars) { [int]$p.max_issue_body_chars } else { 8000 }
+          $trustedList = if ($p.trusted_associations) { $p.trusted_associations } else { @('OWNER','MEMBER','COLLABORATOR') }
 
-          $trusted = $policy.trusted_associations -contains $env:ASSOC
-          if ($trusted) { $toolArgs = @('--allowedTools', $policy.tools) }
-          else { $toolArgs = @('--disallowedTools', $policy.untrusted_disallowed) }
+          if ($env:ISSUE_BODY.Length -gt $maxBody) { Write-Host "正文过长，跳过"; exit 0 }
+
+          $trusted = $trustedList -contains $env:ASSOC
+          if ($trusted) { $toolArgs = @('--allowedTools', $tools) }
+          else { $toolArgs = @('--disallowedTools', $noTool) }
           Write-Host "作者关系=$($env:ASSOC) 是否可信=$trusted"
 
           $prompt = @"
@@ -101,11 +108,9 @@ jobs:
           $($env:ISSUE_BODY)
           "@
 
-          $answer = & $env:CLAUDE_EXE -p $prompt @toolArgs --model $policy.model 2>$null | Out-String
+          $answer = & $env:CLAUDE_EXE -p $prompt @toolArgs --model $model 2>$null | Out-String
           if ([string]::IsNullOrWhiteSpace($answer)) { throw "Claude 没有返回内容" }
-          if ($answer.Length -gt [int]$policy.max_output_chars) {
-            $answer = $answer.Substring(0, [int]$policy.max_output_chars) + "`n`n…（已截断）"
-          }
+          if ($answer.Length -gt $maxOut) { $answer = $answer.Substring(0, $maxOut) + "`n`n…（已截断）" }
           $answer = "$env:BOT_BANNER`n`n$answer"
 
           $file = Join-Path $env:RUNNER_TEMP "reply.md"
@@ -125,7 +130,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # 检出 base 分支：PR head 里的 .claude/settings.json 可能试图扩大评审进程权限
+          # 检出 base 分支：PR head 里的 .claude/settings.json 可能扩大评审进程权限
           ref: ${{ github.event.pull_request.base.sha }}
 
       - name: Claude 评审
@@ -138,11 +143,18 @@ jobs:
           $OutputEncoding = [Console]::OutputEncoding = [Text.Encoding]::UTF8
           if (-not $env:CLAUDE_EXE) { throw "未设置仓库变量 CLAUDE_EXE，见 docs/GH-BOT.md 2.5" }
 
-          $policy = (Get-Content .github/gh-bot-policy.json -Raw -Encoding UTF8 | ConvertFrom-Json).reply
-          $trusted = $policy.trusted_associations -contains $env:ASSOC
-          # 即使作者可信也不给写/执行能力：PR 分支可能自带 .claude/settings.json 试图扩权
-          if ($trusted) { $toolArgs = @('--allowedTools', $policy.tools, '--disallowedTools', $policy.dangerous_tools) }
-          else { $toolArgs = @('--disallowedTools', $policy.untrusted_disallowed) }
+          $p = (Get-Content .github/gh-bot-policy.json -Raw -Encoding UTF8 | ConvertFrom-Json).reply
+          $model  = if ($p.model)  { $p.model }  else { 'ccs-claude-openai--deepseek-v4.1-flash' }
+          $tools  = if ($p.tools)  { $p.tools }  else { 'Read,Grep,Glob' }
+          $noTool = if ($p.untrusted_disallowed) { $p.untrusted_disallowed } else { 'Read,Write,Edit,MultiEdit,Bash,BashOutput,KillShell,Glob,Grep,LS,WebFetch,WebSearch,Task,NotebookEdit' }
+          $danger = if ($p.dangerous_tools) { $p.dangerous_tools } else { 'Bash,Write,Edit,MultiEdit,WebFetch,WebSearch,Task,NotebookEdit' }
+          $maxOut = if ($p.max_output_chars) { [int]$p.max_output_chars } else { 8000 }
+          $trustedList = if ($p.trusted_associations) { $p.trusted_associations } else { @('OWNER','MEMBER','COLLABORATOR') }
+
+          $trusted = $trustedList -contains $env:ASSOC
+          # 即使作者可信也不给写/执行能力
+          if ($trusted) { $toolArgs = @('--allowedTools', $tools, '--disallowedTools', $danger) }
+          else { $toolArgs = @('--disallowedTools', $noTool) }
 
           $diff = gh pr diff $env:PR_NUMBER --repo $env:GITHUB_REPOSITORY 2>$null | Out-String
           if ([string]::IsNullOrWhiteSpace($diff)) { throw "取不到 PR diff，检查 gh 认证或权限" }
@@ -173,11 +185,9 @@ jobs:
           $diff
           "@
 
-          $answer = & $env:CLAUDE_EXE -p $prompt @toolArgs --model $policy.model 2>$null | Out-String
+          $answer = & $env:CLAUDE_EXE -p $prompt @toolArgs --model $model 2>$null | Out-String
           if ([string]::IsNullOrWhiteSpace($answer)) { throw "Claude 没有返回内容" }
-          if ($answer.Length -gt [int]$policy.max_output_chars) {
-            $answer = $answer.Substring(0, [int]$policy.max_output_chars) + "`n`n…（已截断）"
-          }
+          if ($answer.Length -gt $maxOut) { $answer = $answer.Substring(0, $maxOut) + "`n`n…（已截断）" }
           $answer = "$env:BOT_BANNER`n`n$answer"
 
           $file = Join-Path $env:RUNNER_TEMP "review.md"
@@ -207,13 +217,19 @@ jobs:
           $OutputEncoding = [Console]::OutputEncoding = [Text.Encoding]::UTF8
           if (-not $env:CLAUDE_EXE) { throw "未设置仓库变量 CLAUDE_EXE，见 docs/GH-BOT.md 2.5" }
 
-          $policy = (Get-Content .github/gh-bot-policy.json -Raw -Encoding UTF8 | ConvertFrom-Json).reply
-          $trusted = $policy.trusted_associations -contains $env:ASSOC
+          $p = (Get-Content .github/gh-bot-policy.json -Raw -Encoding UTF8 | ConvertFrom-Json).reply
+          $model  = if ($p.model)  { $p.model }  else { 'ccs-claude-openai--deepseek-v4.1-flash' }
+          $tools  = if ($p.tools)  { $p.tools }  else { 'Read,Grep,Glob' }
+          $maxOut = if ($p.max_output_chars) { [int]$p.max_output_chars } else { 8000 }
+          $maxCmt = if ($p.max_comment_chars) { [int]$p.max_comment_chars } else { 2000 }
+          $trustedList = if ($p.trusted_associations) { $p.trusted_associations } else { @('OWNER','MEMBER','COLLABORATOR') }
+
+          $trusted = $trustedList -contains $env:ASSOC
 
           # 非协作者不消耗模型额度：公开仓库上任何人刷 @claude 都会变成成本放大器
           if (-not $trusted) {
             $answer = "自动回答目前只对仓库协作者开放，你的提问维护者会看到。"
-          } elseif ($env:COMMENT_BODY.Length -gt [int]$policy.max_comment_chars) {
+          } elseif ($env:COMMENT_BODY.Length -gt $maxCmt) {
             $answer = "评论过长，已跳过自动回答。"
           } else {
             $prompt = @"
@@ -230,11 +246,9 @@ jobs:
             $($env:COMMENT_BODY)
             "@
 
-            $answer = & $env:CLAUDE_EXE -p $prompt --allowedTools $policy.tools --model $policy.model 2>$null | Out-String
+            $answer = & $env:CLAUDE_EXE -p $prompt --allowedTools $tools --model $model 2>$null | Out-String
             if ([string]::IsNullOrWhiteSpace($answer)) { throw "Claude 没有返回内容" }
-            if ($answer.Length -gt [int]$policy.max_output_chars) {
-              $answer = $answer.Substring(0, [int]$policy.max_output_chars) + "`n`n…（已截断）"
-            }
+            if ($answer.Length -gt $maxOut) { $answer = $answer.Substring(0, $maxOut) + "`n`n…（已截断）" }
           }
 
           $answer = "$env:BOT_BANNER`n`n$answer"
