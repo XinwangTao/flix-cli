@@ -40,6 +40,17 @@ gh-bot
 
 装好后把 runner 服务设成开机自启，否则关机后 job 会一直排队。
 
+> **必须用普通用户身份运行，不能用 LocalSystem / SYSTEM。**
+> 官方 action 是 composite + bash，而 Git Bash 在 LocalSystem 下会直接报
+> `WSL_E_LOCAL_SYSTEM_NOT_SUPPORTED`，任务秒失败。本机的做法是用户级计划任务：
+
+```powershell
+schtasks /Create /TN "GitHubActionsRunner-flix-cli" `
+  /TR "D:\actions-runner-flix-cli\start-runner.cmd" /SC ONLOGON /RL HIGHEST /F
+```
+
+（`start-runner.cmd` 内容只有 `cd /d "%~dp0"` + `"%~dp0run.cmd"`。）
+
 ### 2. 确认代理可达
 
 在 runner 所在机器上跑：
