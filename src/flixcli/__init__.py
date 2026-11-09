@@ -1,11 +1,32 @@
 """flixcli package: interoperable reimplementation of the Flix LAN protocol."""
 
+import ipaddress
 import os
 import socket
 import struct
 import sys
 
-__version__ = "2.3.1"   # must match pyproject.toml (tests/test_version.py guards it)
+try:  # single source of truth: the installed package metadata
+    from importlib.metadata import PackageNotFoundError, version as _dist_version
+    try:
+        __version__ = _dist_version("flixcli")
+    except PackageNotFoundError:  # running from a source tree without install
+        __version__ = "0.0.0+source"
+except ImportError:  # pragma: no cover - Python < 3.8
+    __version__ = "0.0.0+source"
+
+# A checkout that was never `pip install`ed still has to report the version it
+# ships as: `flix --version`, `flix self` and MCP serverInfo surface this, and
+# tests/test_version.py holds it to pyproject.toml.
+if __version__ in ("0.0.0+source", "0.1.0"):
+    try:
+        import tomllib as _toml
+        from pathlib import Path as _Path
+        _pyproject = _Path(__file__).resolve().parents[2] / "pyproject.toml"
+        __version__ = str(_toml.loads(
+            _pyproject.read_text(encoding="utf-8"))["project"]["version"])
+    except Exception:  # pragma: no cover - best effort only
+        pass
 
 MULTICAST_GROUP = "224.0.0.168"      # [IDA pending: DiscoverManager] / [RT capture]
 DEVICE_PORT = 8891                    # TCP+UDP device channel
@@ -13,9 +34,50 @@ WEB_PORT_DEFAULT = 8892
 DESKTOP_API_PORT = 8898
 ANNOUNCE_BURST = 11                   # [RT capture_discovery.txt]
 
+# Address space that can carry a LAN announce.  VPN/tunnel adapters that serve
+# this space are not LAN links: Clash TUN hands out 198.18.0.1/30 (benchmark
+# range), Tailscale/CGNAT uses 100.64/10, and APIPA/link-local never has peers.
+_VIRTUAL_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
+    "198.18.0.0/15",   # RFC 2544 benchmarking / Clash TUN, Surge, sing-box
+    "100.64.0.0/10",   # RFC 6598 CGNAT / Tailscale
+    "169.254.0.0/16",  # APIPA
+    "0.0.0.0/8",
+    "127.0.0.0/8",
+    "224.0.0.0/4",
+    "240.0.0.0/4",
+))
 
-def _win_ipv4_table() -> list[tuple[str, str]]:
-    """[(address, netmask)] from iphlpapi GetIpAddrTable (empty off-Windows)."""
+_local_ip_override = ""
+
+
+def set_local_ip_override(ip: str) -> None:
+    """Pin the advertised local IP (daemon ``--multicast-if`` / netcheck)."""
+    global _local_ip_override
+    _local_ip_override = ip.strip() if isinstance(ip, str) else ""
+
+
+def is_port_text(text: str) -> bool:
+    """True only for a non-empty ASCII run of digits.
+
+    str.isdigit() also accepts superscripts and other Unicode numerics
+    (``'²'.isdigit()`` is True) that ``int()`` then rejects, so it must never
+    guard a port conversion.
+    """
+    return isinstance(text, str) and bool(text) and text.isascii() and text.isdigit()
+
+
+def is_virtual_ip(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return True
+    return addr.is_loopback or addr.is_link_local or any(
+        addr in net for net in _VIRTUAL_NETWORKS)
+
+
+
+def _win_ipv4_rows() -> list[tuple[str, str, int]]:
+    """[(address, netmask, ifIndex)] from iphlpapi (empty off-Windows)."""
     if sys.platform != "win32":
         return []
     try:
@@ -44,10 +106,65 @@ def _win_ipv4_table() -> list[tuple[str, str]]:
         count = ctypes.cast(buf, ctypes.POINTER(wintypes.DWORD)).contents.value
         rows = ctypes.cast(ctypes.byref(buf, 4), ctypes.POINTER(_Row))
         return [(socket.inet_ntoa(struct.pack("<I", rows[i].dwAddr)),
-                 socket.inet_ntoa(struct.pack("<I", rows[i].dwMask)))
+                 socket.inet_ntoa(struct.pack("<I", rows[i].dwMask)),
+                 int(rows[i].dwIndex))
                 for i in range(count)]
     except Exception:  # noqa: BLE001 - best effort, fall back to the route trick
         return []
+
+
+def _win_ipv4_table() -> list[tuple[str, str]]:
+    """[(address, netmask)] from iphlpapi GetIpAddrTable (empty off-Windows)."""
+    return [(ip, mask) for ip, mask, _idx in _win_ipv4_rows()]
+
+
+def _gateway_ifindexes() -> set[int]:
+    """Interfaces that own a real default route (nextHop != 0.0.0.0).
+
+    On a multi-NIC Windows box the first "10." address is not necessarily the
+    LAN: Ethernet 3 here is 10.10.200.41 with no gateway, while the usable LAN
+    is 10.37.73.198/24 behind 10.37.73.254. Pick the one that can actually
+    route off-link. Point-to-point TUN routes usually carry nextHop 0 and are
+    excluded (they are also filtered by _usable).
+    """
+    if sys.platform != "win32":
+        return set()
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _Fwd(ctypes.Structure):
+            _fields_ = [
+                ("dwForwardDest", wintypes.DWORD),
+                ("dwForwardMask", wintypes.DWORD),
+                ("dwForwardPolicy", wintypes.DWORD),
+                ("dwForwardNextHop", wintypes.DWORD),
+                ("dwForwardIfIndex", wintypes.DWORD),
+                ("dwForwardType", wintypes.DWORD),
+                ("dwForwardProto", wintypes.DWORD),
+                ("dwForwardAge", wintypes.DWORD),
+                ("dwForwardNextHopAS", wintypes.DWORD),
+                ("dwForwardMetric1", wintypes.DWORD),
+                ("dwForwardMetric2", wintypes.DWORD),
+                ("dwForwardMetric3", wintypes.DWORD),
+                ("dwForwardMetric4", wintypes.DWORD),
+                ("dwForwardMetric5", wintypes.DWORD),
+            ]
+
+        fn = ctypes.windll.iphlpapi.GetIpForwardTable
+        size = wintypes.ULONG(0)
+        if fn(None, ctypes.byref(size), False) not in (0, 122):
+            return set()
+        buf = ctypes.create_string_buffer(size.value)
+        if fn(buf, ctypes.byref(size), False) != 0:
+            return set()
+        count = ctypes.cast(buf, ctypes.POINTER(wintypes.DWORD)).contents.value
+        rows = ctypes.cast(ctypes.byref(buf, 4), ctypes.POINTER(_Fwd))
+        return {int(rows[i].dwForwardIfIndex) for i in range(count)
+                if rows[i].dwForwardDest == 0
+                and rows[i].dwForwardNextHop != 0}
+    except Exception:  # noqa: BLE001
+        return set()
 
 
 def _routed_ip() -> str:
@@ -91,11 +208,18 @@ def local_ipv4s() -> list[str]:
 
 
 def _usable(ip: str, mask: str | None) -> bool:
-    if not ip or ip.startswith(("0.", "127.", "169.254.")):
+    if not ip:
         return False
-    # /32 host routes are VPN/virtual gateway adapters (e.g. vgate0); they win
-    # the multicast route on some hosts even though no peer shares that link.
-    return mask is None or mask != "255.255.255.255"
+    # Reject VPN/TUN/CGNAT space outright: Clash TUN's 198.18.0.1/30 wins the
+    # default route on this host yet has no LAN peers, so every multicast
+    # datagram sent "through" it is dropped.
+    if is_virtual_ip(ip):
+        return False
+    # /32 (and /31) host routes are VPN/virtual gateway adapters (e.g. vgate0);
+    # they win the multicast route even though no peer shares that link.
+    if mask in ("255.255.255.255", "255.255.255.254"):
+        return False
+    return True
 
 
 def _linux_ipv4_table() -> list[tuple[str, str]]:
@@ -149,10 +273,12 @@ def local_ipv4_table() -> list[tuple[str, str]]:
 def default_iface_ip() -> str:
     """LAN IPv4 to use for multicast join + send, best effort.
 
-    FLIX_MULTICAST_IF overrides. Otherwise prefer the interface the OS routes
-    through, but reject it when iphlpapi reports a /32 mask, then fall back to
-    the first private address with a real subnet mask.
+    ``set_local_ip_override`` / FLIX_MULTICAST_IF win. Otherwise prefer the
+    interface the OS routes through, rejecting virtual/VPN space and host
+    routes, then fall back to the first real private address.
     """
+    if _local_ip_override:
+        return _local_ip_override
     env = os.environ.get("FLIX_MULTICAST_IF", "").strip()
     if env:
         return env
@@ -161,10 +287,16 @@ def default_iface_ip() -> str:
     if _usable(routed, rows.get(routed)):
         return routed
     candidates = [ip for ip, mask in rows.items() if _usable(ip, mask)]
-    for prefix in ("192.168.", "10.", "172."):
-        for ip in candidates:
-            if ip.startswith(prefix):
-                return ip
+    # Prefer an interface that owns a real default route: on multi-NIC hosts
+    # the first "10." address may sit on an isolated switch with no gateway.
+    gateways = _gateway_ifindexes()
+    gateway_ips = [ip for ip, mask, idx in _win_ipv4_rows()
+                   if idx in gateways and _usable(ip, mask)]
+    for pool in (gateway_ips, candidates):
+        for prefix in ("192.168.", "10.", "172."):
+            for ip in pool:
+                if ip.startswith(prefix):
+                    return ip
     return candidates[0] if candidates else routed
 
 

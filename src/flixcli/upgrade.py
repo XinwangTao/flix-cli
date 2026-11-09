@@ -29,16 +29,43 @@ SCRIPT_TEMPLATE = r"""$ErrorActionPreference = 'Continue'
 $env:FLIX_UPGRADE_FRESH_ENV = '__FRESH__'
 $log = Join-Path $env:TEMP '__LOG__'
 function Note($m) { Add-Content -Path $log -Value ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $m) -Encoding UTF8 }
-$src = Join-Path $env:USERPROFILE 'Downloads\__SRC__'
-$dir = Join-Path $env:USERPROFILE 'Downloads\RelayDesk-v2.2.1-win64'
-if (-not (Test-Path (Join-Path $dir 'RelayDesk.exe'))) { $dir = Join-Path $env:USERPROFILE 'Downloads' }
-$dst = Join-Path $dir 'RelayDesk.exe'
-$backup = $dst + '.prev-__STAMP__'
-Note ('start src=' + $src + ' dst=' + $dst)
-if (-not (Test-Path $src)) { Note 'FAIL missing-src'; exit 1 }
 
+# The receiver writes uploads to its configured saveDir, which is not always
+# Downloads. Ask its prefs first, then fall back to Downloads.
+$srcName = '__SRC__'
+$saveDir = $null
+$prefsPath = Join-Path $env:APPDATA 'flixcli\shared_preferences.json'
+if (Test-Path $prefsPath) {
+    try {
+        $p = Get-Content $prefsPath -Raw | ConvertFrom-Json
+        if ($p.saveDir) { $saveDir = [string]$p.saveDir }
+    } catch { }
+}
+$src = $null
+foreach ($d in @($saveDir, (Join-Path $env:USERPROFILE 'Downloads'))) {
+    if ($d) { $c = Join-Path $d $srcName; if (Test-Path $c) { $src = $c; break } }
+}
+if (-not $src) { Note 'FAIL missing-src'; exit 1 }
+if ((Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash -ne '__SHA__') {
+    Note 'FAIL hash-mismatch'; exit 1
+}
+
+# Install over the exe that is actually running, not a guessed directory name.
 $running = Get-CimInstance Win32_Process -Filter "Name='RelayDesk.exe'" |
     Where-Object { $_.CommandLine -match 'serve' } | Select-Object -First 1
+$dst = $null
+if ($running -and $running.ExecutablePath) { $dst = [string]$running.ExecutablePath }
+if (-not $dst) {
+    $cand = Get-ChildItem (Join-Path $env:USERPROFILE 'Downloads') -Directory `
+        -Filter 'RelayDesk-v*-win64' -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending | Select-Object -First 1
+    if ($cand) { $dst = Join-Path $cand.FullName 'RelayDesk.exe' }
+    else { $dst = Join-Path $env:USERPROFILE 'Downloads\RelayDesk.exe' }
+}
+$backup = $dst + '.prev-__STAMP__'
+Note ('start src=' + $src + ' dst=' + $dst)
+if (-not (Test-Path -LiteralPath $dst)) { Note 'FAIL missing-dst'; exit 1 }
+
 $argLine = 'serve'
 if ($running) {
     $cmd = [string]$running.CommandLine
@@ -59,7 +86,10 @@ try {
     Note 'copied'
 } catch {
     Note ('FAIL copy ' + $_.Exception.Message)
-    Rename-Item -LiteralPath $backup -NewName 'RelayDesk.exe' -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $backup) {
+        Rename-Item -LiteralPath $backup -NewName 'RelayDesk.exe' -Force `
+            -ErrorAction SilentlyContinue
+    }
     exit 1
 }
 
@@ -88,7 +118,16 @@ if ($ok) { Note 'healthy'; exit 0 }
 
 Note 'unhealthy-rollback'
 Stop-Daemon
-Copy-Item -LiteralPath $backup -Destination $dst -Force
+try {
+    if (-not (Test-Path -LiteralPath $backup)) { throw 'backup missing' }
+    Copy-Item -LiteralPath $backup -Destination $dst -Force -ErrorAction Stop
+    if ((Get-Item -LiteralPath $dst).Length -le 0) { throw 'restored file is empty' }
+} catch {
+    # Never start a half-restored install: leave the target stopped and make
+    # the failure loud instead of silently running a broken exe.
+    Note ('FAIL rollback ' + $_.Exception.Message)
+    exit 3
+}
 Start-Daemon
 Start-Sleep -Seconds 10
 $n = (Get-NetTCPConnection -LocalPort __PORT__ -State Listen -ErrorAction SilentlyContinue | Measure-Object).Count
@@ -113,15 +152,28 @@ def verify_package(path: str) -> dict:
             "size": size, "sha256": digest.hexdigest().upper()}
 
 
+def _ps_lit(value: str) -> str:
+    """Escape a value for a PowerShell single-quoted literal.
+
+    The template embeds names in `'...'`; a name containing a quote would end
+    the literal and let the rest run as code. PowerShell escapes a quote by
+    doubling it. Names are generated here today, but build_script is public and
+    a future caller must not be able to inject a command into the peer's shell.
+    """
+    return str(value).replace("'", "''")
+
+
 def build_script(src_name: str, stamp: str, log_name: str, port: int,
-                 api_port: int, wait_s: int, *, fresh_env: bool = False) -> str:
+                 api_port: int, wait_s: int, *, fresh_env: bool = False,
+                 sha256: str = "") -> str:
     return (SCRIPT_TEMPLATE
-            .replace("__SRC__", src_name)
-            .replace("__STAMP__", stamp)
-            .replace("__PORT__", str(port))
-            .replace("__API__", str(api_port))
-            .replace("__TRIES__", str(max(1, wait_s // 2)))
-            .replace("__LOG__", log_name)
+            .replace("__SRC__", _ps_lit(src_name))
+            .replace("__SHA__", sha256 or ("0" * 64))
+            .replace("__STAMP__", _ps_lit(stamp))
+            .replace("__PORT__", str(int(port)))
+            .replace("__API__", str(int(api_port)))
+            .replace("__TRIES__", str(max(1, int(wait_s) // 2)))
+            .replace("__LOG__", _ps_lit(log_name))
             .replace("__FRESH__", "1" if fresh_env else "0"))
 
 
@@ -135,7 +187,10 @@ async def _run_script(ip: str, port: int, from_fp: str, script_name: str) -> dic
     try:
         return await post_json(ip, "/intent", intent, port=port, timeout=30)
     except PeerError as exc:
-        # The daemon usually dies right here; that is the expected restart.
+        if exc.kind == "rejected":
+            return {"ok": False, "error": "rejected", "detail": exc.detail}
+        # unreachable/timeout: the daemon usually dies right here, which is
+        # the expected restart; the health loop decides the outcome.
         return {"ok": True, "detail": exc.kind}
 
 
@@ -178,7 +233,8 @@ async def upgrade(store, ident: dict, to: str, path: str, *,
     os.makedirs(os.path.dirname(script_path), exist_ok=True)
     with open(script_path, "w", encoding="utf-8") as fh:
         fh.write(build_script(src_name, stamp, log_name, dev_port,
-                              dev_port + 7, wait_s, fresh_env=fresh_env))
+                              dev_port + 7, wait_s, fresh_env=fresh_env,
+                              sha256=pkg["sha256"]))
     try:
         sent_script = await send_file(ip, script_path, from_fp=ident["fingerprint"],
                                       to_fp=fp, port=dev_port)
@@ -188,7 +244,9 @@ async def upgrade(store, ident: dict, to: str, path: str, *,
         return {"ok": False, "error": "script-upload-failed", "detail": sent_script}
 
     started = time.monotonic()
-    await _run_script(ip, dev_port, ident["fingerprint"], script_name)
+    spawn = await _run_script(ip, dev_port, ident["fingerprint"], script_name)
+    if not spawn.get("ok"):
+        return {"ok": False, "error": "script-spawn-failed", "detail": spawn}
     # The old daemon is still listening at this point: wait until the port
     # actually drops (the script stops it), then for it to come back.
     url = f"http://{ip}:{dev_port}/"

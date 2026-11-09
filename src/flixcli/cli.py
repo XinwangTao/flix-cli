@@ -18,7 +18,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-from . import DEVICE_PORT, __version__, local_ip
+from . import DEVICE_PORT, __version__, is_port_text, local_ip
 from .adb import AdbClient, AdbError
 from .channel import PeerError, post_bubble, post_intent, post_json
 from .config import APP_DIR, Store, load_or_create_identity
@@ -59,6 +59,22 @@ def _read_stdin_text() -> str:
             import locale
             text = data.decode(locale.getpreferredencoding(False), "replace")
     return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _join_remote_command(parts: list[str]) -> str:
+    """Rebuild one command line without losing the caller's argument quoting.
+
+    `" ".join(parts)` turned `python -c "print('a b')"` into
+    `python -c print('a b')` on the peer. Quote for the platform the command
+    will run on (both flixcli ends are the same OS in practice).
+    """
+    if not parts:
+        return ""
+    if sys.platform == "win32":
+        import subprocess
+        return subprocess.list2cmdline(parts)
+    import shlex
+    return shlex.join(parts)
 
 
 def emit(payload, as_json: bool) -> None:
@@ -169,7 +185,7 @@ async def cmd_shell(args) -> int:
     parts = list(args.command)
     if parts and parts[0] == "--":
         parts = parts[1:]
-    command = " ".join(parts).strip()
+    command = _join_remote_command(parts)
     if not command and not getattr(args, "pty", False):
         emit({"error": "usage",
               "detail": "nothing to run; use: flix shell <device> -- <command>"}, True)
@@ -463,7 +479,7 @@ async def cmd_send_files(args) -> int:
 async def cmd_probe(args) -> int:
     import aiohttp
     to = args.to
-    if to.rpartition(":")[2].isdigit() is False:
+    if not is_port_text(to.rpartition(":")[2]):
         to = f"{to}:{DEVICE_PORT}"
     try:
         async with aiohttp.ClientSession() as s:
@@ -484,7 +500,7 @@ async def cmd_ping(args) -> int:
     """Manual-add handshake: POST /ping_v2, report the peer's deviceModal."""
     from .channel import PeerError, ping_v2
     to = args.to
-    if to.rpartition(":")[2].isdigit() is False:
+    if not is_port_text(to.rpartition(":")[2]):
         to = f"{to}:{DEVICE_PORT}"
     ip, _, ps = to.rpartition(":")
     store = Store()
@@ -736,8 +752,16 @@ def cmd_bubbles(args) -> int:
 async def cmd_pair(args) -> int:
     """Pair with a device: ping_v2 for identity, then askPairDevice intent."""
     from .channel import PeerError, pair_device, ping_v2
+    # Fail fast: the receiver verifies verifyCode, so a code-less attempt can
+    # never succeed and should not even touch the network.
+    if not args.code:
+        emit({"error": "pair-code-required",
+              "detail": "pass --code <peer 4-digit key>; run `flix qrcode` "
+                        "on the peer or scan its pairing QR",
+              "target": args.to}, args.json)
+        return 2
     to = args.to
-    if to.rpartition(":")[2].isdigit() is False:
+    if not is_port_text(to.rpartition(":")[2]):
         to = f"{to}:{DEVICE_PORT}"
     ip, _, ps = to.rpartition(":")
     port = int(ps) if ps else DEVICE_PORT
@@ -762,7 +786,7 @@ async def cmd_pair(args) -> int:
         own_key = store.own_pair_key()
         try:
             code, msg = await pair_device(ip, ident["fingerprint"], peer_fp,
-                                          args.code or own_key, port=port)
+                                          args.code, port=port)
         except PeerError as e:
             emit({"error": e.kind, "detail": e.detail, "ip": to}, args.json)
             return 3 if e.kind in ("timeout", "unreachable") else 4
@@ -784,18 +808,16 @@ async def cmd_group_create(args) -> int:
     store = Store()
     try:
         ident = load_or_create_identity(store)
-        created = new_group(store, args.name, args.member or [])
-        # The GUI path (desktop_api's POST /api/groups) pushes the snapshot to
-        # every member right after creating the group; the CLI wrote only the
-        # local row, so the other end -- typically a headless board with no way
-        # to create groups -- never registered it and its `flix group list`
-        # stayed empty while group bubbles piled up under an unknown groupId.
-        sync = await update_group(store, ident, created["id"])
-        emit({"ok": True, "id": created["id"], "name": sync.get("name") or created["name"],
-              "members": store.group_members(created["id"]),
-              "rev": sync.get("rev"), "delivered": sync.get("delivered", 0),
-              "total": sync.get("total", 0), "results": sync.get("results", [])},
-             args.json)
+        g = new_group(store, args.name, args.member or [])
+        # The GUI path pushes the snapshot after creating a group; the CLI must
+        # do the same or the peer only ever sees bubbles for an unknown groupId.
+        res = await update_group(store, ident, g["id"])
+        emit({**g, "name": res.get("name") or g.get("name", ""),
+              "members": store.group_members(g["id"]),
+              "rev": res.get("rev"),
+              "delivered": res.get("delivered", 0),
+              "total": res.get("total", 0),
+              "results": res.get("results", [])}, args.json)
         return 0
     finally:
         store.close()
@@ -806,16 +828,16 @@ async def cmd_group_add(args) -> int:
     store = Store()
     try:
         ident = load_or_create_identity(store)
-        # update_group adds the member locally *and* ships rdGroupSync, so the
-        # other end learns the membership instead of only ever seeing bubbles.
-        result = await update_group(store, ident, args.group, add=(args.fingerprint,))
-        if not result.get("ok"):
-            emit({"error": result.get("error"), "detail": result.get("detail")},
-                 args.json)
+        res = await update_group(store, ident, args.group,
+                                 add=(args.fingerprint,))
+        if not res.get("ok"):
+            emit(res, args.json)
             return 2
-        emit({"ok": True, "group": result["group"], "members": result["members"],
-              "rev": result["rev"], "delivered": result["delivered"],
-              "total": result["total"], "results": result["results"]}, args.json)
+        emit({"ok": True, "group": res["group"], "name": res.get("name", ""),
+              "members": res.get("members", []), "rev": res.get("rev"),
+              "delivered": res.get("delivered", 0),
+              "total": res.get("total", 0),
+              "results": res.get("results", [])}, args.json)
         return 0
     finally:
         store.close()
@@ -896,7 +918,7 @@ def _desktop_api_request(port: int, path: str, payload: dict | None = None) -> d
     req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data,
                                  headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with urllib.request.urlopen(req, timeout=10) as response:  # nosec B310
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         try:
@@ -986,8 +1008,13 @@ def cmd_agent(args) -> int:
 
 
 def cmd_ui(args) -> int:
-    from . import ui
-    return ui.main(args)
+    # The Tk window was retired: it was the only thing pulling the Tcl/Tk
+    # runtime (~2.3 MB) into the frozen build. The Qt window replaces it.
+    emit({"error": "ui-removed",
+          "detail": "the Tk window is gone; use `flix gui` (Qt window)",
+          "hint": "run RelayDesk with no arguments for the desktop window"},
+         args.json)
+    return 5
 
 
 def cmd_mcp(args) -> int:

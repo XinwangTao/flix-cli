@@ -9,19 +9,26 @@ produce comparable images.
 
     python scripts/ui_preview.py --out /tmp/ui
 
-Output: chat-{dark,light}.png, settings-{dark,light}.png.
+Output: chat-{dark,light}.png, settings-{dark,light}.png, plus narrow shots
+at 1100 px for the sidebar breakpoint.
 """
 from __future__ import annotations
 
 import argparse
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# The offscreen platform enumerates no system fonts on this host, so Chinese
+# renders as tofu. Use the real platform where the OS has one.
+if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+else:
+    os.environ.pop("QT_QPA_PLATFORM", None)
 
 ME = "fp-me-aaaaaaaaaaaa"
 PEER = "fp-peer-111111111111"
@@ -75,7 +82,30 @@ def demo_payload() -> dict:
     }
 
 
-def build(app, theme: str, size=(1280, 840)):
+def wallpaper():
+    """A stand-in desktop so the frosted material is visible in the shots."""
+    from PySide6.QtCore import QPoint, QRect, Qt
+    from PySide6.QtGui import QColor, QImage, QLinearGradient, QPainter
+
+    image = QImage(1920, 1200, QImage.Format_ARGB32_Premultiplied)
+    painter = QPainter(image)
+    painter.setRenderHint(QPainter.Antialiasing)
+    gradient = QLinearGradient(0, 0, image.width(), image.height())
+    gradient.setColorAt(0.0, QColor("#1b2233"))
+    gradient.setColorAt(0.45, QColor("#26384a"))
+    gradient.setColorAt(1.0, QColor("#141a26"))
+    painter.fillRect(image.rect(), gradient)
+    for x, y, radius, color in ((260, 240, 420, "#3f6fa8"),
+                                (1500, 300, 380, "#8a5b7a"),
+                                (900, 1050, 460, "#2f7d68")):
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(color))
+        painter.drawEllipse(QRect(x - radius // 2, y - radius // 2, radius, radius))
+    painter.end()
+    return image, QPoint(0, 0)
+
+
+def build(app, theme: str, size=(1280, 840), *, snap=None):
     """A window that never talks to a daemon and never reshuffles itself."""
     from flixcli import gui
 
@@ -83,7 +113,7 @@ def build(app, theme: str, size=(1280, 840)):
     gui.MainWindow.start_local_daemon = lambda self: None
     gui.MainWindow._discovery_done = lambda self, found: None
     gui.MainWindow._load_theme = lambda self: theme
-    window = gui.MainWindow(19999)
+    window = gui.MainWindow(19999, snapshot=snap)
     window.timer.stop()
     window.offline_mode = True
     window._auto_start_tried = True
@@ -116,16 +146,27 @@ def main(argv: list[str] | None = None) -> int:
 
     from PySide6.QtWidgets import QApplication
 
+    from flixcli import gui
+
     app = QApplication.instance() or QApplication([])
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    # Shots must not rewrite the user's real theme/material preferences.
+    gui.PREFS_FILE = Path(tempfile.gettempdir()) / "flixcli-preview-prefs.json"
+    snap = wallpaper()
     for theme in ("dark", "light"):
-        window = build(app, theme, (args.width, args.height))
+        window = build(app, theme, (args.width, args.height), snap=snap)
         settle(app)
         window.grab().save(str(out / f"chat-{theme}.png"))
         window.set_mode("settings")
         settle(app)
         window.grab().save(str(out / f"settings-{theme}.png"))
+        window.close()
+        settle(app, 2)
+    for theme in ("dark", "light"):
+        window = build(app, theme, (1100, 760), snap=snap)
+        settle(app)
+        window.grab().save(str(out / f"chat-narrow-{theme}.png"))
         window.close()
         settle(app, 2)
     print(f"wrote {out}")

@@ -503,7 +503,35 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
         return web.json_response({"error": "not implemented in flix-cli yet",
                                   "route": request.path}, status=501)
 
-    app = web.Application()
+    @web.middleware
+    async def _localhost_guard(request: web.Request, handler):
+        """DNS-rebinding / CSRF guard for an unauthenticated loopback API.
+
+        Binding to 127.0.0.1 does not stop a browser: a malicious page can
+        POST a "simple request" (text/plain) to localhost, and DNS rebinding
+        makes Host look local. Require a loopback Host, reject foreign Origin,
+        and force JSON for mutations (which triggers CORS preflight).
+        """
+        from urllib.parse import urlsplit
+        host = (request.headers.get("Host") or "").strip()
+        hostname = host.rsplit(":", 1)[0].strip("[]").lower()
+        if hostname not in {"127.0.0.1", "localhost", "::1"}:
+            return web.json_response({"error": "forbidden host"}, status=403)
+        origin = request.headers.get("Origin")
+        if origin and origin != "null":
+            if (urlsplit(origin).hostname or "").lower() not in {
+                    "127.0.0.1", "localhost", "::1"}:
+                return web.json_response({"error": "forbidden origin"},
+                                         status=403)
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            ctype = (request.headers.get("Content-Type") or "")
+            if ctype.split(";")[0].strip().lower() != "application/json":
+                return web.json_response(
+                    {"error": "content-type must be application/json"},
+                    status=415)
+        return await handler(request)
+
+    app = web.Application(middlewares=[_localhost_guard])
     app.on_shutdown.append(on_shutdown)
     app.router.add_get("/api/overview", overview_get)
     app.router.add_get("/api/self", self_get)

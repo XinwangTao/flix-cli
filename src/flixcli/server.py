@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import hmac
 import ipaddress
 import json
 import os
@@ -212,6 +213,45 @@ def _fit_file_name(name: str, root: str) -> str:
     return fitted
 
 
+def _device_ip(store, fingerprint: str) -> str:
+    row = store.con.execute(
+        "SELECT COALESCE(ip,'') FROM persistence_devices WHERE fingerprint=?",
+        (fingerprint,)).fetchone()
+    return row[0] if row else ""
+
+
+def _record_peer_ip(store, fingerprint: str, ip: str) -> None:
+    """Remember where a paired peer lives; sensitive routes compare against it.
+
+    Never clobbers an existing address: a stale announce must not be able to
+    redirect an established peer (discovery poisoning).
+    """
+    if not fingerprint or not ip:
+        return
+    had = store.con.execute(
+        "SELECT 1 FROM persistence_devices WHERE fingerprint=?",
+        (fingerprint,)).fetchone()
+    if had:
+        store.con.execute(
+            "UPDATE persistence_devices SET ip=? WHERE fingerprint=?"
+            " AND COALESCE(ip,'')=''", (ip, fingerprint))
+    else:
+        store.upsert_device(fingerprint, ip=ip, port=DEVICE_PORT)
+    store.con.commit()
+
+
+def _trusted_sender(store, sender, remote) -> bool:
+    """Pairing alone is not identity: the fingerprint is public on the wire.
+
+    Sensitive routes require the request to also come from the address we
+    learned for that paired device.
+    """
+    if not isinstance(sender, str) or not sender or not store.is_paired(sender):
+        return False
+    expected = _device_ip(store, sender)
+    return bool(expected) and bool(remote) and expected == remote
+
+
 def _safe_destination(store, name: str) -> tuple[str, str, str] | None:
     """Resolve a peer name to (root, destination, on-disk basename)."""
     clean = _sanitize_file_name(name)
@@ -287,6 +327,11 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
         if not isinstance(bubble, dict) or not isinstance(bubble.get("id"), str) \
                 or not isinstance(bubble.get("from"), str):
             return web.Response(status=400, text="receive bubble failed")
+        sender = bubble["from"]
+        # `from` is attacker-controlled in the JSON body. Pairing plus a
+        # matching source address is the only identity this transport has.
+        if not _trusted_sender(store, sender, request.remote):
+            return web.Response(status=403, text="sender not paired")
         btype = bubble.get("type")
         content = bubble.get("content")
         ts = _to_int(bubble.get("time"), int(time.time() * 1000))
@@ -358,6 +403,10 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
         action = intent.get("action")
         if action == model.ACTION_CLIPBOARD:
             extra = intent.get("extra")
+            clipboard_sender = intent.get("deviceId") or (
+                extra.get("from") if isinstance(extra, dict) else None)
+            if not _trusted_sender(store, clipboard_sender, request.remote):
+                return web.Response(status=403, text="sender not paired")
             text = extra.get("text") if isinstance(extra, dict) else None
             if isinstance(text, str):
                 content = None
@@ -372,20 +421,20 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
                     return web.Response(text="{0: success}")
             return web.Response(status=500, text="receive intent failed")
         if action in (model.ACTION_ASK_PAIR, model.ACTION_CONFIRM_PAIR):
-            return _pair_intent(intent)
+            return _pair_intent(intent, request)
         if action == model.ACTION_CONFIRM_RECEIVE:
             # Receiver -> sender "accepted, upload now" ack. The bubble is
             # already armed in file_contents; nothing else to do here.
             return web.Response(text="{0: success}")
         if action == model.ACTION_GROUP_SYNC:
-            return _group_sync_intent(intent, store)
+            return _group_sync_intent(intent, store, request.remote)
         if action == model.ACTION_AGENT:
-            return _agent_intent(intent, store)
+            return _agent_intent(intent, store, request.remote)
         if action == model.ACTION_SHELL:
-            return await _shell_intent(intent, store)
+            return await _shell_intent(intent, store, request.remote)
         return web.Response(status=500, text="receive intent failed")
 
-    def _agent_intent(intent: dict, store) -> web.Response:
+    def _agent_intent(intent: dict, store, remote=None) -> web.Response:
         """Agent-to-agent envelope (v2K).
 
         The transport only ever stores text: whatever the two AIs say to each
@@ -400,7 +449,7 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
         created = extra.get("created")
         if not (isinstance(mid, str) and mid and isinstance(body, str) and body):
             return web.Response(status=400, text="receive intent failed")
-        if not isinstance(sender, str) or not sender or not store.is_paired(sender):
+        if not _trusted_sender(store, sender, remote):
             return web.Response(status=403, text="receive intent failed")
         try:
             created_ms = int(created)
@@ -412,7 +461,7 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
         publish("agentMessage", {"id": mid, "from": sender})
         return web.Response(text="{0: success}")
 
-    async def _shell_intent(intent: dict, store) -> web.Response:
+    async def _shell_intent(intent: dict, store, remote=None) -> web.Response:
         """Remote command execution (rdShell, phase 1 = exec only).
 
         Trust gate matches the other rd* envelopes: an unpaired sender is
@@ -426,7 +475,7 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
         command = extra.get("command")
         if not (isinstance(sid, str) and sid and isinstance(command, str) and command):
             return web.Response(status=400, text="receive intent failed")
-        if not isinstance(sender, str) or not sender or not store.is_paired(sender):
+        if not _trusted_sender(store, sender, remote):
             return web.Response(status=403, text="receive intent failed")
         try:
             timeout = float(extra.get("timeout") or DEFAULT_TIMEOUT_S)
@@ -549,22 +598,26 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
                 await ws.close()
         return ws
 
-    def _pair_intent(intent: dict) -> web.Response:
+    def _pair_intent(intent: dict, request: web.Request) -> web.Response:
         # Pairing rides /intent [RT 2026-10-21]: askPairDevice/confirmPairDevice
         # with extra {verifyDevice, verifyCode, accept?}.
         # askPairDevice (A asks B): verifyDevice must equal OUR fp, else
         #   `{302: device not match return  verifyDevice = X did = Y}`; on
-        #   success B writes pair_devices[A=deviceId].
+        #   success B writes pair_devices[A=deviceId]. verifyCode carries OUR
+        #   4-digit key (the code shown in our QR), so it is checkable.
         # confirmPairDevice (B replies to A): official sends deviceId=B_fp,
-        #   verifyDevice=B_fp, accept="true" (string!) [RT wire_capture] —
-        #   no self-check; receiver writes pair_devices[verifyDevice].
+        #   verifyDevice=B_fp, accept="true" (string!) [RT wire_capture] and
+        #   its own key in verifyCode, which we cannot verify. Instead require
+        #   the source address to match the address we already learned for B.
         # Replies are Dart map toString: `{0: success}` / `{301: ...}` / `{302: ...}`.
         device_id = intent.get("deviceId")
         extra = intent.get("extra") if isinstance(intent.get("extra"), dict) else {}
         verify_device = extra.get("verifyDevice")
+        verify_code = extra.get("verifyCode")
         accept = extra.get("accept", True)
         if isinstance(accept, str):
             accept = accept.lower() == "true"
+        remote = request.remote
         if intent.get("action") == model.ACTION_ASK_PAIR:
             if not isinstance(verify_device, str) or not verify_device:
                 return web.Response(text="{301: pair Device Null}")
@@ -572,10 +625,17 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
                 return web.Response(
                     text=f"{{302: device not match return  verifyDevice = "
                          f"{verify_device} did = {ident.get('fingerprint')}}}")
+            own_key = store.own_pair_key()
+            supplied = verify_code if isinstance(verify_code, str) else ""
+            if not own_key or not hmac.compare_digest(supplied, own_key):
+                publish("pairRejected", {"fingerprint": str(device_id or ""),
+                                         "reason": "bad-code"})
+                return web.Response(text="{302: verifyCode mismatch}")
             if accept is False:
                 return web.Response(text="{0: success}")
             if isinstance(device_id, str) and device_id:
-                store.add_pair(device_id, store.own_pair_key())
+                store.add_pair(device_id, own_key)
+                _record_peer_ip(store, device_id, remote)
                 publish("pairChanged", {"fingerprint": device_id,
                                         "action": intent.get("action")})
             return web.Response(text="{0: success}")
@@ -585,12 +645,17 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
             else device_id
         if not isinstance(who, str) or not who:
             return web.Response(text="{301: pair Device Null}")
+        known_ip = _device_ip(store, who)
+        if not known_ip or not remote or known_ip != remote:
+            publish("pairRejected", {"fingerprint": who,
+                                     "reason": "unknown-source"})
+            return web.Response(text="{302: pair requires a known source}")
         if accept is not False:
             store.add_pair(who, store.own_pair_key())
             publish("pairChanged", {"fingerprint": who, "action": "confirm"})
         return web.Response(text="{0: success}")
 
-    def _group_sync_intent(intent: dict, store) -> web.Response:
+    def _group_sync_intent(intent: dict, store, remote=None) -> web.Response:
         """Group metadata snapshot (v2C). Trust gate: the sender must be paired
         or already a member; anything else is dropped without touching state."""
         extra = intent.get("extra") if isinstance(intent.get("extra"), dict) else {}
@@ -609,7 +674,7 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
             ok = False
         if not ok:
             return web.Response(status=400, text="receive intent failed")
-        if not (store.is_paired(sender) or sender in store.group_members(gid)):
+        if not _trusted_sender(store, sender, remote):
             return web.Response(status=400, text="receive intent failed")
         if store.merge_group_sync(gid, name.strip(), list(dict.fromkeys(members)), rev):
             publish("groupsChanged", {"groupId": gid})
@@ -803,19 +868,19 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
 
 
     def _wire_log_file() -> Path | None:
-        """Where the verbatim wire capture goes.
+        """Where the diagnostic wire capture goes (opt-in only).
 
-        ``FLIX_WIRE_LOG`` overrides the path (``off`` disables it); the default
-        lives in the app state dir so the server is portable — an absolute
-        reverse-engineering path used to make every request 500 off-Windows.
+        v2.2.1 wrote every request body to ``%APPDATA%/flixcli/wire_capture.log``
+        by default, which meant clipboard text, chat messages and rdShell
+        commands were persisted in plaintext forever. Now only an explicit
+        ``FLIX_WIRE_LOG`` path enables capture.
         """
         raw = os.environ.get("FLIX_WIRE_LOG", "").strip()
-        if raw.lower() in {"off", "0", "none"}:
+        if not raw or raw.lower() in {"off", "0", "none"}:
             return None
-        if raw:
-            return Path(raw)
-        from .config import APP_DIR
-        return APP_DIR / "wire_capture.log"
+        return Path(raw)
+
+    WIRE_LOG_MAX_BYTES = 5 * 1024 * 1024
 
     @web.middleware
     async def _wire_log(request, handler):
@@ -829,19 +894,25 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
                 body = await request.read()
             except Exception:
                 body = b"?"
-            if request.path.startswith("/webrtc/v1/"):
-                import hashlib as _hashlib
-                digest = _hashlib.sha256(body).hexdigest()[:16]
-                body_repr = f"<redacted media envelope bytes={len(body)} sha256={digest}>"
-            else:
-                body_repr = repr(body[:2000])
-        rec = (f"[{_t.strftime('%H:%M:%S')}] {request.method} {request.path_qs}\n"
+            # Never persist message/clipboard/command content: a digest is
+            # enough to correlate a capture with a repro.
+            import hashlib as _hashlib
+            digest = _hashlib.sha256(body).hexdigest()[:16]
+            body_repr = f"<redacted bytes={len(body)} sha256={digest}>"
+        raw_qs = request.path_qs
+        if "pin=" in raw_qs:
+            import re as _re
+            raw_qs = _re.sub(r"pin=[^&]*", "pin=***", raw_qs)
+        rec = (f"[{_t.strftime('%H:%M:%S')}] {request.method} {raw_qs}\n"
                f"headers={dict(request.headers)}\n"
                f"body={body_repr}\n----\n")
         target = _wire_log_file()
         if target is not None:
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
+                if target.exists() and target.stat().st_size > WIRE_LOG_MAX_BYTES:
+                    with contextlib.suppress(OSError):
+                        target.replace(target.with_suffix(target.suffix + ".1"))
                 with open(target, "ab") as f:
                     f.write(rec.encode("utf-8", "replace"))
             except OSError:

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import ipaddress
 
-from . import DEVICE_PORT
+from . import DEVICE_PORT, is_port_text
 
 
 def _is_ip(text: str) -> bool:
@@ -39,7 +39,7 @@ def resolve_target(store, to: str) -> tuple[str | None, int | None, str]:
     port = None
     target = to.strip()
     head, _, tail = target.rpartition(":")
-    if tail.isdigit() and head:
+    if is_port_text(tail) and head:
         target, port = head, int(tail)
     rows = [row for row in store.devices() if row.get("fingerprint")]
     for row in rows:

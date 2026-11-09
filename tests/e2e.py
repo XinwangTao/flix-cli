@@ -73,8 +73,19 @@ def main() -> int:
         check("ping_v2", r.returncode == 0 and '"ok": true' in r.stdout)
         fp_b = json.loads(r.stdout)["peer"]["fingerprint"]
 
-        r = sh(["pair", "--json", f"127.0.0.1:{B_PORT}"], env=A)
-        check("pair", r.returncode == 0 and '"paired": true' in r.stdout)
+        # Pairing now verifies the peer's 4-digit key (the code its QR shows).
+        from flixcli.config import Store as _Store
+        db_b = Path(B["APPDATA"]) / "flixcli" / "db.sqlite"
+        for _ in range(40):
+            if db_b.exists():
+                break
+            time.sleep(0.2)
+        with _Store(db_b) as _sb:
+            code_b = _sb.own_pair_key()
+        r = sh(["pair", "--json", f"127.0.0.1:{B_PORT}", "--code", code_b],
+               env=A)
+        check("pair", r.returncode == 0 and '"paired": true' in r.stdout,
+              f"stdout={r.stdout.strip()} stderr={r.stderr.strip()}")
         # The isolated nodes communicate over loopback; align the test fixture
         # with the production source-IP binding instead of weakening the server.
         from flixcli.config import Store, load_or_create_identity

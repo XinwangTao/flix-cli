@@ -14,7 +14,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import DEVICE_PORT, local_ipv4s
+from . import DEVICE_PORT, is_port_text, local_ipv4s
 
 def _default_app_dir() -> Path:
     """Per-user state dir: APPDATA on Windows, Application Support on macOS."""
@@ -285,7 +285,7 @@ class Store:
             " FROM pair_devices p LEFT JOIN persistence_devices d"
             " ON d.fingerprint = p.fingerprint", (DEVICE_PORT,)).fetchall()
         return [(fp, ip, int(port or DEVICE_PORT)) for fp, ip, port in rows
-                if ip and ip.replace('.', '').isdigit()]
+                if ip and is_port_text(ip.replace('.', ''))]
 
     def pair_code(self, fingerprint: str) -> str | None:
         row = self.con.execute(
@@ -435,7 +435,9 @@ class Store:
         self.con.commit()
 
     def agent_inbox(self, *, unread_only: bool = True, limit: int = 50) -> list[dict]:
-        sql = ("SELECT id, peer, body, reply_to, created, read_at FROM agent_messages"
+        # Only a fixed fragment is concatenated; --limit and all values are
+        # bound parameters below.
+        sql = ("SELECT id, peer, body, reply_to, created, read_at FROM agent_messages"  # nosec B608
                " WHERE direction='in'" + (" AND read_at=0" if unread_only else "")
                + " ORDER BY created ASC LIMIT ?")
         rows = self.con.execute(sql, (limit,)).fetchall()
@@ -526,8 +528,13 @@ class Store:
         return dict(zip(cols, row))
 
     def outbox_retry(self, oid: str) -> bool:
+        # Reset `created` too: flush() expires queued rows older than the 7-day
+        # TTL before sending, so retrying an expired row used to mark it
+        # expired again and never deliver it.
         cur = self.con.execute(
-            "UPDATE outbox SET state='queued', last_error='' WHERE id=?", (oid,))
+            "UPDATE outbox SET state='queued', last_error='', attempts=0,"
+            " created=? WHERE id=?",
+            (int(time.time() * 1000), oid))
         self.con.commit()
         return cur.rowcount > 0
 
@@ -557,8 +564,9 @@ class Store:
         if not ids:
             return 0
         marks = ",".join("?" * len(ids))
+        # `marks` is a generated run of "?" placeholders, never user text.
         cur = self.con.execute(
-            f"UPDATE agent_messages SET read_at=? WHERE id IN ({marks}) AND read_at=0",
+            f"UPDATE agent_messages SET read_at=? WHERE id IN ({marks}) AND read_at=0",  # nosec B608
             (int(time.time() * 1000), *ids))
         self.con.commit()
         return cur.rowcount
@@ -605,13 +613,50 @@ class Store:
             print(f"[flixcli] prefs unreadable, moved to {bad}", file=sys.stderr)
             return {}
 
+    @contextlib.contextmanager
+    def _prefs_lock(self):
+        """Cross-process exclusive lock for prefs read-modify-write.
+
+        GUI, daemon and one-shot CLI commands all share this file. Without a
+        lock two processes could each mint an identity (last writer wins) or
+        drop a key written by the other.
+        """
+        lock_path = self.prefs_path.with_suffix(".lock")
+        fh = open(lock_path, "a+b")
+        try:
+            if os.name == "nt":
+                import msvcrt
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                if os.name == "nt":
+                    import msvcrt
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            fh.close()
+
+    def update_prefs(self, fn) -> dict:
+        with self._prefs_lock():
+            data = fn(dict(self.prefs()))
+            tmp = self.prefs_path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1),
+                           encoding="utf-8")
+            os.replace(tmp, self.prefs_path)
+            return data
+
     def set_pref(self, key: str, value) -> None:
-        p = self.prefs()
-        p[key] = value
-        tmp = self.prefs_path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(p, ensure_ascii=False, indent=1),
-                       encoding="utf-8")
-        os.replace(tmp, self.prefs_path)
+        def apply(p: dict) -> dict:
+            p[key] = value
+            return p
+        self.update_prefs(apply)
 
     def close(self) -> None:
         with contextlib.suppress(Exception):
@@ -705,18 +750,24 @@ def load_or_create_identity(store: Store) -> dict:
     ident = p.get("identity")
     if _valid_identity(ident):
         return ident
-    adopted = _adopt_legacy_identity()
-    if adopted:
-        store.set_pref("identity", adopted)
-        return adopted
-    ident = {
-        "fingerprint": str(uuid.uuid4()),
-        "deviceType": "desktop",
-        "created_at": int(time.time() * 1000),
-        **_platform_identity_fields(),
-    }
-    store.set_pref("identity", ident)
-    return ident
+    def ensure(prefs: dict) -> dict:
+        # Re-check under the lock: another process may have just created it.
+        current = prefs.get("identity")
+        if _valid_identity(current):
+            return prefs
+        adopted = _adopt_legacy_identity()
+        if adopted:
+            prefs["identity"] = adopted
+            return prefs
+        prefs["identity"] = {
+            "fingerprint": str(uuid.uuid4()),
+            "deviceType": "desktop",
+            "created_at": int(time.time() * 1000),
+            **_platform_identity_fields(),
+        }
+        return prefs
+
+    return store.update_prefs(ensure)["identity"]
 
 
 def _fresher(row: dict, current: dict) -> bool:

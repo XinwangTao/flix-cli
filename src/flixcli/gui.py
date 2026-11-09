@@ -23,19 +23,23 @@ from pathlib import Path
 from string import Template
 
 from PySide6.QtCore import (
-    QEasingCurve, QEvent, QPoint, QPointF, QPropertyAnimation, QSize, QThread,
-    QTimer, Qt, QUrl, Signal,
+    QEasingCurve, QEvent, QPoint, QPointF, QPropertyAnimation, QRect, QRectF, QSize,
+    QThread, QTimer, Qt, QUrl, Signal,
 )
 from PySide6.QtGui import (
-    QAction, QColor, QDesktopServices, QFont, QPainter, QPalette, QPen, QPixmap,
+    QAction, QColor, QDesktopServices, QFont, QFontMetrics, QImage,
+    QLinearGradient, QPainter, QPalette, QPen, QPixmap,
 )
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QDialog, QFileDialog, QFrame, QGraphicsDropShadowEffect,
-    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
-    QMenu, QMessageBox, QPushButton, QScrollArea, QSizePolicy, QStackedWidget,
+    QApplication, QCheckBox, QDialog, QFileDialog, QFrame, QGraphicsBlurEffect,
+    QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QGraphicsPixmapItem,
+    QGraphicsScene, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QMainWindow, QMenu, QMessageBox, QPushButton, QScrollArea, QSizePolicy,
+    QStackedWidget,
     QStatusBar, QSystemTrayIcon, QTextEdit, QVBoxLayout, QWidget,
 )
 
+from . import is_port_text
 from .icons import icon, logo_icon, logo_pixmap
 from .presence import is_online
 from . import __version__ as APP_VERSION
@@ -209,7 +213,7 @@ class LocalApi:
         import os
         candidates = [first_port]
         env = os.environ.get("FLIX_API_PORT")
-        if env and env.isdigit():
+        if env and is_port_text(env):
             candidates.insert(0, int(env))
         candidates += [p for p in cls.CANDIDATE_PORTS if p not in candidates]
         for port in candidates:
@@ -230,7 +234,8 @@ class LocalApi:
 
     def bytes(self, path: str) -> bytes:
         try:
-            with urllib.request.urlopen(self.base + path, timeout=3) as response:
+            with urllib.request.urlopen(self.base + path,  # nosec B310
+                                       timeout=3) as response:
                 return response.read()
         except (OSError, urllib.error.URLError) as exc:
             raise ApiError(str(exc)) from exc
@@ -240,7 +245,7 @@ class LocalApi:
             data = json.dumps(payload).encode("utf-8") if payload is not None else None
             req = urllib.request.Request(self.base + path, data=data,
                                          headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=30) as response:
+            with urllib.request.urlopen(req, timeout=30) as response:  # nosec B310
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             try:
@@ -362,6 +367,324 @@ class Avatar(QLabel):
         self.setPixmap(pm)
 
 
+class ElidedLabel(QLabel):
+    """Single-line label that ellipsizes at its real width.
+
+    The session cards used to pre-truncate titles for a 320 px sidebar, which
+    hard-clipped them once the panel narrowed. Eliding here means the text
+    follows whatever width the layout actually gives it.
+    """
+
+    def __init__(self, text: str = "", mode: Qt.TextElideMode = Qt.ElideRight):
+        super().__init__()
+        self._full_text = text
+        self._mode = mode
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.setToolTip(text)
+        self._apply()
+
+    def setText(self, text: str):
+        self._full_text = text
+        self.setToolTip(text)
+        self._apply()
+
+    def fullText(self) -> str:
+        return self._full_text
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        return QSize(0, hint.height())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply()
+
+    def _apply(self):
+        shown = QFontMetrics(self.font()).elidedText(
+            self._full_text, self._mode, max(0, self.width()))
+        if shown != QLabel.text(self):
+            QLabel.setText(self, shown)
+
+
+def system_transparency_enabled() -> bool:
+    """Windows' accessibility switch for transparency in the UI."""
+    if sys.platform != "win32":
+        return True
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as key:
+            value, _ = winreg.QueryValueEx(key, "EnableTransparency")
+        return bool(value)
+    except OSError:
+        return True
+
+
+def system_motion_enabled() -> bool:
+    """Windows' "show animations in Windows" accessibility switch.
+
+    HIG Motion: motion must be optional, so the page transition listens to the
+    same setting people already use to calm the rest of the desktop.
+    """
+    if sys.platform != "win32":
+        return True
+    try:
+        enabled = ctypes.c_int(1)
+        ok = ctypes.windll.user32.SystemParametersInfoW(
+            0x1042, 0, ctypes.byref(enabled), 0)  # SPI_GETCLIENTAREAANIMATION
+        return bool(enabled.value) if ok else True
+    except (AttributeError, OSError):
+        return True
+
+
+def system_contrast_enabled() -> bool:
+    """Windows' high-contrast switch.
+
+    HIG Accessibility: when the system asks for increased contrast, the
+    interface must not replace it with a translucent material, so glass is
+    suspended and the opaque theme takes over.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        class HIGHCONTRASTW(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_uint),
+                        ("dwFlags", ctypes.c_uint),
+                        ("lpszDefaultScheme", ctypes.c_wchar_p)]
+
+        hc = HIGHCONTRASTW()
+        hc.cbSize = ctypes.sizeof(HIGHCONTRASTW)
+        ok = ctypes.windll.user32.SystemParametersInfoW(
+            0x0042, hc.cbSize, ctypes.byref(hc), 0)  # SPI_GETHIGHCONTRAST
+        return bool(hc.dwFlags & 0x00000001) if ok else False  # HCF_HIGHCONTRASTON
+    except (AttributeError, OSError):
+        return False
+
+
+def desktop_snapshot():
+    """Grab the composited desktop before our own window is mapped.
+
+    Returns ``(image, origin)`` in logical screen coordinates. The material is
+    rendered from this still rather than from DWM: on Windows the Mica/acrylic
+    attribute call succeeds for a Qt top-level window, but the surface stays
+    opaque (Qt's window is layered), so the backdrop never shows through.
+    """
+    app = QApplication.instance()
+    if app is None:
+        return None
+    screens = app.screens()
+    if not screens:
+        return None
+    union = QRect()
+    for screen in screens:
+        union = union.united(screen.geometry())
+    if union.isEmpty():
+        return None
+    image = QImage(union.size(), QImage.Format_ARGB32_Premultiplied)
+    image.fill(Qt.black)
+    painter = QPainter(image)
+    drawn = False
+    for screen in screens:
+        pixmap = screen.grabWindow(0)
+        if pixmap.isNull():
+            continue
+        geometry = screen.geometry()
+        painter.drawImage(QRect(geometry.topLeft() - union.topLeft(), geometry.size()),
+                          pixmap.toImage())
+        drawn = True
+    painter.end()
+    return (image, union.topLeft()) if drawn else None
+
+
+def blur_image(image: QImage, radius: float) -> QImage:
+    scene = QGraphicsScene()
+    item = QGraphicsPixmapItem(QPixmap.fromImage(image))
+    effect = QGraphicsBlurEffect()
+    effect.setBlurRadius(radius)
+    effect.setBlurHints(QGraphicsBlurEffect.BlurHint.QualityHint)
+    item.setGraphicsEffect(effect)
+    scene.addItem(item)
+    out = QImage(image.size(), QImage.Format_ARGB32_Premultiplied)
+    out.fill(Qt.transparent)
+    painter = QPainter(out)
+    scene.render(painter, QRectF(out.rect()), QRectF(image.rect()))
+    painter.end()
+    return out
+
+
+class GlassBackdrop(QWidget):
+    """Fallback backdrop: a blurred desktop still, tinted per theme.
+
+    Windows 11 22H2+ draws the real thing (Mica/Acrylic) behind the window, so
+    this widget only paints when ``set_native(True)`` has not been called. The
+    still is captured once at launch, which is why it drifts whenever the
+    window moves or the desktop behind changes — that is the fallback, not the
+    preferred look.
+    """
+
+    SHRINK = 4  # blur at quarter resolution; the upscale hides the loss
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("glassRoot")
+        self._source: QImage | None = None
+        self._origin = QPoint(0, 0)
+        self._tint = QColor(PALETTES["dark"]["bg"])
+        self._tint_alpha = 150
+        self._enabled = False
+        self._native = False
+        self._cache: QPixmap | None = None
+        self._cache_key = None
+        # Blurring a maximized window costs tens of milliseconds; do it once
+        # the resize/move settles instead of on every paint.
+        self._rebuild = QTimer(self)
+        self._rebuild.setSingleShot(True)
+        self._rebuild.setInterval(80)
+        self._rebuild.timeout.connect(self._rebuild_cache)
+
+    def has_source(self) -> bool:
+        return self._source is not None and not self._source.isNull()
+
+    def set_snapshot(self, snapshot) -> None:
+        if snapshot:
+            self._source, self._origin = snapshot
+        self._invalidate()
+
+    def set_material(self, tint: QColor, alpha: int, enabled: bool) -> None:
+        self._tint = QColor(tint)
+        self._tint_alpha = int(alpha)
+        self._enabled = bool(enabled)
+        self._invalidate()
+
+    def set_native(self, native: bool) -> None:
+        """DWM paints the surface; stop painting our own still over it."""
+        self._native = bool(native)
+        self._invalidate()
+
+    def _invalidate(self) -> None:
+        self._cache_key = None
+        self._cache = None
+        self.update()
+
+    def _crop(self):
+        if not self._enabled or not self.has_source():
+            return None
+        size = self.size()
+        if size.isEmpty():
+            return None
+        offset = self.mapToGlobal(QPoint(0, 0)) - self._origin
+        canvas = QImage(size, QImage.Format_ARGB32_Premultiplied)
+        canvas.fill(self._tint)
+        painter = QPainter(canvas)
+        painter.drawImage(QPoint(0, 0), self._source, QRect(offset, size))
+        painter.end()
+        return canvas
+
+    def _render(self):
+        crop = self._crop()
+        if crop is None:
+            return None
+        width, height = crop.width(), crop.height()
+        small = crop.scaled(max(1, width // self.SHRINK), max(1, height // self.SHRINK),
+                            Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        small = blur_image(small, 9.0)
+        canvas = small.scaled(width, height, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        base = canvas.copy()
+        # Bleed a grayscale copy into the blur so the desktop reads as a
+        # material instead of a picture competing with the text. Qt has no
+        # HSL saturation blend mode; this is the cheap equivalent.
+        gray = canvas.convertToFormat(QImage.Format_Grayscale8).convertToFormat(
+            QImage.Format_ARGB32_Premultiplied)
+        painter = QPainter(canvas)
+        # HIG asks for a 1.2-1.5x saturation boost so colors stay lively
+        # through the material; overlay with the blur is the cheap Qt
+        # approximation. Only enough gray to keep text from fighting the
+        # wallpaper bleeds in.
+        painter.setOpacity(0.15)
+        painter.drawImage(0, 0, gray)
+        painter.setOpacity(0.2)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Overlay)
+        painter.drawImage(0, 0, base)
+        painter.setOpacity(0.35)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SoftLight)
+        painter.drawImage(0, 0, base)
+        tint = QColor(self._tint)
+        if tint.lightness() < 128:
+            # A dark desktop under a dark tint is otherwise a flat sheet;
+            # screen-blend the blur back so the material keeps its glow.
+            painter.setOpacity(0.35)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Screen)
+            painter.drawImage(0, 0, base)
+        painter.setOpacity(1.0)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        dark = tint.lightness() < 128
+        alpha = self._tint_alpha
+        if dark:
+            # A bright window behind a dark theme would otherwise turn the
+            # rail and sidebar into a washed-out sheet. Deepen the tint in
+            # proportion to how bright the desktop actually is, so the
+            # material looks the same whatever is behind the window.
+            probe = small.scaled(8, 8, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            samples = [probe.pixelColor(x, y).lightness()
+                       for y in range(probe.height()) for x in range(probe.width())]
+            mean = sum(samples) / max(1, len(samples))
+            alpha = min(255, int(alpha + max(0.0, (mean - 70) * 0.6)))
+        tint.setAlpha(alpha)
+        painter.fillRect(canvas.rect(), tint)
+        highlight = QLinearGradient(0, 0, 0, height * 0.7)
+        highlight.setColorAt(0.0, QColor(255, 255, 255, 40 if dark else 48))
+        highlight.setColorAt(1.0, QColor(255, 255, 255, 0))
+        painter.fillRect(canvas.rect(), highlight)
+        # A single soft specular band: the one liquid-glass cue that still
+        # reads when the desktop behind is dark and low-contrast.
+        sheen = QLinearGradient(0, 0, width * 0.9, height)
+        sheen.setColorAt(0.0, QColor(255, 255, 255, 0))
+        sheen.setColorAt(0.38, QColor(255, 255, 255, 0))
+        sheen.setColorAt(0.5, QColor(255, 255, 255, 16 if dark else 24))
+        sheen.setColorAt(0.62, QColor(255, 255, 255, 0))
+        sheen.setColorAt(1.0, QColor(255, 255, 255, 0))
+        painter.fillRect(canvas.rect(), sheen)
+        painter.end()
+        return QPixmap.fromImage(canvas)
+
+    def _cache_signature(self):
+        return (self.size(), self.mapToGlobal(QPoint(0, 0)), self._enabled,
+                self._tint.rgba(), self._tint_alpha)
+
+    def _rebuild_cache(self):
+        self._cache_key = self._cache_signature()
+        try:
+            self._cache = self._render()
+            self._last_error = None
+        except Exception as exc:  # noqa: BLE001
+            # An exception escaping a paint handler aborts the process; a flat
+            # tint is always an acceptable fallback. Keep the reason so a
+            # window with no material can be diagnosed instead of guessed at.
+            self._cache = None
+            self._last_error = f"{type(exc).__name__}: {exc}"
+        self.update()
+
+    def paintEvent(self, event):
+        if self._native:
+            # DWM owns the surface; painting here would hide the real blur.
+            return
+        key = self._cache_signature()
+        if key != self._cache_key:
+            if self._cache is None:
+                self._rebuild_cache()
+            elif not self._rebuild.isActive():
+                self._rebuild.start()
+        painter = QPainter(self)
+        if self._cache is not None:
+            if self._cache.size() == self.size():
+                painter.drawPixmap(0, 0, self._cache)
+            else:
+                # The old material stretched reads better than a blank frame
+                # while the debounced rebuild waits for the drag to settle.
+                painter.drawPixmap(self.rect(), self._cache)
+        # No material: paint nothing so the window's own gradient shows.
+
+
 class _HoverIconButton(QPushButton):
     """A window button whose glyph changes ink while it is hovered.
 
@@ -479,11 +802,19 @@ class TitleBar(QFrame):
 
 class MainWindow(QMainWindow):
     HOT_MARGIN = 6
+    SIDEBAR_WIDE = 320
+    SIDEBAR_NARROW = 280
+    NARROW_BELOW = 1240
 
-    def __init__(self, api_port: int = 8898):
+    def __init__(self, api_port: int = 8898, *, snapshot=None):
         super().__init__()
         self.api = LocalApi(api_port)
         self.api_port = api_port
+        self._snapshot = snapshot
+        self.glass = self._load_glass()
+        self.animations = self._load_animations()
+        self._high_contrast = system_contrast_enabled()
+        self._page_fade: QPropertyAnimation | None = None
         self.worker: ApiThread | None = None
         self.action_worker: ApiThread | None = None
         self.payload: dict = {}
@@ -568,6 +899,38 @@ class MainWindow(QMainWindow):
 
     # ---------- frameless plumbing ----------
 
+    def _apply_system_backdrop(self) -> bool:
+        """Ask DWM for the real Mica/Acrylic surface (Windows 11 22H2+).
+
+        Returns True when DWM accepted the request. The app then stops drawing
+        its launch-time desktop still: the blur follows whatever is actually
+        behind the window instead of a frozen screenshot.
+        """
+        if sys.platform != "win32":
+            return False
+        try:
+            hwnd = int(self.winId())
+            dwm = ctypes.windll.dwmapi
+            # DWMWA_USE_IMMERSIVE_DARK_MODE keeps the DWM surface in step with
+            # our own theme; it only affects the system-drawn parts.
+            dark = ctypes.c_int(0 if self.theme == "light" else 1)
+            dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(dark),
+                                      ctypes.sizeof(dark))
+            # 1 = none, 2 = Mica (wallpaper), 3 = Acrylic (what is behind).
+            kind = ctypes.c_int(3 if self._glass_visible() else 1)
+            if dwm.DwmSetWindowAttribute(hwnd, 38, ctypes.byref(kind),
+                                         ctypes.sizeof(kind)) != 0:
+                return False
+            if self._glass_visible():
+                class _Margins(ctypes.Structure):
+                    _fields_ = [("left", ctypes.c_int), ("right", ctypes.c_int),
+                                ("top", ctypes.c_int), ("bottom", ctypes.c_int)]
+                margins = _Margins(-1, -1, -1, -1)
+                dwm.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(margins))
+            return True
+        except Exception:
+            return False
+
     def _enable_round_corners(self):
         if sys.platform == "win32":
             try:
@@ -625,8 +988,9 @@ class MainWindow(QMainWindow):
     def _build(self):
         self._apply_app_font()
         self.theme = self._load_theme()
-        central = QWidget()
-        central.setObjectName("rootWindow")
+        central = GlassBackdrop()
+        self.glass_root = central
+        central.set_snapshot(self._snapshot)
         outer = QVBoxLayout(central)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -648,6 +1012,15 @@ class MainWindow(QMainWindow):
         self.setStatusBar(status)
         self.statusBar().showMessage("正在连接本机服务…")
         self.apply_theme(self.theme)
+        # Windows 11 paints Mica/Acrylic behind the window itself. When DWM
+        # accepts it, the app stops compositing its own still; otherwise the
+        # snapshot fallback above stays active.
+        self._native_glass = self._apply_system_backdrop()
+        self.glass_root.set_native(self._native_glass)
+        if self._native_glass:
+            # The first stylesheet ran before we knew DWM would own the
+            # surface, so it still carried the heavy fallback alphas.
+            self._restyle()
 
     def _build_update_banner(self):
         """A window-wide line for the one update state that needs a decision.
@@ -737,10 +1110,23 @@ class MainWindow(QMainWindow):
                 button.setIcon(icon(
                     name, colors["accent"] if button.isChecked() else colors["icon"], 20))
 
+    def _sidebar_width(self) -> int:
+        return (self.SIDEBAR_NARROW if self.width() < self.NARROW_BELOW
+                else self.SIDEBAR_WIDE)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        panel = getattr(self, "sidebar_panel", None)
+        if panel is not None:
+            width = self._sidebar_width()
+            if panel.minimumWidth() != width:
+                panel.setFixedWidth(width)
+
     def _build_sidebar(self):
         panel = QFrame()
         panel.setObjectName("sidebar")
-        panel.setFixedWidth(320)
+        self.sidebar_panel = panel
+        panel.setFixedWidth(self._sidebar_width())
         box = QVBoxLayout(panel)
         box.setContentsMargins(20, 18, 16, 12)
         box.setSpacing(12)
@@ -1139,6 +1525,14 @@ class MainWindow(QMainWindow):
         row.addWidget(self.theme_button)
         row.addStretch()
         card_box.addLayout(row)
+        self.glass_check = QCheckBox("毛玻璃窗口材质：模糊窗口后面的桌面")
+        self.glass_check.setChecked(bool(self.glass))
+        self.glass_check.toggled.connect(self.set_glass)
+        card_box.addWidget(self.glass_check)
+        self.motion_check = QCheckBox("界面动效：分区切换时淡入")
+        self.motion_check.setChecked(bool(self.animations))
+        self.motion_check.toggled.connect(self.set_animations)
+        card_box.addWidget(self.motion_check)
         self.notify_check = QCheckBox("桌面提醒：收到新消息时弹出提示")
         self.notify_check.setChecked(self._load_prefs().get("notify", True) is not False)
         self.notify_check.toggled.connect(self._toggle_notify)
@@ -1149,7 +1543,7 @@ class MainWindow(QMainWindow):
         self.auto_update_check.toggled.connect(
             lambda on: self._save_prefs(auto_update=bool(on)))
         card_box.addWidget(self.auto_update_check)
-        hint = QLabel("主题立即应用到整个窗口，下次启动沿用")
+        hint = QLabel("主题、材质和动效立即应用到整个窗口，下次启动沿用")
         hint.setObjectName("muted")
         card_box.addWidget(hint)
 
@@ -1182,6 +1576,8 @@ class MainWindow(QMainWindow):
         box.addWidget(card)
         box.addStretch()
         self._sync_theme_button()
+        self._sync_glass_button()
+        self._sync_animation_button()
         return page
 
     def _load_prefs(self) -> dict:
@@ -1204,7 +1600,12 @@ class MainWindow(QMainWindow):
 
     def apply_theme(self, theme: str):
         self.theme = "light" if theme == "light" else "dark"
-        self.setStyleSheet(styles_for(self.theme))
+        self._restyle()
+        self._save_prefs(theme=self.theme)
+
+    def _restyle(self):
+        self.setStyleSheet(styles_for(self.theme, self._glass_visible(),
+                                      getattr(self, "_native_glass", False)))
         # Widgets the sheet does not reach (menus, scroll viewports, dialogs)
         # follow the palette, so flip it too or they keep the old theme.
         app = QApplication.instance()
@@ -1220,9 +1621,137 @@ class MainWindow(QMainWindow):
         self._refresh_icons()
         self._apply_surfaces()
         self._sync_theme_button()
+        self._sync_glass()
+        self._sync_glass_button()
+        self._sync_animation_button()
         self.update()
         self.repaint()
-        self._save_prefs(theme=self.theme)
+
+    # ---------- material and motion preferences ----------
+
+    def _load_glass(self) -> bool:
+        saved = self._load_prefs().get("glass")
+        if isinstance(saved, bool):
+            return saved
+        # Windows is the only platform where we can snapshot the desktop
+        # before the window maps. HIG accessibility: respect the system's
+        # "Reduce transparency" switch when the user has not chosen yet.
+        return (sys.platform == "win32" and system_transparency_enabled()
+                and not system_contrast_enabled())
+
+    def _glass_visible(self) -> bool:
+        root = getattr(self, "glass_root", None)
+        return bool(self.glass and not system_contrast_enabled()
+                    and root is not None and root.has_source())
+
+    def set_glass(self, enabled: bool):
+        self.glass = bool(enabled)
+        self._restyle()
+        self._save_prefs(glass=self.glass)
+
+    def _load_animations(self) -> bool:
+        saved = self._load_prefs().get("animations")
+        if isinstance(saved, bool):
+            return saved
+        return system_motion_enabled()
+
+    def set_animations(self, enabled: bool):
+        self.animations = bool(enabled)
+        if not self.animations:
+            self._finish_page_fade()
+        self._sync_animation_button()
+        self._save_prefs(animations=self.animations)
+
+    def _finish_page_fade(self) -> None:
+        anim = getattr(self, "_page_fade", None)
+        if anim is not None:
+            anim.stop()
+            self._page_fade = None
+        stack = getattr(self, "workspace_stack", None)
+        if stack is None:
+            return
+        for index in range(stack.count()):
+            page = stack.widget(index)
+            if page is not None and page.graphicsEffect() is not None:
+                page.setGraphicsEffect(None)
+
+    def _switch_workspace(self, index: int, *, animate: bool = True) -> None:
+        """Cross-fade the new page in; section switches only.
+
+        HIG Motion asks for brief, purposeful feedback and warns against
+        animating frequent interactions, so conversation switches stay
+        instant and this fade runs only when the rail changes a section.
+        """
+        stack = self.workspace_stack
+        if stack.currentIndex() == index:
+            return
+        if not animate or not self.animations or not self.isVisible():
+            self._finish_page_fade()
+            stack.setCurrentIndex(index)
+            return
+        self._finish_page_fade()
+        stack.setCurrentIndex(index)
+        page = stack.currentWidget()
+        if page is None:
+            return
+        effect = QGraphicsOpacityEffect(page)
+        effect.setOpacity(0.0)
+        page.setGraphicsEffect(effect)
+        anim = QPropertyAnimation(effect, b"opacity", self)
+        anim.setDuration(170)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+
+        def done():
+            page.setGraphicsEffect(None)
+            if self._page_fade is anim:
+                self._page_fade = None
+            anim.deleteLater()
+
+        anim.finished.connect(done)
+        self._page_fade = anim
+        anim.start()
+
+    def _sync_glass(self) -> None:
+        root = getattr(self, "glass_root", None)
+        if root is None:
+            return
+        colors = PALETTES[self.theme]
+        alpha = 40 if self.theme == "dark" else 52
+        root.set_material(QColor(colors["bg"]), alpha, self._glass_visible())
+        # Toggling the checkbox must switch DWM between Acrylic and none too,
+        # otherwise the window keeps a live blur the user just turned off.
+        if getattr(self, "_native_glass", False):
+            self._apply_system_backdrop()
+
+    def _sync_glass_button(self):
+        check = getattr(self, "glass_check", None)
+        if check is None:
+            return
+        blocked = system_contrast_enabled()
+        effective = bool(self.glass) and not blocked
+        check.blockSignals(True)
+        check.setChecked(effective)
+        check.blockSignals(False)
+        check.setEnabled(not blocked)
+        check.setToolTip("系统已开启高对比度，窗口使用标准材质" if blocked
+                         else "模糊窗口后面的桌面")
+
+    def _sync_animation_button(self):
+        check = getattr(self, "motion_check", None)
+        if check is None:
+            return
+        check.blockSignals(True)
+        check.setChecked(bool(self.animations))
+        check.blockSignals(False)
+
+    def _sync_contrast_state(self) -> None:
+        """Follow the Windows high-contrast switch while the app is running."""
+        now = system_contrast_enabled()
+        if now != getattr(self, "_high_contrast", None):
+            self._high_contrast = now
+            self._restyle()
 
     def _apply_surfaces(self) -> None:
         """Re-shade the raised surfaces for the active theme.
@@ -1623,7 +2152,7 @@ class MainWindow(QMainWindow):
     def set_mode(self, mode: str):
         self._mark_mode(mode)
         if mode in self.PAGE_CHROME:
-            self.workspace_stack.setCurrentIndex(self.PAGE_INDEX[mode])
+            self._switch_workspace(self.PAGE_INDEX[mode])
             self._set_page_header(*self.PAGE_CHROME[mode])
             self._show_chat_actions(False)
         else:
@@ -1631,10 +2160,10 @@ class MainWindow(QMainWindow):
                 self.current = None  # an ADB row is a shell, not a conversation
             self._show_chat_actions(True)
             if self.current is None:
-                self.workspace_stack.setCurrentIndex(0)
+                self._switch_workspace(0)
                 self._set_page_header("选择设备或群组", "从左侧列表开始", "◉")
             else:
-                self.workspace_stack.setCurrentIndex(1)
+                self._switch_workspace(1)
                 # The transcript was frozen while another page was up, so its
                 # cached signature no longer describes what is on screen.
                 self._timeline_signature = None
@@ -1671,6 +2200,7 @@ class MainWindow(QMainWindow):
     # ---------- data refresh ----------
 
     def refresh(self):
+        self._sync_contrast_state()
         if getattr(self, "offline_mode", False):
             return  # offline page waits for an explicit retry
         if self.worker and self.worker.isRunning():
@@ -1765,9 +2295,9 @@ class MainWindow(QMainWindow):
         row.addWidget(avatar)
         col = QVBoxLayout()
         col.setSpacing(1)
-        name = QLabel(title)
+        name = ElidedLabel(title)
         name.setObjectName("entityName")
-        sub = QLabel(subtitle)
+        sub = ElidedLabel(subtitle)
         sub.setObjectName("entitySub")
         col.addWidget(name)
         col.addWidget(sub)
@@ -2656,7 +3186,7 @@ class MainWindow(QMainWindow):
             return
         head, _, tail = raw.rpartition(":")
         ip = head or raw
-        port = int(tail) if tail.isdigit() else 8891
+        port = int(tail) if is_port_text(tail) else 8891
         self.run_action(lambda: self._probe_peer(ip, port))
 
     def _probe_peer(self, ip: str, port: int) -> dict:
@@ -2920,13 +3450,35 @@ def main(argv: list[str] | None = None, *, api_port: int = 8898) -> int:
     app.setWindowIcon(logo_icon())
     app.setStyle("Fusion")
     app.setFont(QFont("Microsoft YaHei UI", 9))
-    window = MainWindow(api_port)
+    # Snapshot before the window maps, or the material would contain itself.
+    snapshot = desktop_snapshot() if sys.platform == "win32" else None
+    window = MainWindow(api_port, snapshot=snapshot)
     window.setWindowIcon(logo_icon())
     window.show()
     # After the window is on screen, never before: the launch check must not
     # delay first paint, and tests that construct MainWindow directly stay
     # offline (the check only lives here, not in __init__).
     QTimer.singleShot(3000, window.auto_check_updates)
+    # A window with no material used to fail silently. Set RELAYDESK_GLASS_DIAG
+    # to a file path to dump why; only diagnostics, never product behaviour.
+    diag = os.environ.get("RELAYDESK_GLASS_DIAG")
+    if diag:
+        def _dump():
+            root = window.glass_root
+            try:
+                with open(diag, "w", encoding="utf-8") as fh:
+                    fh.write(f"snapshot={snapshot is not None}\n")
+                    fh.write(f"platform={sys.platform}\n")
+                    fh.write(f"has_source={root.has_source()}\n")
+                    fh.write(f"enabled={root._enabled}\n")
+                    fh.write(f"glass={window.glass}\n")
+                    fh.write(f"visible={window._glass_visible()}\n")
+                    fh.write(f"size={root.size().width()}x{root.size().height()}\n")
+                    fh.write(f"cache={root._cache}\n")
+                    fh.write(f"error={getattr(root, '_last_error', None)}\n")
+            except OSError:
+                pass
+        QTimer.singleShot(2500, _dump)
     return app.exec()
 
 
@@ -3066,19 +3618,84 @@ def _check_icon_rule(theme: str) -> str:
         return ""
 
 
-def styles_for(theme: str) -> str:
-    """One authored sheet for both themes, filled from explicit tokens."""
+# Liquid-glass layering is applied to the whole window, not just the
+# functional rail: the reference look (macOS 26 / Windows 11 Mica) puts the
+# same material behind message lists, cards and the composer. Depth comes from
+# alpha, not from opaque sheets — the rail is lightest, content sits at a
+# heavier fill so 10-11 px body text keeps its contrast over a bright desktop.
+GLASS_ALPHA = {
+    "dark": {"bg_rail": 88, "bg_side": 128, "bg_content": 104},
+    "light": {"bg_rail": 132, "bg_side": 168, "bg_content": 142},
+}
+# With the DWM Acrylic surface the blur and tint already come from the system,
+# so the panes only need enough fill to keep text legible — anything heavier
+# hides the material the user asked for.
+GLASS_ALPHA_NATIVE = {
+    "dark": {"bg_rail": 64, "bg_side": 118, "bg_content": 92},
+    "light": {"bg_rail": 96, "bg_side": 148, "bg_content": 124},
+}
+# Vibrancy tint. The material composites translucent tint over the desktop, so
+# a bright window behind a dark sidebar used to lift secondary text to ~3:1.
+# Tinting the dark layer near-black (as macOS does) keeps 10-11 px text above
+# 4.5:1; the light layer goes white for the same reason against dark windows.
+GLASS_TINT = {
+    "dark": {"bg_rail": "#000000", "bg_side": "#000000",
+             "bg_content": "#000000"},
+    "light": {"bg_rail": "#ffffff", "bg_side": "#ffffff",
+              "bg_content": "#ffffff"},
+}
+
+
+def _rgba(color: str, alpha: int) -> str:
+    value = QColor(color)
+    return (f"rgba({value.red()}, {value.green()}, {value.blue()}, "
+            f"{max(0, min(255, alpha)) / 255:.3f})")
+
+
+def _glass_sheet(theme: str, native: bool = False) -> str:
+    name = "light" if theme == "light" else "dark"
+    tint = GLASS_TINT[name]
+    alpha = (GLASS_ALPHA_NATIVE if native else GLASS_ALPHA)[name]
+    rail = _rgba(tint["bg_rail"], alpha["bg_rail"])
+    side = _rgba(tint["bg_side"], alpha["bg_side"])
+    content = _rgba(tint["bg_content"], alpha["bg_content"])
+    return f"""
+QFrame#rail {{ background: {rail}; }}
+QFrame#sidebar {{ background: {side}; }}
+QFrame#titleBar {{ background: {rail}; }}
+QStatusBar {{ background: {rail}; }}
+/* The content plane carries the same material: the window and each page stop
+   painting an opaque sheet, while the workspace keeps one translucent fill so
+   the blurred desktop stays visible behind message lists and settings without
+   washing out body text. Card-like surfaces use the heavier fill. */
+QWidget#rootWindow, QWidget#page {{ background: transparent; }}
+QFrame#workspace {{ background: {content}; }}
+QFrame#sessionHeader {{ background: {rail}; }}
+QFrame#composer, QFrame#settingsCard {{ background: {side}; }}
+QListWidget#contentList {{ background: {rail}; }}
+QLabel#mediaPreview {{ background: {content}; }}
+"""
+
+
+def styles_for(theme: str, glass: bool = False, native: bool = False) -> str:
+    """One authored sheet for both themes, filled from explicit tokens.
+
+    With ``glass`` the panes that sit over the blurred backdrop turn
+    translucent; ``native`` means DWM draws the blur, so the panes stay lighter.
+    """
     tokens = dict(PALETTES["light" if theme == "light" else "dark"])
     tokens.update(SCALE)
     tokens["font_stack"] = FONT_STACK
     tokens["check_rule"] = _check_icon_rule(theme)
-    return Template(STYLES).substitute(tokens)
+    sheet = Template(STYLES).substitute(tokens)
+    return sheet + _glass_sheet(theme, native) if glass else sheet
 
 
 STYLES = """
 * { font-family: $font_stack; }
 
 /* ---------------------------------------------------------------- window */
+QWidget#glassRoot { background: transparent; }
 QWidget#rootWindow, QWidget#page {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                                 stop:0 $bg, stop:1 $bg_deep);

@@ -52,11 +52,28 @@ LOCK_STALE_S = 45 * 60
 EXIT_OK, EXIT_NETWORK, EXIT_INSTALL, EXIT_ENV = 0, 3, 4, 5
 EXIT_UPDATE_AVAILABLE = 10
 
+# The lite pattern must not match the "-full" download: two zips ship per
+# release and the default channel only carries the one without the media stack.
 _PLATFORM_ASSET = {
-    "win32": r"win(?:64|32)?[-_.]?.*\.zip$",
+    "win32": r"win(?:64|32)?(?![^/]*full)[-_.]?.*\.zip$",
     "darwin": r"(?:macos|osx|darwin).*\.zip$",
     "linux": r"linux.*\.zip$",
 }
+# A machine that installed the full package keeps getting the full package;
+# silently falling back to lite would take screen sharing away on update.
+_FULL_ASSET = {
+    "win32": r"win(?:64|32)?[-_.].*full.*\.zip$",
+}
+
+
+def preferred_asset_pattern(record: dict | None) -> str | None:
+    """Sticky channel: full stays full, everything else gets the default."""
+    if sys.platform not in _FULL_ASSET:
+        return None
+    asset = (record or {}).get("asset") or ""
+    if "full" in str(asset).lower():
+        return _FULL_ASSET[sys.platform]
+    return None
 
 
 def log_line(message: str, *, path: Path | None = None, echo: bool = False) -> None:
@@ -712,7 +729,8 @@ def run_update(*, repo: str = REPO_DEFAULT, api_base: str = API_DEFAULT,
     release = pick_release(fetch_releases(repo, api_base=api_base, token=token,
                                          mirrors=mirror_list),
                            include_prerelease=include_prerelease)
-    asset = pick_asset(release, pattern=asset_pattern)
+    asset = pick_asset(release, pattern=asset_pattern
+                       or preferred_asset_pattern(record))
     verdict = decide(record, local_tag, release, asset)
     result = {"ok": True, "exe": str(target), "current": local_tag or "unknown",
               "currentSha256": local_sha,
