@@ -70,6 +70,8 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: PROXY_MANAGED
+          # 复用本机已装的 bun，避免每次从 GitHub CDN 下载（实测 10 分钟以上）
+          path_to_bun_executable: ${{ vars.BUN_EXE || 'C:\Users\Administrator\.bun\bin\bun.exe' }}
           prompt: |
             你在给一个公开仓库做新 issue 的首轮分诊。请用中文回复，直接给出结论，不要说客套话。
 
@@ -106,6 +108,8 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: PROXY_MANAGED
+          # 复用本机已装的 bun，避免每次从 GitHub CDN 下载（实测 10 分钟以上）
+          path_to_bun_executable: ${{ vars.BUN_EXE || 'C:\Users\Administrator\.bun\bin\bun.exe' }}
           prompt: |
             你在评审这个仓库的一个拉取请求。先看 diff，再按下面的格式输出中文评审意见。
 
@@ -138,6 +142,8 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: PROXY_MANAGED
+          # 复用本机已装的 bun，避免每次从 GitHub CDN 下载（实测 10 分钟以上）
+          path_to_bun_executable: ${{ vars.BUN_EXE || 'C:\Users\Administrator\.bun\bin\bun.exe' }}
           claude_args: |
             --model ccs-claude-openai--deepseek-v4.1-flash
             --allowedTools "Read,Grep,Glob"

@@ -54,6 +54,21 @@ curl -sS -X POST http://127.0.0.1:15721/v1/messages \
 返回带 `content` 的 JSON 即可。若代理换了端口，同步改
 `gh-bot-reply.yml` 里的 `ANTHROPIC_BASE_URL`。
 
+### 2.5 复用本机 bun（强烈建议）
+
+官方 action 默认每次从 GitHub CDN 下载 Bun，在慢速网络下实测要十分钟以上，
+能把 job 拖到超时。workflow 默认指向本机已装的 bun：
+
+```
+C:\Users\Administrator\.bun\bin\bun.exe
+```
+
+换机器时不用改文件，设一个仓库变量即可覆盖：
+
+```bash
+gh variable set BUN_EXE --repo <owner>/<repo> --body "D:\path\to\bun.exe"
+```
+
 ### 3. 配置机器人身份（强烈建议）
 
 GitHub 不允许批准自己的 PR。用 `github.token` 时，你自己开的 PR 批不了。
