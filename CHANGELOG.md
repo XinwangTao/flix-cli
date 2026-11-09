@@ -5,7 +5,12 @@
 
 ## [未发布]
 
+### 新增
+- Android 液态玻璃界面：全屏玉青/蓝紫氛围光，玻璃头部/标签/卡片/输入栏，渐变头像与沉浸系统栏。
+
 ### 修复
+- Android：文件接收在 `MediaStore.openOutputStream()` 返回 null（Android 17/HyperOS）时改用
+  `openFileDescriptor`；前台服务每 30s 自检通道，accept 卡死时重建并重新 announce。
 - 群组状态只在一端生效：GUI 建群会推 `rdGroupSync`，CLI 的 `flix group create --member` /
   `group add` 只写本机库，于是 PC 上建好群、`group send` 也 `delivered`，板子上
   `flix group list` 却是空的、`flix group history <gid>` 回 `no-group`——气泡其实已经

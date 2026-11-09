@@ -11,8 +11,8 @@ android {
         applicationId = "com.relaydesk.app"
         minSdk = 29
         targetSdk = 34
-        versionCode = 4
-        versionName = "2.4.1"
+        versionCode = 5
+        versionName = "2.4.2"
     }
 
     buildTypes {

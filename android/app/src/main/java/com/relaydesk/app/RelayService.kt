@@ -82,6 +82,8 @@ class RelayService : Service() {
         worker?.scheduleWithFixedDelay({ probeDevices() }, 10, 60, TimeUnit.SECONDS)
         worker?.scheduleWithFixedDelay({ discovery?.announce(times = 2) },
             30, 30, TimeUnit.SECONDS)
+        worker?.scheduleWithFixedDelay({ ensureChannelHealthy() },
+            30, 30, TimeUnit.SECONDS)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -140,6 +142,45 @@ class RelayService : Service() {
             discovery = d
             d.announce()
         }
+    }
+
+    /** Recreate the channel if its accept loop stopped answering connections. */
+    private fun ensureChannelHealthy() {
+        val current = server
+        val port = Runtime.servicePort
+        if (current == null || port <= 0 || !current.isAlive) {
+            restartChannel()
+            return
+        }
+        val accepting = try {
+            java.net.Socket().use { socket ->
+                socket.connect(java.net.InetSocketAddress("127.0.0.1", port), 1500)
+            }
+            true
+        } catch (_: Exception) {
+            false
+        }
+        if (!accepting) {
+            android.util.Log.e("RD", "channel :$port not accepting, restarting")
+            restartChannel()
+        }
+    }
+
+    private fun restartChannel() {
+        runCatching { server?.stop() }
+        server = null
+        val port = startChannel()
+        Runtime.servicePort = port ?: 0
+        if (port == null) {
+            updateServiceNotification("设备通道不可用：8891/18991 均被占用")
+            Runtime.emit("error", "设备通道端口被占用")
+            return
+        }
+        discovery?.stop()
+        discovery = null
+        startDiscovery(port)
+        updateServiceNotification("设备通道 :$port · 后台接收已开启")
+        android.util.Log.e("RD", "channel restarted on :$port")
     }
 
     // ---------- presence ----------
