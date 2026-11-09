@@ -123,6 +123,15 @@
       "type": "external",
       "label": "执行失败",
       "sublabel": "限额 · 超时 · fork PR"
+    },
+    {
+      "id": "degrade",
+      "lane": "human",
+      "col": 5,
+      "type": "frontend",
+      "label": "降级确认",
+      "sublabel": "token 无批准权",
+      "tag": "评论留痕"
     }
   ],
   "edges": [
@@ -169,6 +178,13 @@
       "to": "approve",
       "label": "全部命中",
       "variant": "emphasis"
+    },
+    {
+      "from": "approve",
+      "to": "degrade",
+      "label": "token 无批准权",
+      "role": "error",
+      "variant": "dashed"
     }
   ],
   "cards": [

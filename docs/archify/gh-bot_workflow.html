@@ -5004,7 +5004,7 @@
     <!-- Main Diagram -->
     <div class="diagram-container" data-detail-level="read"
          data-preset-badge-editorial-plate="ARCHIFY / 图版 04">
-      <svg viewBox="0 0 930 660" role="img" lang="zh-CN" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+      <svg viewBox="0 0 994 660" role="img" lang="zh-CN" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
         <title id="archify-diagram-title">GitHub 自动化 Bot：回复 + 低风险放行</title>
         <desc id="archify-diagram-description">由 Archify 生成的工作流图。</desc>
         <!-- Definitions -->
@@ -5058,13 +5058,14 @@
 
 
         <!-- Edge paths -->
-        <path data-edge-from="claude" data-edge-to="fail" data-edge-label="异常" data-edge-key="0" data-composition-points="389.6,272;389.6,498;541.6,498" d="M 389.6 272 L 389.6 498 L 541.6 498" class="a-dashed" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
-        <path data-edge-from="claude" data-edge-to="post" data-edge-label="评审意见 / 答疑" data-edge-key="1" data-composition-points="451.6,246;541.6,246" d="M 451.6 246 L 541.6 246" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="event" data-edge-to="route" data-edge-label="webhook" data-edge-key="2" data-composition-points="172,120;223.60000000000002,120" d="M 172 120 L 223.60000000000002 120" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="policy" data-edge-to="approve" data-edge-label="全部命中" data-edge-key="3" data-composition-points="707.6,398;707.6,426;856,426;856,406" d="M 707.6 398 L 707.6 426 L 856 426 L 856 406" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="policy" data-edge-to="manual" data-edge-label="越界 / CI 未过" data-edge-key="4" data-composition-points="661.6,372;645.6,372;645.6,552;707.6,552;707.6,524" d="M 661.6 372 L 645.6 372 L 645.6 552 L 707.6 552 L 707.6 524" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
-        <path data-edge-from="post" data-edge-to="policy" data-edge-label="PR 且非 draft" data-edge-key="5" data-composition-points="633.6,246;707.6,246;707.6,346" d="M 633.6 246 L 707.6 246 L 707.6 346" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="route" data-edge-to="claude" data-edge-label="带上下文" data-edge-key="6" data-composition-points="269.6,146;269.6,246;327.6,246" d="M 269.6 146 L 269.6 246 L 327.6 246" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="approve" data-edge-to="degrade" data-edge-label="token 无批准权" data-edge-key="0" data-composition-points="902,372;975.2,372;975.2,498;902,498" d="M 902 372 L 975.2 372 L 975.2 498 L 902 498" class="a-dashed" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="claude" data-edge-to="fail" data-edge-label="异常" data-edge-key="1" data-composition-points="389.6,272;389.6,498;541.6,498" d="M 389.6 272 L 389.6 498 L 541.6 498" class="a-dashed" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="claude" data-edge-to="post" data-edge-label="评审意见 / 答疑" data-edge-key="2" data-composition-points="451.6,246;541.6,246" d="M 451.6 246 L 541.6 246" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="event" data-edge-to="route" data-edge-label="webhook" data-edge-key="3" data-composition-points="172,120;223.60000000000002,120" d="M 172 120 L 223.60000000000002 120" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="policy" data-edge-to="approve" data-edge-label="全部命中" data-edge-key="4" data-composition-points="707.6,398;707.6,426;856,426;856,406" d="M 707.6 398 L 707.6 426 L 856 426 L 856 406" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="policy" data-edge-to="manual" data-edge-label="越界 / CI 未过" data-edge-key="5" data-composition-points="661.6,372;645.6,372;645.6,552;707.6,552;707.6,524" d="M 661.6 372 L 645.6 372 L 645.6 552 L 707.6 552 L 707.6 524" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
+        <path data-edge-from="post" data-edge-to="policy" data-edge-label="PR 且非 draft" data-edge-key="6" data-composition-points="633.6,246;707.6,246;707.6,346" d="M 633.6 246 L 707.6 246 L 707.6 346" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="route" data-edge-to="claude" data-edge-label="带上下文" data-edge-key="7" data-composition-points="269.6,146;269.6,246;327.6,246" d="M 269.6 146 L 269.6 246 L 327.6 246" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
 
         <!-- Nodes -->
         <g id="node-event" data-node-id="event" data-node-label="issue / PR 创建" tabindex="0" role="button" aria-label="聚焦issue / PR 创建，issues · pull_request, GitHub 事件 › 触发" aria-pressed="false" data-node-kind="messagebus" data-node-sublabel="issues · pull_request" data-node-context="GitHub 事件 › 触发">
@@ -5165,32 +5166,51 @@
           <text data-detail="context" x="707.6" y="510" class="t-muted" font-size="8" text-anchor="middle">needs-human 标签</text>
         </g>
 
+        <g id="node-degrade" data-node-id="degrade" data-node-label="降级确认" tabindex="0" role="button" aria-label="聚焦降级确认，token 无批准权, 失败与人工兜底 › 放行判定" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="token 无批准权" data-node-tag="评论留痕" data-node-context="失败与人工兜底 › 放行判定">
+          <title>降级确认 · token 无批准权 · 失败与人工兜底 › 放行判定 · 评论留痕</title>
+          <rect x="810" y="464" width="92" height="68" rx="6" class="c-mask"/>
+          <rect x="810" y="464" width="92" height="68" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(816 470) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <text data-node-label="" data-detail-anchor="" x="856" y="485" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">降级确认</text>
+          <text data-detail="context" x="856" y="502" class="t-muted" font-size="8" text-anchor="middle">token 无批准权</text>
+        <text data-detail="fine" x="856" y="520" class="t-frontend" font-size="7" text-anchor="middle">评论留痕</text>
+        </g>
+
         <!-- Edge labels -->
-        <g data-detail="context" data-edge-from="claude" data-edge-to="fail" data-edge-label="异常" data-edge-key="0">
+        <g data-detail="context" data-edge-from="approve" data-edge-to="degrade" data-edge-label="token 无批准权" data-edge-key="0">
+          <rect x="900" y="352" width="77.2" height="14" rx="3" class="c-mask"/>
+          <text x="938.6" y="362" class="t-database" font-size="8" text-anchor="middle">token 无批准权</text>
+        </g>
+        <g data-detail="context" data-edge-from="claude" data-edge-to="fail" data-edge-label="异常" data-edge-key="1">
           <rect x="450.6" y="478" width="30" height="14" rx="3" class="c-mask"/>
           <text x="465.6" y="488" class="t-database" font-size="8" text-anchor="middle">异常</text>
         </g>
-        <g data-detail="context" data-edge-from="claude" data-edge-to="post" data-edge-label="评审意见 / 答疑" data-edge-key="1">
+        <g data-detail="context" data-edge-from="claude" data-edge-to="post" data-edge-label="评审意见 / 答疑" data-edge-key="2">
           <rect x="455.6" y="226" width="82" height="14" rx="3" class="c-mask"/>
           <text x="496.6" y="236" class="t-backend" font-size="8" text-anchor="middle">评审意见 / 答疑</text>
         </g>
-        <g data-detail="context" data-edge-from="event" data-edge-to="route" data-edge-label="webhook" data-edge-key="2">
+        <g data-detail="context" data-edge-from="event" data-edge-to="route" data-edge-label="webhook" data-edge-key="3">
           <rect x="176" y="100" width="43.6" height="14" rx="3" class="c-mask"/>
           <text x="197.8" y="110" class="t-backend" font-size="8" text-anchor="middle">webhook</text>
         </g>
-        <g data-detail="context" data-edge-from="policy" data-edge-to="approve" data-edge-label="全部命中" data-edge-key="3">
+        <g data-detail="context" data-edge-from="policy" data-edge-to="approve" data-edge-label="全部命中" data-edge-key="4">
           <rect x="757.5999999999999" y="406" width="48.4" height="14" rx="3" class="c-mask"/>
           <text x="781.8" y="416" class="t-backend" font-size="8" text-anchor="middle">全部命中</text>
         </g>
-        <g data-detail="context" data-edge-from="policy" data-edge-to="manual" data-edge-label="越界 / CI 未过" data-edge-key="4">
+        <g data-detail="context" data-edge-from="policy" data-edge-to="manual" data-edge-label="越界 / CI 未过" data-edge-key="5">
           <rect x="638" y="532" width="77.2" height="14" rx="3" class="c-mask"/>
           <text x="676.6" y="542" class="t-security" font-size="8" text-anchor="middle">越界 / CI 未过</text>
         </g>
-        <g data-detail="context" data-edge-from="post" data-edge-to="policy" data-edge-label="PR 且非 draft" data-edge-key="5">
+        <g data-detail="context" data-edge-from="post" data-edge-to="policy" data-edge-label="PR 且非 draft" data-edge-key="6">
           <rect x="634.4" y="226" width="72.4" height="14" rx="3" class="c-mask"/>
           <text x="670.6" y="236" class="t-backend" font-size="8" text-anchor="middle">PR 且非 draft</text>
         </g>
-        <g data-detail="context" data-edge-from="route" data-edge-to="claude" data-edge-label="带上下文" data-edge-key="6">
+        <g data-detail="context" data-edge-from="route" data-edge-to="claude" data-edge-label="带上下文" data-edge-key="7">
           <rect x="274.40000000000003" y="226" width="48.4" height="14" rx="3" class="c-mask"/>
           <text x="298.6" y="236" class="t-backend" font-size="8" text-anchor="middle">带上下文</text>
         </g>
