@@ -92,21 +92,66 @@ gh variable set CLAUDE_EXE --repo <owner>/<repo> \
 
 没配这个变量时，workflow 会直接报「未设置仓库变量 CLAUDE_EXE」。
 
-### 3. 配置机器人身份（强烈建议）
+### 3. 配置机器人身份（想做真自动批准才需要）
 
-GitHub 不允许批准自己的 PR。用 `github.token` 时，你自己开的 PR 批不了。
+GitHub 不允许批准自己的 PR，而且 `github.token` 被明确禁止批准 PR
+（实测 422：`GitHub Actions is not permitted to approve pull requests`）。
+所以自动批准需要一个**独立身份**。两种做法：
 
-做法：注册一个 bot 账号 → 加成本仓库协作者 → 用它的 fine-grained PAT
-（权限：`Pull requests: Read and write`、`Contents: Read`、`Issues: Read and write`）
+#### 方案 A：GitHub App（推荐，权限最小）
+
+跑一次创建脚本，浏览器点两下即可：
+
+```powershell
+python D:\GitHubBot\setup_bot_app.py --repo <owner>/<repo>
+```
+
+1. 弹出的页面点 **Create GitHub App**；
+2. 按打印的链接把 App **安装到本仓库**；
+3. 写 secret：
+
+```powershell
+powershell D:\GitHubBot\set_bot_secrets.ps1 -Repo <owner>/<repo>
+```
+
+会写入 `BOT_APP_ID` 和 `BOT_APP_PRIVATE_KEY`。workflow 检测到它们就自动用
+App 安装 token 提交批准；App 权限只有 `contents: read`、`issues: write`、
+`pull_requests: write`。
+
+#### 方案 B：独立 bot 账号 + PAT
+
+注册一个小号 → 加成本仓库协作者 → 用它的 fine-grained PAT
+（`Pull requests: Read and write`、`Contents: Read`、`Issues: Read and write`）
 存成仓库 secret `GH_BOT_TOKEN`。
 
-没配这个 secret 也不会报错，只是退回 `github.token`，仅对他人提交的 PR 生效。
+**两种都没配也不会报错**：放行流程会退化成「已满足自动批准条件，待人工确认」的评论。
 
 ### 4. 合并到 main
 
 `workflow_run` 类型的触发要求 workflow 文件已经在默认分支上，
 所以必须合进 `main` 才会自动触发。合并后手动跑一次
 **GH Bot · 低风险放行**（`workflow_dispatch`，填一个 PR 号）做冒烟测试。
+
+### 5. 分支保护（可选但建议）
+
+main 建议开启：必需检查 `test (3.11)`、`test (3.12)` + 必需 1 个批准，
+`enforce_admins` 关掉（管理员可绕过，避免把维护者自己锁死）。
+
+> **顺序很重要**：先建好机器人身份、确认它能批准，再打开「必需批准」。
+> 否则你自己写的 PR 既不能自批、机器人又批不了，会直接卡死。
+
+```bash
+gh api -X PUT repos/<owner>/<repo>/branches/main/protection --input - <<'JSON'
+{
+  "required_status_checks": {"strict": false, "contexts": ["test (3.11)", "test (3.12)"]},
+  "enforce_admins": false,
+  "required_pull_request_reviews": {"required_approving_review_count": 1},
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false
+}
+JSON
+```
 
 ## 冒烟测试清单
 
