@@ -206,6 +206,11 @@ PR 里塞一个 `CLAUDE.md` 会让内容进入评审上下文，加 `--bare` 后
 - **删除和重命名同样过禁止路径**：删 `src/x.py`、把 `src/x.py` 移到 `docs/` 都会被拦。
 - 新增/删除行数都有上限（`max_additions` / `max_deletions`）。
 - 没有任何文件命中白名单（含空 PR）不批准；**删除**也要命中白名单，删掉 `assets/` 这类白名单外文件会被拦。
+- **符号链接（120000）和子模块（160000）一律不批**：软链能把 runner 上的文件（例如 `.git/config`
+  里的 token）带进构建产物（`pyproject` 的 readme、spec 的 copy_metadata）。
+- 文件名含控制字符（含换行）不批；目标分支必须是默认分支；**最后提交作者**也要在白名单内。
+- `docs/archify/**` 不参与自动放行：流程图是流程真源，按 Archify 协议需人工确认。
+- policy 一律从**默认分支**读（`workflow_dispatch` 可选任意 ref，不能信检出目录）；缺必需字段直接失败。
 - **CI 恒为必需**（没有开关）；手动触发会按 `head_sha` 反查 CI 结论（用 workflow 自带 token，App/PAT 无 `actions: read`）。
 - 转人工标签不存在时 workflow 会自动创建，不会静默丢掉信号。
 - 批准提交带 `commit_id`，且提交前重新确认 head 未变（防判定后被推送）。

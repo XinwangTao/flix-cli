@@ -9,8 +9,6 @@
     ],
     "paths": [
       "**/*.md",
-      "docs/archify/*.json",
-      "docs/archify/*.html",
       "requirements*.txt",
       "poetry.lock",
       "uv.lock",
