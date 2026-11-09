@@ -211,13 +211,18 @@ def fetch_releases(repo: str = REPO_DEFAULT, *, api_base: str = API_DEFAULT,
 
 
 def pick_release(releases: list[Release], *, include_prerelease: bool = False) -> Release:
-    for release in releases:
-        if release.draft:
-            continue
-        if release.prerelease and not include_prerelease:
-            continue
-        return release
-    raise UpdateError("no-releases", "没有可用的正式 release", EXIT_NETWORK)
+    """Highest published version, not merely the most recently created one.
+
+    The GitHub API returns ``created_at`` order. A backport published after a
+    newer line (e.g. 2.3.1 then a 2.3.0 rebuild) therefore appears first, and
+    taking that entry would hide the higher version forever. Version ties go to
+    the stable tag so ``--prerelease`` still prefers 2.3.0 over 2.3.0-rc1.
+    """
+    eligible = [r for r in releases
+                if not r.draft and (include_prerelease or not r.prerelease)]
+    if not eligible:
+        raise UpdateError("no-releases", "没有可用的正式 release", EXIT_NETWORK)
+    return max(eligible, key=lambda r: (r.version, not r.prerelease))
 
 
 def pick_asset(release: Release, *, pattern: str | None = None) -> Asset:

@@ -150,6 +150,20 @@ class ReleasePickTests(unittest.TestCase):
         self.assertIs(au.pick_release([draft, pre, stable]), stable)
         self.assertIs(au.pick_release([pre, stable], include_prerelease=True), pre)
 
+    def test_out_of_order_releases_pick_the_highest_version(self):
+        """GitHub lists by created_at; a later backport must not hide a newer
+        patch line (2.3.1) behind the first entry (a 2.3.0 rebuild)."""
+        rebuild = au.Release("v2.3.0", "rebuild", False, False, "")
+        newer = au.Release("v2.3.1", "newer", False, False, "")
+        self.assertIs(au.pick_release([rebuild, newer]), newer)
+        self.assertIs(au.pick_release([newer, rebuild]), newer)
+
+    def test_prerelease_tie_loses_to_the_stable_tag(self):
+        rc = au.Release("v2.3.0-rc1", "rc", True, False, "")
+        stable = au.Release("v2.3.0", "stable", False, False, "")
+        self.assertIs(au.pick_release([rc, stable], include_prerelease=True),
+                      stable)
+
     def test_no_usable_release_raises_network_error(self):
         with self.assertRaises(au.UpdateError) as caught:
             au.pick_release([au.Release("v1", "d", False, True, "")])
