@@ -215,7 +215,9 @@ jobs:
               // GitHub 禁止 Actions 自带 token 提交批准；没有 GH_BOT_TOKEN 时会 422。
               // 这不是判定失败，降级为"条件已满足，待人工点一下"。
               const msg = e.message || '';
+              const status = e.status || (e.response && e.response.status) || 0;
               const permissionIssue =
+                status === 403 ||
                 /not permitted (to create or )?approve/i.test(msg) ||
                 /cannot approve your own/i.test(msg) ||
                 /resource not accessible by integration/i.test(msg) ||

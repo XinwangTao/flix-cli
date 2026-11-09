@@ -177,7 +177,7 @@ jobs:
           IS_PR: ${{ github.event_name == 'pull_request_review_comment' }}
         run: |
           $OutputEncoding = [Console]::OutputEncoding = [Text.Encoding]::UTF8
-          if ($env:GITHUB_ACTOR -like "*[bot]") { Write-Host "由机器人触发，跳过"; exit 0 }
+          if ($env:GITHUB_ACTOR -match '\[bot\]$') { Write-Host "由机器人触发，跳过"; exit 0 }
           if (-not $env:CLAUDE_EXE) { throw "未设置仓库变量 CLAUDE_EXE，见 docs/GH-BOT.md 2.5" }
           $prompt = @"
           有人在仓库里 @你 提问。用中文简洁回答，需要看代码时用 Read/Grep/Glob 查。
