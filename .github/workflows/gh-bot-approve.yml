@@ -219,7 +219,7 @@ jobs:
                 /not permitted (to create or )?approve/i.test(msg) ||
                 /cannot approve your own/i.test(msg) ||
                 /resource not accessible by integration/i.test(msg) ||
-                /403/.test(msg);
+                /status:?\s*403/i.test(msg);
               if (!permissionIssue) throw e;
 
               const READY = `<!-- gh-bot:ready:${pr.head.sha} -->`;

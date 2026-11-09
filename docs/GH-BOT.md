@@ -78,15 +78,19 @@ curl -sS -X POST http://127.0.0.1:15721/v1/messages \
 ### 2.5 指定 Claude Code CLI 路径
 
 回复与评审直接调用本机已装的 `claude` 可执行文件，不走官方 composite action
-（它依赖 bun + bash，在 Windows runner 上踩坑多）。路径写在 workflow 的
-`CLAUDE_EXE` 环境变量里：
+（它依赖 bun + bash，在 Windows runner 上踩坑多）。路径由**仓库变量** `CLAUDE_EXE` 提供：
 
 ```bash
-npm root -g          # 例如 C:\Users\<user>\AppData\Roaming\npm\node_modules
-# CLAUDE_EXE = <上面的路径>\@anthropic-ai\claude-code\bin\claude.exe
+# 先看全局 npm 根目录，再拼出 exe 路径
+npm root -g
+# 例如 Windows：<npm 根目录>\@anthropic-ai\claude-code\bin\claude.exe
+
+# 写成仓库变量（不是 secret，只是路径）
+gh variable set CLAUDE_EXE --repo <owner>/<repo> \
+  --body '<npm 根目录>\@anthropic-ai\claude-code\bin\claude.exe'
 ```
 
-换机器时改这一处即可。
+没配这个变量时，workflow 会直接报「未设置仓库变量 CLAUDE_EXE」。
 
 ### 3. 配置机器人身份（强烈建议）
 

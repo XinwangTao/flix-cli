@@ -61,8 +61,14 @@ jobs:
           ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
           $OutputEncoding = [Console]::OutputEncoding = [Text.Encoding]::UTF8
-          if ($env:ISSUE_BODY.Length -gt 8000) {
-            Write-Host "正文 $($env:ISSUE_BODY.Length) 字，超过上限，跳过"
+          if (-not $env:CLAUDE_EXE) { throw "未设置仓库变量 CLAUDE_EXE，见 docs/GH-BOT.md 2.5" }
+          $limit = 8000
+          try {
+            $policy = Get-Content .github/gh-bot-policy.json -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($policy.reply.max_issue_body_chars) { $limit = [int]$policy.reply.max_issue_body_chars }
+          } catch { Write-Host "读 policy 失败，用默认上限 $limit" }
+          if ($env:ISSUE_BODY.Length -gt $limit) {
+            Write-Host "正文 $($env:ISSUE_BODY.Length) 字，超过上限 $limit，跳过"
             exit 0
           }
 
@@ -115,7 +121,9 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           $OutputEncoding = [Console]::OutputEncoding = [Text.Encoding]::UTF8
+          if (-not $env:CLAUDE_EXE) { throw "未设置仓库变量 CLAUDE_EXE，见 docs/GH-BOT.md 2.5" }
           $diff = gh pr diff $env:PR_NUMBER --repo $env:GITHUB_REPOSITORY 2>$null | Out-String
+          if ([string]::IsNullOrWhiteSpace($diff)) { throw "取不到 PR diff，检查 gh 认证或权限" }
           if ($diff.Length -gt 12000) {
             $diff = $diff.Substring(0, 12000) + "`n...(diff 过长已截断)"
           }
@@ -154,7 +162,8 @@ jobs:
   mention:
     if: |
       (github.event_name == 'issue_comment' || github.event_name == 'pull_request_review_comment') &&
-      contains(github.event.comment.body, '@claude')
+      contains(github.event.comment.body, '@claude') &&
+      github.event.comment.user.type != 'Bot'
     runs-on: [self-hosted, Windows, X64, gh-bot]
     timeout-minutes: 15
     steps:
@@ -168,6 +177,8 @@ jobs:
           IS_PR: ${{ github.event_name == 'pull_request_review_comment' }}
         run: |
           $OutputEncoding = [Console]::OutputEncoding = [Text.Encoding]::UTF8
+          if ($env:GITHUB_ACTOR -like "*[bot]") { Write-Host "由机器人触发，跳过"; exit 0 }
+          if (-not $env:CLAUDE_EXE) { throw "未设置仓库变量 CLAUDE_EXE，见 docs/GH-BOT.md 2.5" }
           $prompt = @"
           有人在仓库里 @你 提问。用中文简洁回答，需要看代码时用 Read/Grep/Glob 查。
 
