@@ -55,14 +55,29 @@ style="color:#7ab8ff">群聊视图 →</a></p>
 document.getElementById('glink').href =
   '/group?pin=' + location.pathname.slice(1);
 const PIN = location.pathname.slice(1);
-fetch('/devices?pin=' + PIN).then(r => r.json()).then(j => {
-  const sel = document.getElementById('dev');
-  for (const d of j.devices) {
-    const o = document.createElement('option');
-    o.value = d.fingerprint; o.textContent = d.alias || d.fingerprint.slice(0, 8);
-    sel.appendChild(o);
-  }
-});
+const QP = encodeURIComponent(PIN);
+async function loadDevices(){
+  try {
+    const r = await fetch('/devices?pin=' + QP);
+    if (!r.ok) return;
+    const j = await r.json();
+    const sel = document.getElementById('dev');
+    const current = sel.value;
+    sel.length = 0;
+    const own = document.createElement('option');
+    own.value = ''; own.textContent = '本机';
+    sel.appendChild(own);
+    for (const d of j.devices) {
+      const o = document.createElement('option');
+      o.value = d.fingerprint;
+      o.textContent = d.alias || d.fingerprint.slice(0, 8);
+      sel.appendChild(o);
+    }
+    if ([...sel.options].some(o => o.value === current)) sel.value = current;
+  } catch (e) {}
+}
+loadDevices();
+setInterval(loadDevices, 10000);
 const ws = new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws?pin='+encodeURIComponent(PIN));
 const chat = document.getElementById('chat');
 function add(t, right, meta){
@@ -82,15 +97,35 @@ async function sendText(){
 }
 document.getElementById('send').onclick = sendText;
 document.getElementById('msg').addEventListener('keydown', e=>{if(e.key==='Enter')sendText();});
+async function uploadOne(f, to){
+  const fd = new FormData(); fd.append('file', f); fd.append('pin', PIN);
+  if (to) fd.append('to', to);
+  const r = await fetch('/upload?pin=' + QP, {method:'POST', body: fd});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.ok === false) {
+    let why = j.error || ('HTTP ' + r.status);
+    if (j.detail) why += '：' + String(j.detail).slice(0, 80);
+    return f.name + ' ✗ ' + why;
+  }
+  const saved = (j.saved && j.saved[0]) || {};
+  let text = f.name + ' ✓';
+  if (saved.name && saved.name !== f.name) text += ' → 保存为 ' + saved.name;
+  if (to) {
+    if (saved.forwarded === true) text += ' → 已转发';
+    else if (saved.forwarded === false)
+      text += ' → 转发失败' + (saved.forwardError
+        ? '：' + String(saved.forwardError).slice(0, 80) : '');
+  }
+  return text;
+}
 document.getElementById('file').addEventListener('change', async e=>{
   const to=document.getElementById('dev').value;
   for (const f of e.target.files) {
-    const fd = new FormData(); fd.append('file', f); fd.append('pin', PIN);
-    if (to) fd.append('to', to);
-    const r = await fetch('/upload?pin=' + PIN, {method:'POST', body: fd});
-    const j = await r.json().catch(()=>({}));
-    add(f.name + (r.ok ? ' ✓' : ' ✗') + (to && j.ok ? ' → 已转发设备' : ''), !!to,
-        to ? '发往所选设备' : '本机');
+    try {
+      add(await uploadOne(f, to), !!to, to ? '发往所选设备' : '本机');
+    } catch (err) {
+      add(f.name + ' ✗ ' + err.message, !!to, to ? '发往所选设备' : '本机');
+    }
   }
   e.target.value='';
 });
@@ -138,13 +173,32 @@ margin:0 auto;padding:24px}a{color:#7ab8ff;text-decoration:none;font-size:18px;
 display:block;padding:10px 14px;background:#1c1c1c;border-radius:8px;margin:8px 0}
 </style></head><body><h2>群聊视图</h2><div id="gs">加载中…</div>
 <script>
-const PIN = new URLSearchParams(location.search).get('pin');
-fetch('/group/json?pin=' + PIN).then(r => r.json()).then(j => {
-  const gs = document.getElementById('gs');
-  gs.innerHTML = j.groups.map(g =>
-    `<a href="/group/${g.id}?pin=${PIN}">${g.name} <small>(${g.members} 成员)</small></a>`
-  ).join('') || '(无群组)';
-});
+const PIN = new URLSearchParams(location.search).get('pin') || '';
+const Q = encodeURIComponent(PIN);
+fetch('/group/json?pin=' + Q)
+  .then(r => {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  })
+  .then(j => {
+    const gs = document.getElementById('gs');
+    gs.textContent = '';
+    if (!j.groups.length) { gs.textContent = '(无群组)'; return; }
+    for (const g of j.groups) {
+      // Group names arrive from paired peers via rdGroupSync; always use text
+      // nodes here (raw markup would inherit this page's PIN URL).
+      const a = document.createElement('a');
+      a.setAttribute('href', '/group/' + encodeURIComponent(g.id) + '?pin=' + Q);
+      a.appendChild(document.createTextNode(g.name));
+      const small = document.createElement('small');
+      small.textContent = ` (${g.members} 成员)`;
+      a.appendChild(small);
+      gs.appendChild(a);
+    }
+  })
+  .catch(e => {
+    document.getElementById('gs').textContent = '加载失败：' + e.message;
+  });
 </script></body></html>"""
 
 GROUP_PAGE = """<!doctype html>
@@ -166,6 +220,7 @@ button{padding:10px 20px;border:none;border-radius:5px;background:#007bff;
 color:#fff;font-size:15px;cursor:pointer}
 </style></head><body>
 <div class="chat" id="chat"></div>
+<p id="gerr" style="color:#f66;text-align:center;margin:4px 0"></p>
 <div class="footer">
 <input type="text" id="gmsg" placeholder="发言到群…" autofocus>
 <button id="gsend">发送</button>
@@ -184,22 +239,37 @@ function add(who, text, self, tm){
   chat.appendChild(d); chat.scrollTop = chat.scrollHeight;
 }
 async function poll(){
+  const err = document.getElementById('gerr');
   try {
-    const r = await fetch(`/group/${GID}/data?pin=${PIN}&after=${after}`);
-    if (!r.ok) return;
+    const qs = 'pin=' + encodeURIComponent(PIN) + '&after=' + after;
+    const r = await fetch('/group/' + encodeURIComponent(GID) + '/data?' + qs);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
     const j = await r.json();
+    err.textContent = '';
     for (const it of j.items){
       add(it.who, it.text, it.self, it.time);
       after = Math.max(after, it.time);
     }
-  } catch (e) {}
+  } catch (e) {
+    err.textContent = '刷新失败：' + e.message;
+  }
 }
 async function gsend(){
   const i = document.getElementById('gmsg'); const v = i.value.trim();
   if (!v) return;
-  await fetch('/send', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({pin: PIN, to: 'group:' + GID, text: v})});
-  i.value = ''; setTimeout(poll, 800);
+  const err = document.getElementById('gerr');
+  try {
+    const r = await fetch('/send', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({pin: PIN, to: 'group:' + GID, text: v})});
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.ok === false) {
+      throw new Error(j.error || ('HTTP ' + r.status));
+    }
+    err.textContent = '';
+    i.value = ''; setTimeout(poll, 800);
+  } catch (e) {
+    err.textContent = '发送失败：' + e.message;
+  }
 }
 document.getElementById('gsend').onclick = gsend;
 document.getElementById('gmsg').addEventListener('keydown',
@@ -363,14 +433,18 @@ def make_web_app(store, ident: dict, on_web_text: Callable[[str], None],
             if target:
                 from .files import send_file
                 from .routing import resolve_target
-                ip, port, fp = resolve_target(store, target)
-                if ip:
-                    r = await send_file(ip, str(dest),
-                                        from_fp=ident["fingerprint"], to_fp=fp,
-                                        port=port or DEVICE_PORT)
-                    entry["forwarded"] = bool(r.get("ok"))
-                else:
+                try:
+                    ip, port, fp = resolve_target(store, target)
+                    if ip:
+                        r = await send_file(ip, str(dest),
+                                            from_fp=ident["fingerprint"], to_fp=fp,
+                                            port=port or DEVICE_PORT)
+                        entry["forwarded"] = bool(r.get("ok"))
+                    else:
+                        entry["forwarded"] = False
+                except Exception as exc:  # noqa: BLE001 - file already saved
                     entry["forwarded"] = False
+                    entry["forwardError"] = str(exc)[:200]
             saved.append(entry)
         return web.json_response({"ok": True, "saved": saved})
 
