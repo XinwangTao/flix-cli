@@ -232,9 +232,11 @@ def r10() -> tuple[bool, str]:
 
 
 def r11() -> tuple[bool, str]:
-    src = (ROOT / "src/flixcli/ui.py").read_text(encoding="utf-8")
-    ok = "local = Store()" in src and "local.close()" in src
-    return ok, "ui thread store"
+    # The Tk window was retired so the frozen build no longer carries Tcl/Tk.
+    removed = not (ROOT / "src/flixcli/ui.py").exists()
+    src = (ROOT / "src/flixcli/cli.py").read_text(encoding="utf-8")
+    ok = removed and "ui-removed" in src and "import ui" not in src
+    return ok, "tk ui retired"
 
 
 def r12() -> tuple[bool, str]:

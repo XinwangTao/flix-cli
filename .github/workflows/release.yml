@@ -66,10 +66,13 @@ jobs:
           python-version: "3.11"
           cache: pip
 
+      # The default (lite) package never installs the media extra: screen
+      # sharing ships as a separate "-full" zip. `pty` stays in, so the frozen
+      # lite build keeps `shell --pty`.
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[gui]" pyinstaller
+          pip install -e ".[gui,pty]" pyinstaller
 
       - name: Build
         run: pyinstaller RelayDesk.spec --noconfirm --clean
@@ -95,6 +98,14 @@ jobs:
           (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() + "  $zip" |
             Set-Content "$zip.sha256" -NoNewline
           Get-Content "$zip.sha256"
+          # The lite package must stay small; a regression means the media
+          # stack or an untrimmed Qt module slipped back into the default build.
+          $mb = [math]::Round((Get-Item dist\RelayDesk.exe).Length / 1MB, 1)
+          Write-Output "lite exe: $mb MB"
+          if ($mb -gt 75) {
+            Write-Error "lite exe is $mb MB (> 75 MB): media stack or Qt trim regressed"
+            exit 1
+          }
 
       - uses: actions/upload-artifact@v4
         with:
@@ -102,6 +113,58 @@ jobs:
           path: |
             RelayDesk-*.zip
             RelayDesk-*.zip.sha256
+          if-no-files-found: error
+
+  # Screen sharing needs the optional media stack (aiortc/av/numpy/PIL). It
+  # ships as a second Windows-only zip that the updater never picks by default:
+  # a machine that already installed "-full" keeps updating on that channel.
+  windows-full:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[gui,pty,media]" pyinstaller
+
+      - name: Build
+        env:
+          RELAYDESK_BUILD: full
+        run: pyinstaller RelayDesk.spec --noconfirm --clean
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          $want = $env:VERSION.TrimStart('v')
+          $out = & dist\RelayDesk.exe --version 2>&1 | Out-String
+          Write-Output $out
+          if ($out -notmatch [regex]::Escape($want)) {
+            Write-Error "expected version $want, got: $out"
+            exit 1
+          }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $zip = "RelayDesk-$($env:VERSION)-win64-full.zip"
+          Compress-Archive -Path dist\RelayDesk.exe -DestinationPath $zip
+          (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() + "  $zip" |
+            Set-Content "$zip.sha256" -NoNewline
+          Get-Content "$zip.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RelayDesk-windows-full
+          path: |
+            RelayDesk-*-full.zip
+            RelayDesk-*-full.zip.sha256
           if-no-files-found: error
 
   macos:
@@ -233,7 +296,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [windows, macos, linux, android]
+    needs: [windows, windows-full, macos, linux, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -249,6 +312,7 @@ jobs:
           ls -l dist-artifacts
           expected=(
             "RelayDesk-$VERSION-win64.zip"
+            "RelayDesk-$VERSION-win64-full.zip"
             "RelayDesk-$VERSION-macos-arm64.zip"
             "RelayDesk-$VERSION-macos-x86_64.zip"
             "RelayDesk-$VERSION-linux-x86_64.zip"

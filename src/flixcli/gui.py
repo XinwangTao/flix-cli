@@ -513,12 +513,13 @@ def blur_image(image: QImage, radius: float) -> QImage:
 
 
 class GlassBackdrop(QWidget):
-    """The window's backdrop: a blurred desktop still, tinted per theme.
+    """Fallback backdrop: a blurred desktop still, tinted per theme.
 
-    Liquid-glass cues are kept restrained: a wide blur, a theme tint for
-    contrast, a saturation lift and a faint top highlight. No gradients as
-    decoration and no floating cards — the panes above stay flat and
-    functional.
+    Windows 11 22H2+ draws the real thing (Mica/Acrylic) behind the window, so
+    this widget only paints when ``set_native(True)`` has not been called. The
+    still is captured once at launch, which is why it drifts whenever the
+    window moves or the desktop behind changes — that is the fallback, not the
+    preferred look.
     """
 
     SHRINK = 4  # blur at quarter resolution; the upscale hides the loss
@@ -531,6 +532,7 @@ class GlassBackdrop(QWidget):
         self._tint = QColor(PALETTES["dark"]["bg"])
         self._tint_alpha = 150
         self._enabled = False
+        self._native = False
         self._cache: QPixmap | None = None
         self._cache_key = None
         # Blurring a maximized window costs tens of milliseconds; do it once
@@ -552,6 +554,11 @@ class GlassBackdrop(QWidget):
         self._tint = QColor(tint)
         self._tint_alpha = int(alpha)
         self._enabled = bool(enabled)
+        self._invalidate()
+
+    def set_native(self, native: bool) -> None:
+        """DWM paints the surface; stop painting our own still over it."""
+        self._native = bool(native)
         self._invalidate()
 
     def _invalidate(self) -> None:
@@ -648,13 +655,19 @@ class GlassBackdrop(QWidget):
         self._cache_key = self._cache_signature()
         try:
             self._cache = self._render()
-        except Exception:
-            # An exception escaping a paint handler aborts the process;
-            # a flat tint is always an acceptable fallback.
+            self._last_error = None
+        except Exception as exc:  # noqa: BLE001
+            # An exception escaping a paint handler aborts the process; a flat
+            # tint is always an acceptable fallback. Keep the reason so a
+            # window with no material can be diagnosed instead of guessed at.
             self._cache = None
+            self._last_error = f"{type(exc).__name__}: {exc}"
         self.update()
 
     def paintEvent(self, event):
+        if self._native:
+            # DWM owns the surface; painting here would hide the real blur.
+            return
         key = self._cache_signature()
         if key != self._cache_key:
             if self._cache is None:
@@ -886,6 +899,38 @@ class MainWindow(QMainWindow):
 
     # ---------- frameless plumbing ----------
 
+    def _apply_system_backdrop(self) -> bool:
+        """Ask DWM for the real Mica/Acrylic surface (Windows 11 22H2+).
+
+        Returns True when DWM accepted the request. The app then stops drawing
+        its launch-time desktop still: the blur follows whatever is actually
+        behind the window instead of a frozen screenshot.
+        """
+        if sys.platform != "win32":
+            return False
+        try:
+            hwnd = int(self.winId())
+            dwm = ctypes.windll.dwmapi
+            # DWMWA_USE_IMMERSIVE_DARK_MODE keeps the DWM surface in step with
+            # our own theme; it only affects the system-drawn parts.
+            dark = ctypes.c_int(0 if self.theme == "light" else 1)
+            dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(dark),
+                                      ctypes.sizeof(dark))
+            # 1 = none, 2 = Mica (wallpaper), 3 = Acrylic (what is behind).
+            kind = ctypes.c_int(3 if self._glass_visible() else 1)
+            if dwm.DwmSetWindowAttribute(hwnd, 38, ctypes.byref(kind),
+                                         ctypes.sizeof(kind)) != 0:
+                return False
+            if self._glass_visible():
+                class _Margins(ctypes.Structure):
+                    _fields_ = [("left", ctypes.c_int), ("right", ctypes.c_int),
+                                ("top", ctypes.c_int), ("bottom", ctypes.c_int)]
+                margins = _Margins(-1, -1, -1, -1)
+                dwm.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(margins))
+            return True
+        except Exception:
+            return False
+
     def _enable_round_corners(self):
         if sys.platform == "win32":
             try:
@@ -967,6 +1012,15 @@ class MainWindow(QMainWindow):
         self.setStatusBar(status)
         self.statusBar().showMessage("正在连接本机服务…")
         self.apply_theme(self.theme)
+        # Windows 11 paints Mica/Acrylic behind the window itself. When DWM
+        # accepts it, the app stops compositing its own still; otherwise the
+        # snapshot fallback above stays active.
+        self._native_glass = self._apply_system_backdrop()
+        self.glass_root.set_native(self._native_glass)
+        if self._native_glass:
+            # The first stylesheet ran before we knew DWM would own the
+            # surface, so it still carried the heavy fallback alphas.
+            self._restyle()
 
     def _build_update_banner(self):
         """A window-wide line for the one update state that needs a decision.
@@ -1550,7 +1604,8 @@ class MainWindow(QMainWindow):
         self._save_prefs(theme=self.theme)
 
     def _restyle(self):
-        self.setStyleSheet(styles_for(self.theme, self._glass_visible()))
+        self.setStyleSheet(styles_for(self.theme, self._glass_visible(),
+                                      getattr(self, "_native_glass", False)))
         # Widgets the sheet does not reach (menus, scroll viewports, dialogs)
         # follow the palette, so flip it too or they keep the old theme.
         app = QApplication.instance()
@@ -1665,6 +1720,10 @@ class MainWindow(QMainWindow):
         colors = PALETTES[self.theme]
         alpha = 40 if self.theme == "dark" else 52
         root.set_material(QColor(colors["bg"]), alpha, self._glass_visible())
+        # Toggling the checkbox must switch DWM between Acrylic and none too,
+        # otherwise the window keeps a live blur the user just turned off.
+        if getattr(self, "_native_glass", False):
+            self._apply_system_backdrop()
 
     def _sync_glass_button(self):
         check = getattr(self, "glass_check", None)
@@ -3400,6 +3459,26 @@ def main(argv: list[str] | None = None, *, api_port: int = 8898) -> int:
     # delay first paint, and tests that construct MainWindow directly stay
     # offline (the check only lives here, not in __init__).
     QTimer.singleShot(3000, window.auto_check_updates)
+    # A window with no material used to fail silently. Set RELAYDESK_GLASS_DIAG
+    # to a file path to dump why; only diagnostics, never product behaviour.
+    diag = os.environ.get("RELAYDESK_GLASS_DIAG")
+    if diag:
+        def _dump():
+            root = window.glass_root
+            try:
+                with open(diag, "w", encoding="utf-8") as fh:
+                    fh.write(f"snapshot={snapshot is not None}\n")
+                    fh.write(f"platform={sys.platform}\n")
+                    fh.write(f"has_source={root.has_source()}\n")
+                    fh.write(f"enabled={root._enabled}\n")
+                    fh.write(f"glass={window.glass}\n")
+                    fh.write(f"visible={window._glass_visible()}\n")
+                    fh.write(f"size={root.size().width()}x{root.size().height()}\n")
+                    fh.write(f"cache={root._cache}\n")
+                    fh.write(f"error={getattr(root, '_last_error', None)}\n")
+            except OSError:
+                pass
+        QTimer.singleShot(2500, _dump)
     return app.exec()
 
 
@@ -3539,21 +3618,31 @@ def _check_icon_rule(theme: str) -> str:
         return ""
 
 
-# Apple HIG liquid-glass layering: only the functional layer (rail, sidebar,
-# title/status bars) is glass. Content surfaces stay opaque. The fill runs
-# 60-80% so text on the material keeps its contrast; larger panes such as the
-# sidebar sit at the opaque end.
+# Liquid-glass layering is applied to the whole window, not just the
+# functional rail: the reference look (macOS 26 / Windows 11 Mica) puts the
+# same material behind message lists, cards and the composer. Depth comes from
+# alpha, not from opaque sheets — the rail is lightest, content sits at a
+# heavier fill so 10-11 px body text keeps its contrast over a bright desktop.
 GLASS_ALPHA = {
-    "dark": {"bg_rail": 140, "bg_side": 190},
-    "light": {"bg_rail": 172, "bg_side": 202},
+    "dark": {"bg_rail": 88, "bg_side": 128, "bg_content": 104},
+    "light": {"bg_rail": 132, "bg_side": 168, "bg_content": 142},
+}
+# With the DWM Acrylic surface the blur and tint already come from the system,
+# so the panes only need enough fill to keep text legible — anything heavier
+# hides the material the user asked for.
+GLASS_ALPHA_NATIVE = {
+    "dark": {"bg_rail": 64, "bg_side": 118, "bg_content": 92},
+    "light": {"bg_rail": 96, "bg_side": 148, "bg_content": 124},
 }
 # Vibrancy tint. The material composites translucent tint over the desktop, so
 # a bright window behind a dark sidebar used to lift secondary text to ~3:1.
 # Tinting the dark layer near-black (as macOS does) keeps 10-11 px text above
 # 4.5:1; the light layer goes white for the same reason against dark windows.
 GLASS_TINT = {
-    "dark": {"bg_rail": "#000000", "bg_side": "#000000"},
-    "light": {"bg_rail": "#ffffff", "bg_side": "#ffffff"},
+    "dark": {"bg_rail": "#000000", "bg_side": "#000000",
+             "bg_content": "#000000"},
+    "light": {"bg_rail": "#ffffff", "bg_side": "#ffffff",
+              "bg_content": "#ffffff"},
 }
 
 
@@ -3563,32 +3652,43 @@ def _rgba(color: str, alpha: int) -> str:
             f"{max(0, min(255, alpha)) / 255:.3f})")
 
 
-def _glass_sheet(theme: str) -> str:
+def _glass_sheet(theme: str, native: bool = False) -> str:
     name = "light" if theme == "light" else "dark"
     tint = GLASS_TINT[name]
-    alpha = GLASS_ALPHA[name]
+    alpha = (GLASS_ALPHA_NATIVE if native else GLASS_ALPHA)[name]
     rail = _rgba(tint["bg_rail"], alpha["bg_rail"])
     side = _rgba(tint["bg_side"], alpha["bg_side"])
+    content = _rgba(tint["bg_content"], alpha["bg_content"])
     return f"""
 QFrame#rail {{ background: {rail}; }}
 QFrame#sidebar {{ background: {side}; }}
 QFrame#titleBar {{ background: {rail}; }}
 QStatusBar {{ background: {rail}; }}
+/* The content plane carries the same material: the window and each page stop
+   painting an opaque sheet, while the workspace keeps one translucent fill so
+   the blurred desktop stays visible behind message lists and settings without
+   washing out body text. Card-like surfaces use the heavier fill. */
+QWidget#rootWindow, QWidget#page {{ background: transparent; }}
+QFrame#workspace {{ background: {content}; }}
+QFrame#sessionHeader {{ background: {rail}; }}
+QFrame#composer, QFrame#settingsCard {{ background: {side}; }}
+QListWidget#contentList {{ background: {rail}; }}
+QLabel#mediaPreview {{ background: {content}; }}
 """
 
 
-def styles_for(theme: str, glass: bool = False) -> str:
+def styles_for(theme: str, glass: bool = False, native: bool = False) -> str:
     """One authored sheet for both themes, filled from explicit tokens.
 
     With ``glass`` the panes that sit over the blurred backdrop turn
-    translucent; everything else keeps the authored sheet.
+    translucent; ``native`` means DWM draws the blur, so the panes stay lighter.
     """
     tokens = dict(PALETTES["light" if theme == "light" else "dark"])
     tokens.update(SCALE)
     tokens["font_stack"] = FONT_STACK
     tokens["check_rule"] = _check_icon_rule(theme)
     sheet = Template(STYLES).substitute(tokens)
-    return sheet + _glass_sheet(theme) if glass else sheet
+    return sheet + _glass_sheet(theme, native) if glass else sheet
 
 
 STYLES = """
