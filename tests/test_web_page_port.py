@@ -85,6 +85,28 @@ class WebPagePortTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status, 401)
         self.assertEqual((await r.json())["error"], "unauthorized")
 
+    async def test_group_data_returns_bubble_ids(self):
+        # Two bubbles sharing one millisecond: a time-only cursor loses the
+        # second one on the next poll, so the payload must carry an id.
+        self.store.add_text_bubble("b-1", "fp-peer", "self-fp", "一",
+                                   5000, self.gid)
+        self.store.add_text_bubble("b-2", "self-fp", "fp-peer", "二",
+                                   5000, self.gid)
+        r = await self.client.get(
+            f"/group/{self.gid}/data?pin={self.pin}&after=4999")
+        self.assertEqual(r.status, 200)
+        items = (await r.json())["items"]
+        self.assertEqual({it["id"] for it in items}, {"b-1", "b-2"})
+        self.assertEqual({it["time"] for it in items}, {5000})
+
+    async def test_group_page_dedupes_by_id_and_resends_last_millisecond(self):
+        r = await self.client.get(f"/group/{self.gid}?pin={self.pin}")
+        page = await r.text()
+        self.assertIn("const seen = new Set();", page)
+        self.assertIn("Math.max(0, after - 1)", page)
+        self.assertIn("if (seen.has(it.id)) continue;", page)
+        self.assertIn("seen.add(it.id);", page)
+
     async def test_upload_forward_failure_is_reported_in_saved_entry(self):
         form = FormData()
         form.add_field("to", "fp-peer")

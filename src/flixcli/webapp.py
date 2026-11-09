@@ -246,6 +246,7 @@ const PIN = new URLSearchParams(location.search).get('pin');
 const GID = location.pathname.split('/')[2];
 const chat = document.getElementById('chat');
 let after = 0;
+const seen = new Set();
 function add(who, text, self, tm){
   const d = document.createElement('div');
   d.className = 'bubble ' + (self ? 'right' : 'left');
@@ -257,12 +258,14 @@ function add(who, text, self, tm){
 async function poll(){
   const err = document.getElementById('gerr');
   try {
-    const qs = 'pin=' + encodeURIComponent(PIN) + '&after=' + after;
+    const qs = 'pin=' + encodeURIComponent(PIN) + '&after=' + Math.max(0, after - 1);
     const r = await fetch('/group/' + encodeURIComponent(GID) + '/data?' + qs);
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const j = await r.json();
     err.textContent = '';
     for (const it of j.items){
+      if (seen.has(it.id)) continue;
+      seen.add(it.id);
       add(it.who, it.text, it.self, it.time);
       after = Math.max(after, it.time);
     }
@@ -548,7 +551,8 @@ def make_web_app(store, ident: dict, on_web_text: Callable[[str], None],
             c = m.get("content", "")
             if not isinstance(c, str):
                 c = f"[文件 {c.get('name', '?')}]"
-            items.append({"time": m["time"], "self": m["from"] == me,
+            items.append({"id": m["id"], "time": m["time"],
+                          "self": m["from"] == me,
                           "who": ("我" if m["from"] == me
                                   else aliases.get(m["from"], m["from"][:8])),
                           "text": c})
