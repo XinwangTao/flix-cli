@@ -18,6 +18,11 @@ on:
         description: "要评估的 PR 编号"
         required: true
 
+# 同一 PR 串行：避免连续 push 时多个 CI 完成并行重复判定
+concurrency:
+  group: gh-bot-approve-${{ github.event.workflow_run.pull_requests[0].number || inputs.pr || github.run_id }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
   pull-requests: write
@@ -103,8 +108,10 @@ jobs:
             if (ciConclusion !== 'success') {
               reasons.push(`CI 结论为 ${ciConclusion || '未找到运行'}，未通过`);
             }
+            // 旧 SHA 的 CI 完成属于过渡态：既不是失败也不该给当前 PR 打标，静默跳过
             if (ciSha && ciSha !== pr.head.sha) {
-              reasons.push(`CI 跑的是 ${ciSha.slice(0, 7)}，PR 已更新到 ${pr.head.sha.slice(0, 7)}`);
+              core.notice(`CI 跑的是 ${ciSha.slice(0, 7)}，PR 已到 ${pr.head.sha.slice(0, 7)}，本次无关`);
+              return;
             }
 
             if (pr.draft) reasons.push('PR 仍是草稿');
@@ -126,7 +133,7 @@ jobs:
             if (pr.additions > policy.max_additions) {
               reasons.push(`新增 ${pr.additions} 行，超过上限 ${policy.max_additions}`);
             }
-            if (policy.max_deletions && pr.deletions > policy.max_deletions) {
+            if (policy.max_deletions != null && pr.deletions > policy.max_deletions) {
               reasons.push(`删除 ${pr.deletions} 行，超过上限 ${policy.max_deletions}`);
             }
 
