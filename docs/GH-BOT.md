@@ -188,8 +188,8 @@ JSON
 
 | 来源 | 文件工具 | 说明 |
 |---|---|---|
-| 仓库协作者（OWNER/MEMBER/COLLABORATOR） | 允许 `Read,Grep,Glob` | 可查仓库代码，质量更高 |
-| 其他人 | `--disallowedTools` 显式禁用整套工具 | 只能基于正文回答，读不到任何文件 |
+| 仓库协作者（OWNER/MEMBER/COLLABORATOR） | `--tools Read`（只有 Read） | 可读仓库文件，质量更高 |
+| 其他人 | `--tools ""`（一个工具都不给） | 只能基于正文回答，读不到任何文件 |
 | 非协作者的 `@claude` 追问 | 不调用模型 | 直接回一句固定说明，避免刷额度 |
 
 所有调用都额外加 `--restricted --strict-mcp-config --bare`：
@@ -200,8 +200,8 @@ PR 里塞一个 `CLAUDE.md` 会让内容进入评审上下文，加 `--bare` 后
 **外部来源的分诊在空目录里执行**（不进仓库工作区），即使工具名单漂移也读不到仓库内容；
 checkout 一律 `persist-credentials: false`，避免 job token 落进 `.git/config`。
 
-> `--restricted` 是当前唯一挡住「用户级 CLAUDE.md 被原文吐出」的开关（实测：不加它，
-> 一句提示词就能让模型逐字复述 `~/.claude/CLAUDE.md`）。**不要为了排查问题把它删掉。**
+> `--restricted` 与 `--bare` 共同挡住「本机记忆被原文吐出」：不加它们时，一句提示词就能让模型
+> 逐字复述 `~/.claude/CLAUDE.md`。**不要为了排查问题删掉这两个开关。**
 
 **按天成本上限**（`reply.max_runs_per_day`，默认 120）只约束**外部来源**的 issue 分诊：
 既防刷额度，又不会把维护者自己挡在门外（协作者与 PR 评审不计入）。
@@ -232,4 +232,4 @@ checkout 一律 `persist-credentials: false`，避免 job token 落进 `.git/con
 - **模型额度**：走本机 cc-switch 代理，代理挂了 job 就失败（会留红叉，不会静默）。
 - **成本**：每次 issue/PR 触发一次模型调用；正文超过
   `reply.max_issue_body_chars`（默认 8000 字）直接跳过，避免被灌水刷额度。
-  该上限只作用于 issue 正文；PR diff 硬编码 12000 字截断；@claude 追问对非协作者不调用模型。
+  该上限只作用于 issue 正文；PR diff 硬编码 30000 字截断；@claude 追问对非协作者不调用模型。
