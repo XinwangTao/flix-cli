@@ -9,6 +9,10 @@
 - Android 液态玻璃界面：全屏玉青/蓝紫氛围光，玻璃头部/标签/卡片/输入栏，渐变头像与沉浸系统栏。
 
 ### 修复
+- 版本检查每页取 100 条；镜像返回 200 错误体时校验结构并继续下一个，直连 404 也回退镜像；
+  守护进程启动检查读取 `GITHUB_TOKEN`/`FLIX_GITHUB_TOKEN`。
+- 源码更新在安装前校验 tarball 的 `[project] version` 与 release tag 一致，避免打 tag 未 bump
+  导致重启更新循环。
 - 自动更新按最高版本选 release，而不是 GitHub API 顺序；乱序 backport 与预发布平票都有测试。
 - 自动更新解包拒绝越界成员：release zip / 源码 tarball 中的 `../`、绝对路径、越界链接不再落盘；
   源码更新改用每次新建的私有临时目录，避免固定 `/tmp` 路径被预建。

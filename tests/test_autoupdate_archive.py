@@ -118,13 +118,14 @@ class TarContainmentTests(unittest.TestCase):
 
 
 class SourceUpdateWorkdirTests(unittest.TestCase):
-    def _install(self, parent: Path, blob: bytes) -> tuple[str, mock.Mock]:
+    def _install(self, parent: Path, blob: bytes,
+                 tag: str = "v9.9.9") -> tuple[str, mock.Mock]:
         proc = mock.Mock(returncode=0, stdout="", stderr="")
         with mock.patch.object(au, "_open",
                                return_value=contextlib.nullcontext(io.BytesIO(blob))), \
                 mock.patch.object(au, "_find_uv", return_value=None), \
                 mock.patch.object(au.subprocess, "run", return_value=proc) as run:
-            version = au.install_from_source("v9.9.9", workdir=parent)
+            version = au.install_from_source(tag, workdir=parent)
         return version, run
 
     def test_existing_caller_files_survive_and_run_dir_is_cleaned(self):
@@ -151,6 +152,24 @@ class SourceUpdateWorkdirTests(unittest.TestCase):
                 self._install(parent, blob)
             self.assertFalse((Path(tmp) / "escaped.txt").exists())
             self.assertEqual(list(parent.iterdir()), [])
+
+    def test_tarball_version_must_match_the_tag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / "work"
+            blob = tar_bytes({"repo-abc/pyproject.toml":
+                              b'[project]\nversion = "2.3.0"\n'})
+            with self.assertRaises(au.UpdateError) as caught:
+                self._install(parent, blob, tag="v2.3.1")
+            self.assertEqual(caught.exception.kind, "version-mismatch")
+            self.assertEqual(list(parent.iterdir()), [])
+
+    def test_matching_tarball_version_installs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp) / "work"
+            blob = tar_bytes({"repo-abc/pyproject.toml":
+                              b'[project]\nversion = "9.9.9"\n'})
+            version, _run = self._install(parent, blob)
+            self.assertEqual(version, "9.9.9")
 
 
 if __name__ == "__main__":

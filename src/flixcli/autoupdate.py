@@ -135,7 +135,11 @@ class Asset:
     def from_api(cls, raw: dict) -> "Asset":
         digest = str(raw.get("digest") or "")
         sha = digest.split(":", 1)[1].lower() if digest.startswith("sha256:") else ""
-        return cls(name=str(raw.get("name") or ""), size=int(raw.get("size") or 0),
+        try:
+            size = int(raw.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        return cls(name=str(raw.get("name") or ""), size=size,
                    url=str(raw.get("browser_download_url") or ""), sha256=sha)
 
 
@@ -155,13 +159,17 @@ class Release:
 
     @classmethod
     def from_api(cls, raw: dict) -> "Release":
+        raw_assets = raw.get("assets")
+        if not isinstance(raw_assets, list):
+            raw_assets = []
         return cls(tag=str(raw.get("tag_name") or ""),
                    name=str(raw.get("name") or ""),
                    prerelease=bool(raw.get("prerelease")),
                    draft=bool(raw.get("draft")),
                    url=str(raw.get("html_url") or ""),
                    body=str(raw.get("body") or "")[:2000],
-                   assets=[Asset.from_api(a) for a in raw.get("assets") or []])
+                   assets=[Asset.from_api(a) for a in raw_assets
+                           if isinstance(a, dict)])
 
 
 class UpdateError(RuntimeError):
@@ -184,20 +192,38 @@ def _open(url: str, *, token: str | None = None, timeout: float = 20.0):
 
 
 def fetch_releases(repo: str = REPO_DEFAULT, *, api_base: str = API_DEFAULT,
-                   token: str | None = None, per_page: int = 10,
+                   token: str | None = None, per_page: int = 100,
                    mirrors: tuple[str, ...] = MIRRORS) -> list[Release]:
-    """Newest-first releases, or UpdateError('network') with the reason kept."""
+    """Newest-first releases, or UpdateError('network') with the reason kept.
+
+    GitHub caps a page at 100. Asking for only 10 could hide the latest stable
+    release behind ten newer prereleases or drafts, so the updater would never
+    offer it.
+    """
+    per_page = max(1, min(int(per_page), 100))
     url = f"{api_base.rstrip('/')}/repos/{repo}/releases?per_page={per_page}"
     attempts = [url] + [f"{m.rstrip('/')}/{url}" for m in mirrors]
     errors: list[str] = []
+    not_found = 0
     for candidate in attempts:
         try:
             with _open(candidate, token=token) as response:
                 payload = json.loads(response.read().decode("utf-8"))
+            # A mirror can return a 200 with a rate-limit/error object. Without
+            # this check the list comprehension dies with AttributeError and
+            # the remaining mirrors are never tried.
+            if not isinstance(payload, list) or not all(
+                    isinstance(item, dict) for item in payload):
+                raise ValueError(
+                    f"unexpected releases payload ({type(payload).__name__})")
             return [Release.from_api(item) for item in payload]
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
-                raise UpdateError("no-releases", f"{repo} 没有 release", EXIT_NETWORK) from exc
+                # A middlebox/proxy can 404 the direct API; the next mirror may
+                # still work. Only report no-releases when every attempt 404s.
+                not_found += 1
+                errors.append(f"{candidate} -> HTTP 404")
+                continue
             hint = ""
             if exc.code in (403, 429):
                 reset = exc.headers.get("X-RateLimit-Reset") if exc.headers else None
@@ -207,6 +233,8 @@ def fetch_releases(repo: str = REPO_DEFAULT, *, api_base: str = API_DEFAULT,
             errors.append(f"{candidate} -> HTTP {exc.code} {hint}")
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
             errors.append(f"{candidate} -> {exc}")
+    if errors and not_found == len(attempts):
+        raise UpdateError("no-releases", f"{repo} 没有 release", EXIT_NETWORK)
     raise UpdateError("network", "; ".join(errors) or "所有镜像均不可用", EXIT_NETWORK)
 
 
@@ -945,17 +973,22 @@ def _probe_version(exe: Path) -> str | None:
 
 # ---------------------------------------------------------------- startup check
 
-def check_update(repo: str = REPO_DEFAULT, current: str | None = None) -> dict:
+def check_update(repo: str = REPO_DEFAULT, current: str | None = None,
+                 *, token: str | None = None) -> dict:
     """Latest release vs installed version; never raises.
 
     flixd calls this at every start so a stale daemon on a board says so in its
     own log and in /healthz instead of silently running last month's build.
+    A token avoids GitHub's 60 requests/hour per-IP limit; an explicit value
+    wins, otherwise GITHUB_TOKEN / FLIX_GITHUB_TOKEN is read.
     """
     from . import __version__ as installed
 
+    token = (token or os.environ.get("GITHUB_TOKEN")
+             or os.environ.get("FLIX_GITHUB_TOKEN") or None)
     cur = current or installed
     try:
-        release = pick_release(fetch_releases(repo))
+        release = pick_release(fetch_releases(repo, token=token))
     except UpdateError as exc:
         return {"ok": False, "error": exc.kind, "detail": exc.detail, "current": cur}
     return {
@@ -966,6 +999,18 @@ def check_update(repo: str = REPO_DEFAULT, current: str | None = None) -> dict:
         "available": compare_versions(release.tag, cur) > 0,
         "url": release.url,
     }
+
+
+def _source_version(root: Path) -> str | None:
+    """Static ``[project] version`` from an extracted source tree, if any."""
+    try:
+        import tomllib
+        data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    except (ImportError, OSError, ValueError):
+        return None
+    project = data.get("project") if isinstance(data, dict) else None
+    version = project.get("version") if isinstance(project, dict) else None
+    return str(version) if version else None
 
 
 def install_from_source(tag: str, repo: str = REPO_DEFAULT,
@@ -1001,6 +1046,17 @@ def install_from_source(tag: str, repo: str = REPO_DEFAULT,
         if not roots:
             raise UpdateError("bad-archive", "源码包里没有目录", EXIT_INSTALL)
         src = roots[0]
+
+        # A tag without a matching version bump would install code that still
+        # reports the old version, so the daemon restarts, sees the update
+        # again and loops forever. Fail before pip touches the venv.
+        declared = _source_version(src)
+        expected = ".".join(str(part) for part in parse_version(tag))
+        if declared and expected and compare_versions(declared, expected) != 0:
+            raise UpdateError(
+                "version-mismatch",
+                f"tag {tag} 的源码包版本是 {declared}，拒绝安装（会导致更新循环）",
+                EXIT_INSTALL)
 
         uv = _find_uv()
         if uv:
