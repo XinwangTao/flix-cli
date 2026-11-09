@@ -1,11 +1,12 @@
 # GH Bot · 低风险放行
 #
 # 对应图：docs/archify/gh-bot_workflow.html
-#   节点「白名单闸门」→ evaluate() 里的逐条判定
+#   节点「白名单闸门」→ 判定块
 #   节点「自动 APPROVE」→ approve 步骤
 #   节点「转人工」→ 打标签 + 说明评论
 #
-# 判定全部来自 .github/gh-bot-policy.json，不含任何模型输出。
+# 判定全部来自 .github/gh-bot-policy.json（**从默认分支读**），不含任何模型输出。
+# 安全前提：policy 缺字段一律拒绝（fail-closed），任何异常都不批准。
 name: GH Bot · 低风险放行
 
 on:
@@ -36,8 +37,6 @@ jobs:
     env:
       HAS_BOT_APP: ${{ secrets.BOT_APP_ID != '' }}
     steps:
-      - uses: actions/checkout@v4
-
       - name: 换取 bot 身份 token
         id: bot
         if: env.HAS_BOT_APP == 'true'
@@ -55,19 +54,31 @@ jobs:
         with:
           github-token: ${{ steps.bot.outputs.token || secrets.GH_BOT_TOKEN || github.token }}
           script: |
-            const fs = require('fs');
-            const policy = JSON.parse(
-              fs.readFileSync('.github/gh-bot-policy.json', 'utf8')
-            ).auto_approve;
-
             const { owner, repo } = context.repo;
-            const AUTO_LABEL = policy.auto_block_label || 'gh-bot-needs-human';
+            const defaultBranch = context.payload.repository?.default_branch || 'main';
+            let AUTO_LABEL = 'gh-bot-needs-human';
             const MARK = '<!-- gh-bot:blocked -->';
 
-            if (!policy.enabled) {
-              core.notice('policy.auto_approve.enabled = false，跳过');
+            // ── 0. policy 一律从默认分支读（workflow_dispatch 可选任意 ref，不能信检出目录）
+            let policy;
+            try {
+              const { data: pf } = await github.rest.repos.getContent({
+                owner, repo, path: '.github/gh-bot-policy.json', ref: defaultBranch,
+              });
+              policy = JSON.parse(Buffer.from(pf.content, 'base64').toString('utf8')).auto_approve;
+            } catch (e) {
+              core.setFailed(`读不到 ${defaultBranch} 上的 policy：${e.message}`);
               return;
             }
+            // 缺字段时比较会得到 false（fail-open），必须先校验
+            const required = ['authors', 'paths', 'blocked_paths', 'max_files', 'max_additions'];
+            const missing = required.filter(k => policy[k] === undefined);
+            if (missing.length) {
+              core.setFailed(`policy 缺必需字段: ${missing.join(', ')}`);
+              return;
+            }
+            if (policy.auto_block_label) AUTO_LABEL = policy.auto_block_label;
+            if (!policy.enabled) { core.notice('auto_approve.enabled=false，跳过'); return; }
 
             // ── 1. 定位 PR ────────────────────────────────
             let prNumber = 0;
@@ -76,61 +87,65 @@ jobs:
             } else {
               prNumber = context.payload.workflow_run?.pull_requests?.[0]?.number || 0;
             }
-            if (!prNumber) {
-              core.notice('没有关联 PR（fork 或直接推分支），跳过');
-              return;
-            }
+            if (!prNumber) { core.notice('没有关联 PR，跳过'); return; }
 
             const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
             if (pr.state !== 'open') return;
 
-            // ── 2. 确定该 SHA 的 CI 结论 ───────────────────
-            // workflow_run 直接给结论；手动触发则按 head_sha 反查该 workflow 的最近一次运行
-            let ciConclusion = null;
-            let ciSha = null;
+            // ── 2. 该 SHA 的 CI 结论 ───────────────────────
+            let ciConclusion = null, ciSha = null;
             if (context.eventName === 'workflow_dispatch') {
               const ciName = policy.ci_workflow_name || 'CI';
-              // 查运行记录要用 workflow 自带 token：App/PAT 只有 contents/issues/pull_requests
+              // 查运行记录用 workflow token：App/PAT 只有 contents/issues/pull_requests
               const act = require('@actions/github').getOctokit(process.env.GITHUB_TOKEN);
               const runs = await act.paginate(act.rest.actions.listWorkflowRunsForRepo, {
                 owner, repo, head_sha: pr.head.sha, per_page: 100,
               });
               const hit = runs.find(r => r.name === ciName && r.status === 'completed');
               if (hit) { ciConclusion = hit.conclusion; ciSha = hit.head_sha; }
-              core.notice(`手动触发：查到 ${ciName} 结论=${ciConclusion || '无记录'}`);
             } else {
-              const run = context.payload.workflow_run;
-              ciConclusion = run.conclusion;
-              ciSha = run.head_sha;
+              ciConclusion = context.payload.workflow_run.conclusion;
+              ciSha = context.payload.workflow_run.head_sha;
             }
 
-            // ── 3. 逐条判定 ───────────────────────────────
-            const reasons = [];
-            const notes = [];
-
-            if (ciConclusion !== 'success') {
-              reasons.push(`CI 结论为 ${ciConclusion || '未找到运行'}，未通过`);
-            }
-            // 旧 SHA 的 CI 完成属于过渡态：既不是失败也不该给当前 PR 打标，静默跳过
+            // 旧 SHA 的 CI 完成属于过渡态：静默跳过，不打标不评论
             if (ciSha && ciSha !== pr.head.sha) {
               core.notice(`CI 跑的是 ${ciSha.slice(0, 7)}，PR 已到 ${pr.head.sha.slice(0, 7)}，本次无关`);
               return;
             }
 
+            // ── 3. 逐条判定 ───────────────────────────────
+            const reasons = [];
+
+            if (ciConclusion !== 'success') reasons.push(`CI 结论为 ${ciConclusion || '未找到运行'}，未通过`);
             if (pr.draft) reasons.push('PR 仍是草稿');
+            if (pr.base.ref !== defaultBranch) reasons.push(`目标分支是 ${pr.base.ref}，只对 ${defaultBranch} 放行`);
             if (!pr.head.repo || pr.head.repo.full_name !== `${owner}/${repo}`) {
               reasons.push('PR 来自 fork，需人工确认来源');
             }
 
-            const authors = (policy.authors || []).map(a => a.toLowerCase());
+            const authors = policy.authors.map(a => a.toLowerCase());
             if (!authors.includes(pr.user.login.toLowerCase())) {
-              reasons.push(`作者 ${pr.user.login} 不在白名单`);
+              reasons.push(`发起者 ${pr.user.login} 不在白名单`);
+            }
+            // PR 发起者 ≠ 最后推送者：白名单作者的分支可能被别人追加提交
+            try {
+              const commits = await github.paginate(github.rest.pulls.listCommits, {
+                owner, repo, pull_number: prNumber, per_page: 100,
+              });
+              const last = commits[commits.length - 1];
+              const lastLogin = last?.author?.login;   // 只认 GitHub 账号，不认 git 里可随意填的 author.name
+              if (!lastLogin) reasons.push('取不到最后提交的 GitHub 账号，无法确认推送者');
+              else if (!authors.includes(String(lastLogin).toLowerCase())) {
+                reasons.push(`最后提交作者 ${lastLogin} 不在白名单`);
+              }
+            } catch (e) {
+              reasons.push(`查提交失败，无法确认推送者: ${e.message}`);
             }
 
             const labels = pr.labels.map(l => l.name.toLowerCase());
             const humanBlocks = (policy.blocking_labels || [])
-              .map(l => l.toLowerCase())
-              .filter(l => labels.includes(l));
+              .map(l => l.toLowerCase()).filter(l => labels.includes(l));
             if (humanBlocks.length) reasons.push(`人工阻断标签: ${humanBlocks.join(', ')}`);
 
             if (pr.additions > policy.max_additions) {
@@ -147,7 +162,19 @@ jobs:
               reasons.push(`改动 ${files.length} 个文件，超过上限 ${policy.max_files}`);
             }
 
-            // 简易 glob：**/ 为零到多级目录，* 不跨目录
+            // 文件模式：符号链接/子模块能把工作区文件带进构建产物，一律不放行
+            const modeByPath = new Map();
+            try {
+              const { data: tree } = await github.rest.git.getTree({
+                owner, repo, tree_sha: pr.head.sha, recursive: 'true',
+              });
+              if (tree.truncated) reasons.push('文件树被截断，无法确认符号链接/子模块');
+              for (const e of tree.tree || []) modeByPath.set(e.path, e.mode);
+            } catch (e) {
+              reasons.push(`取文件树失败，无法确认符号链接/子模块: ${e.message}`);
+            }
+
+            // 简易 glob：**/ 为零到多级目录，* 不跨目录；用 s 让 . 也匹配换行
             const globToRe = (pattern) => {
               let s = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&');
               s = s.replace(/\*\*\//g, '\u0001');
@@ -156,57 +183,77 @@ jobs:
               s = s.replace(/\?/g, '[^/]');
               s = s.replace(/\u0001/g, '(?:.*/)?');
               s = s.replace(/\u0002/g, '.*');
-              return new RegExp('^' + s + '$');
+              return new RegExp('^' + s + '$', 's');
             };
-            const allow = (policy.paths || []).map(globToRe);
-            const deny = (policy.blocked_paths || []).map(globToRe);
-            const hitDeny = (name) => (policy.blocked_paths || []).find((p, i) => deny[i].test(name));
+            const allow = policy.paths.map(globToRe);
+            const deny = policy.blocked_paths.map(globToRe);
+            const hitDeny = (name) => policy.blocked_paths.find((p, i) => deny[i].test(name));
 
             const outside = [];
             const hitAllow = new Set();
             for (const f of files) {
-              // 删除和重命名同样要过禁止路径：删除 src/x.py 等价于一次越界改动
-              const names = [f.filename];
-              if (f.previous_filename) names.push(f.previous_filename);
-
-              const blocked = names.map(hitDeny).find(Boolean);
-              if (blocked) {
-                reasons.push(`${f.filename}（${f.status}）命中禁止路径 ${blocked}`);
+              // 控制字符（含换行）会让路径类判定与人类审阅同时失真
+              if (/[\u0000-\u001f\u007f]/.test(f.filename)) {
+                reasons.push(`文件名含控制字符: ${JSON.stringify(f.filename)}`);
                 continue;
               }
-              const allowed = (policy.paths || []).find((p, i) => allow[i].test(f.filename));
+              const mode = modeByPath.get(f.filename);
+              if (mode === '120000') { reasons.push(`${f.filename} 是符号链接`); continue; }
+              if (mode === '160000') { reasons.push(`${f.filename} 是子模块`); continue; }
+              if (f.previous_filename && /[\u0000-\u001f\u007f]/.test(f.previous_filename)) {
+                reasons.push(`原文件名含控制字符: ${JSON.stringify(f.previous_filename)}`);
+                continue;
+              }
+
+              // 删除/重命名同样要过禁止路径，也要本来就在白名单内
+              const names = [f.filename, f.previous_filename].filter(Boolean);
+              const blocked = names.map(hitDeny).find(Boolean);
+              if (blocked) { reasons.push(`${f.filename}（${f.status}）命中禁止路径 ${blocked}`); continue; }
+
+              const allowed = policy.paths.find((p, i) => allow[i].test(f.filename));
               if (allowed) hitAllow.add(allowed);
               else outside.push(f.filename);
-              // 重命名时旧路径也必须本来就在白名单内，否则等于把未审文件搬进来
+
               if (f.previous_filename) {
-                const prevAllowed = (policy.paths || []).some((p, i) => allow[i].test(f.previous_filename));
+                const prevAllowed = policy.paths.some((p, i) => allow[i].test(f.previous_filename));
                 if (!prevAllowed) reasons.push(`${f.previous_filename} → ${f.filename} 重命名：旧路径不在白名单`);
               }
             }
             if (outside.length) {
               const shown = outside.slice(0, 3).join(', ');
-              const more = outside.length > 3 ? ` 等 ${outside.length} 个` : '';
-              reasons.push(`不在白名单: ${shown}${more}`);
+              reasons.push(`不在白名单: ${shown}${outside.length > 3 ? ` 等 ${outside.length} 个` : ''}`);
             }
-            // 没有任何文件命中白名单（空 PR / 全是删除）不批准
-            if (files.length && !hitAllow.size) {
-              reasons.push('没有任何文件命中白名单');
-            }
-            if (!files.length) {
-              reasons.push('PR 没有文件改动');
-            }
+            if (!files.length) reasons.push('PR 没有文件改动');
+            else if (!hitAllow.size) reasons.push('没有任何文件命中白名单');
 
             const summary = [
-              `**作者**：${pr.user.login}`,
+              `**发起者**：${pr.user.login}`,
+              `**目标分支**：${pr.base.ref}`,
               `**改动**：${files.length} 个文件，+${pr.additions}/-${pr.deletions}`,
               `**命中白名单**：${[...hitAllow].join('、') || '无'}`,
               `**CI**：${ciConclusion || '未获取'}（${(ciSha || '-').slice(0, 7)}）`,
             ].join('\n');
 
-            // ── 4. 放行或转人工 ───────────────────────────
-            if (reasons.length) {
-              notes.push('未自动批准，原因：', ...reasons.map(r => `- ${r}`));
+            // ── 4. 提交前复检：head / 草稿 / 人工阻断 ────────
+            const { data: fresh } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+            if (fresh.head.sha !== pr.head.sha) {
+              core.notice(`判定后 PR 被更新（${pr.head.sha.slice(0, 7)} → ${fresh.head.sha.slice(0, 7)}），本次放弃`);
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: prNumber,
+                body: `${MARK}\n### ⚠️ 判定过程中 PR 被更新\n` +
+                  `判定基于 \`${pr.head.sha.slice(0, 7)}\`，当前已是 \`${fresh.head.sha.slice(0, 7)}\`，` +
+                  '本次不提交批准，等新一轮 CI。',
+              });
+              return;
+            }
+            if (fresh.draft) reasons.push('复检时 PR 已转为草稿');
+            const freshLabels = fresh.labels.map(l => l.name.toLowerCase());
+            const freshBlocks = (policy.blocking_labels || [])
+              .map(l => l.toLowerCase()).filter(l => freshLabels.includes(l));
+            if (freshBlocks.length) reasons.push(`复检时出现人工阻断标签: ${freshBlocks.join(', ')}`);
 
+            // ── 5. 放行或转人工 ───────────────────────────
+            if (reasons.length) {
               let already = false;
               try {
                 const comments = await github.paginate(github.rest.issues.listComments, {
@@ -223,56 +270,38 @@ jobs:
                   break;
                 } catch (e) {
                   if (attempt === 0 && (e.status === 422 || /not found|not exist/i.test(e.message))) {
-                    // 标签不存在时先创建，避免"转人工"只剩一条评论、没有机器可读信号
                     try {
                       await github.rest.issues.createLabel({
-                        owner, repo, name: AUTO_LABEL,
-                        color: 'fbca04', description: 'GH Bot 判定需人工接手',
+                        owner, repo, name: AUTO_LABEL, color: 'fbca04',
+                        description: 'GH Bot 判定需人工接手',
                       });
                     } catch (ce) { core.warning(`创建标签失败: ${ce.message}`); }
-                  } else {
-                    core.warning(`打标签失败: ${e.message}`);
-                    break;
-                  }
+                  } else { core.warning(`打标签失败: ${e.message}`); break; }
                 }
               }
 
               if (!already) {
                 await github.rest.issues.createComment({
                   owner, repo, issue_number: prNumber,
-                  body: `${MARK}\n### 🤖 未自动批准\n${notes.join('\n')}\n\n${summary}\n\n规则文件：\`.github/gh-bot-policy.json\``,
+                  body: `${MARK}\n### 🤖 未自动批准\n未自动批准，原因：\n` +
+                    reasons.map(r => `- ${r}`).join('\n') +
+                    `\n\n${summary}\n\n规则文件：\`.github/gh-bot-policy.json\`（${defaultBranch}）`,
                 });
               }
               core.notice(`转人工：${reasons.join(' / ')}`);
               return;
             }
 
-            // ── 5. 提交前重新确认 head 没变（防 TOCTOU）────
-            const { data: fresh } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
-            if (fresh.head.sha !== pr.head.sha) {
-              core.notice(`判定后 PR 又被更新（${pr.head.sha.slice(0, 7)} → ${fresh.head.sha.slice(0, 7)}），本次放弃`);
-              await github.rest.issues.createComment({
-                owner, repo, issue_number: prNumber,
-                body: `${MARK}\n### ⚠️ 判定过程中 PR 被更新\n` +
-                  `判定基于 \`${pr.head.sha.slice(0, 7)}\`，当前已是 \`${fresh.head.sha.slice(0, 7)}\`，` +
-                  '本次不提交批准，等新一轮 CI。',
-              });
-              return;
-            }
-
             const reviews = await github.paginate(github.rest.pulls.listReviews, {
               owner, repo, pull_number: prNumber, per_page: 100,
             });
-            const approved = reviews.some(r => r.state === 'APPROVED' && r.commit_id === pr.head.sha);
-            if (approved) {
+            if (reviews.some(r => r.state === 'APPROVED' && r.commit_id === pr.head.sha)) {
               core.notice('当前提交已有批准，跳过');
               return;
             }
 
             const approveBody = [
-              '### 🤖 自动批准（低风险）',
-              summary,
-              '',
+              '### 🤖 自动批准（低风险）', summary, '',
               '判定规则：`.github/gh-bot-policy.json`。',
               '如需人工复核：加 `needs-human` 标签或直接驳回本次审查。',
             ].join('\n');
@@ -280,28 +309,25 @@ jobs:
             try {
               await github.rest.pulls.createReview({
                 owner, repo, pull_number: prNumber,
-                commit_id: pr.head.sha,   // 明确绑定被校验的提交
-                event: 'APPROVE',
-                body: approveBody,
+                commit_id: pr.head.sha, event: 'APPROVE', body: approveBody,
               });
               core.notice('已自动批准');
-
-              // 之前自动打过拦截标签的话，这里清掉，避免永久自锁
               try {
                 await github.rest.issues.removeLabel({
                   owner, repo, issue_number: prNumber, name: AUTO_LABEL,
                 });
               } catch (e) { /* 没有该标签就忽略 */ }
             } catch (e) {
-              // GitHub 禁止部分 token 提交批准时，降级为"条件已满足，待人工点一下"
               const msg = e.message || '';
               const status = e.status || (e.response && e.response.status) || 0;
+              // 只认"身份没权限"，不要把限流/其它 403 也降级成"待人工确认"
               const permissionIssue =
-                status === 403 ||
-                /not permitted .*approve/i.test(msg) ||
-                /cannot approve your own/i.test(msg) ||
-                /resource not accessible by integration/i.test(msg);
-              if (!permissionIssue) throw e;
+                status === 403 &&
+                (/not permitted .*approve/i.test(msg) ||
+                 /cannot approve your own/i.test(msg) ||
+                 /resource not accessible by integration/i.test(msg));
+              const notPermitted = /not permitted .*approve/i.test(msg);
+              if (!permissionIssue && !notPermitted) throw e;
 
               const READY_MARK = `<!-- gh-bot:ready:${pr.head.sha} -->`;
               let readyPosted = false;
@@ -316,7 +342,7 @@ jobs:
                 await github.rest.issues.createComment({
                   owner, repo, issue_number: prNumber,
                   body: `${READY_MARK}\n### ✅ 已满足自动批准条件\n` +
-                    '判定全部通过，但当前 token 没有批准权限（GitHub 禁止 Actions 自带 token 批准）。\n' +
+                    '判定全部通过，但当前 token 没有批准权限。\n' +
                     '配置 GitHub App 凭据或 `GH_BOT_TOKEN` 后可自动批准。\n\n' +
                     `${summary}\n\n规则文件：\`.github/gh-bot-policy.json\``,
                 });

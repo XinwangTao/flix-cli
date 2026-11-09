@@ -190,18 +190,33 @@ JSON
 |---|---|---|
 | 仓库协作者（OWNER/MEMBER/COLLABORATOR） | 允许 `Read,Grep,Glob` | 可查仓库代码，质量更高 |
 | 其他人 | `--disallowedTools` 显式禁用整套工具 | 只能基于正文回答，读不到任何文件 |
-
-所有调用都额外加 `--restricted --strict-mcp-config`：
-文件工具被**限制在工作目录内**（实测读不到 `C:\Windows\win.ini`）、忽略仓库自带的
-`.claude/settings.json`、不加载 MCP。权限策略一律从 `main` 读取，取不到就失败，
-不回落到检出目录（避免 PR 用自身内容决定自身权限）。
 | 非协作者的 `@claude` 追问 | 不调用模型 | 直接回一句固定说明，避免刷额度 |
+
+所有调用都额外加 `--restricted --strict-mcp-config --bare`：
+文件工具被**限制在工作目录内**（实测读不到 `C:\Windows\win.ini`）、忽略仓库自带的
+`.claude/settings.json`、不加载 MCP；`--bare` 还会跳过 CLAUDE.md 自动发现（实测：
+PR 里塞一个 `CLAUDE.md` 会让内容进入评审上下文，加 `--bare` 后不会）。
+
+**外部来源的分诊在空目录里执行**（不进仓库工作区），即使工具名单漂移也读不到仓库内容；
+checkout 一律 `persist-credentials: false`，避免 job token 落进 `.git/config`。
+
+> `--restricted` 是当前唯一挡住「用户级 CLAUDE.md 被原文吐出」的开关（实测：不加它，
+> 一句提示词就能让模型逐字复述 `~/.claude/CLAUDE.md`）。**不要为了排查问题把它删掉。**
+
+**按天成本上限**（`reply.max_runs_per_day`，默认 120）只约束**外部来源**的 issue 分诊：
+既防刷额度，又不会把维护者自己挡在门外（协作者与 PR 评审不计入）。
+权限策略一律从 `main` 读取，取不到就失败，不回落到检出目录。
 
 判定侧（`gh-bot-approve.yml`）的硬规则：
 
 - **删除和重命名同样过禁止路径**：删 `src/x.py`、把 `src/x.py` 移到 `docs/` 都会被拦。
 - 新增/删除行数都有上限（`max_additions` / `max_deletions`）。
 - 没有任何文件命中白名单（含空 PR）不批准；**删除**也要命中白名单，删掉 `assets/` 这类白名单外文件会被拦。
+- **符号链接（120000）和子模块（160000）一律不批**：软链能把 runner 上的文件（例如 `.git/config`
+  里的 token）带进构建产物（`pyproject` 的 readme、spec 的 copy_metadata）。
+- 文件名含控制字符（含换行）不批；目标分支必须是默认分支；**最后提交作者**也要在白名单内。
+- `docs/archify/**` 不参与自动放行：流程图是流程真源，按 Archify 协议需人工确认。
+- policy 一律从**默认分支**读（`workflow_dispatch` 可选任意 ref，不能信检出目录）；缺必需字段直接失败。
 - **CI 恒为必需**（没有开关）；手动触发会按 `head_sha` 反查 CI 结论（用 workflow 自带 token，App/PAT 无 `actions: read`）。
 - 转人工标签不存在时 workflow 会自动创建，不会静默丢掉信号。
 - 批准提交带 `commit_id`，且提交前重新确认 head 未变（防判定后被推送）。

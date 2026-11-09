@@ -10,6 +10,8 @@
 #   所以这里的原则是「能力必须跟着信任走」：
 #     - 所有调用都加 --restricted --strict-mcp-config：
 #       文件工具被限制在工作目录内、忽略仓库自带的 settings、不加载 MCP（实测读不到 C:\Windows）
+#     - 再加 --bare：跳过 CLAUDE.md 自动发现/钩子/插件（实测：PR 里塞 CLAUDE.md
+#       会让其内容进入上下文，--bare 后不会）
 #     - 仓库协作者（OWNER/MEMBER/COLLABORATOR）：允许 Read/Grep/Glob 查仓库
 #     - 其他人：再额外禁用整套文件工具（只能基于正文回答）
 #
@@ -31,6 +33,7 @@ permissions:
   contents: read
   issues: write
   pull-requests: write
+  actions: read
 
 concurrency:
   group: gh-bot-reply-${{ github.event.issue.number || github.event.pull_request.number }}
@@ -59,6 +62,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false   # 别把 job token 写进 .git/config
 
       - name: Claude 分诊
         shell: pwsh
@@ -83,9 +88,21 @@ jobs:
           $maxBody = if ($p.max_issue_body_chars) { [int]$p.max_issue_body_chars } else { 8000 }
           $trustedList = if ($p.trusted_associations) { $p.trusted_associations } else { @('OWNER','MEMBER','COLLABORATOR') }
 
+          $trusted = $trustedList -contains $env:ASSOC
+
+          # 成本上限只约束外部来源：既防刷额度，又不会把维护者自己挡在门外
+          if (-not $trusted) {
+            $cap = if ($p.max_runs_per_day) { [int]$p.max_runs_per_day } else { 120 }
+            $since = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')
+            $n = gh api "repos/$env:GITHUB_REPOSITORY/actions/workflows/gh-bot-reply.yml/runs?created=%3E%3D$since&per_page=1" --jq '.total_count' 2>$null
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($n)) {
+              Write-Warning "预算计数失败（exit=$LASTEXITCODE），本次按未超限继续"
+            } elseif ([int]$n -gt $cap) {
+              Write-Host "今日已运行 $n 次，超过上限 $cap，跳过"; exit 0
+            }
+          }
           if ($env:ISSUE_BODY.Length -gt $maxBody) { Write-Host "正文过长，跳过"; exit 0 }
 
-          $trusted = $trustedList -contains $env:ASSOC
           if ($trusted) { $toolArgs = @('--allowedTools', $tools) }
           else { $toolArgs = @('--disallowedTools', $noTool) }
           Write-Host "作者关系=$($env:ASSOC) 是否可信=$trusted"
@@ -114,7 +131,14 @@ jobs:
           $($env:ISSUE_BODY)
           "@
 
-          $answer = & $env:CLAUDE_EXE -p $prompt @toolArgs --restricted --strict-mcp-config --model $model 2>$null | Out-String
+          # 外部来源在空目录里跑：即使工具名单漂移，也读不到仓库内容
+          if (-not $trusted) {
+            $iso = Join-Path $env:RUNNER_TEMP 'iso'
+            New-Item -ItemType Directory -Force -Path $iso | Out-Null
+            Push-Location $iso
+          }
+          $answer = & $env:CLAUDE_EXE -p $prompt @toolArgs --restricted --strict-mcp-config --bare --model $model 2>$null | Out-String
+          if (-not $trusted) { Pop-Location }
           if ([string]::IsNullOrWhiteSpace($answer)) { throw "Claude 没有返回内容" }
           if ($answer.Length -gt $maxOut) { $answer = $answer.Substring(0, $maxOut) + "`n`n…（已截断）" }
           $answer = "$env:BOT_BANNER`n`n$answer"
@@ -135,6 +159,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false   # 别把 job token 写进 .git/config
 
       - name: Claude 评审
         shell: pwsh
@@ -192,7 +218,7 @@ jobs:
           $diff
           "@
 
-          $answer = & $env:CLAUDE_EXE -p $prompt @toolArgs --restricted --strict-mcp-config --model $model 2>$null | Out-String
+          $answer = & $env:CLAUDE_EXE -p $prompt @toolArgs --restricted --strict-mcp-config --bare --model $model 2>$null | Out-String
           if ([string]::IsNullOrWhiteSpace($answer)) { throw "Claude 没有返回内容" }
           if ($answer.Length -gt $maxOut) { $answer = $answer.Substring(0, $maxOut) + "`n`n…（已截断）" }
           $answer = "$env:BOT_BANNER`n`n$answer"
@@ -212,6 +238,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false   # 别把 job token 写进 .git/config
 
       - name: Claude 回答追问
         shell: pwsh
@@ -235,7 +263,6 @@ jobs:
           $maxCmt = if ($p.max_comment_chars) { [int]$p.max_comment_chars } else { 2000 }
           $trustedList = if ($p.trusted_associations) { $p.trusted_associations } else { @('OWNER','MEMBER','COLLABORATOR') }
 
-          $trusted = $trustedList -contains $env:ASSOC
           $danger = if ($p.dangerous_tools) { $p.dangerous_tools } else { 'Bash,Write,Edit,MultiEdit,WebFetch,WebSearch,Task,NotebookEdit' }
 
           # 非协作者不消耗模型额度：公开仓库上任何人刷 @claude 都会变成成本放大器
@@ -258,7 +285,7 @@ jobs:
             $($env:COMMENT_BODY)
             "@
 
-            $answer = & $env:CLAUDE_EXE -p $prompt --allowedTools $tools --disallowedTools $danger --restricted --strict-mcp-config --model $model 2>$null | Out-String
+            $answer = & $env:CLAUDE_EXE -p $prompt --allowedTools $tools --disallowedTools $danger --restricted --strict-mcp-config --bare --model $model 2>$null | Out-String
             if ([string]::IsNullOrWhiteSpace($answer)) { throw "Claude 没有返回内容" }
             if ($answer.Length -gt $maxOut) { $answer = $answer.Substring(0, $maxOut) + "`n`n…（已截断）" }
           }
