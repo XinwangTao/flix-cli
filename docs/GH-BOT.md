@@ -49,7 +49,17 @@ schtasks /Create /TN "GitHubActionsRunner-flix-cli" `
   /TR "D:\actions-runner-flix-cli\start-runner.cmd" /SC ONLOGON /RL HIGHEST /F
 ```
 
-（`start-runner.cmd` 内容只有 `cd /d "%~dp0"` + `"%~dp0run.cmd"`。）
+> **还必须让 runner 找到 Git 自带的 bash。**
+> 本机 PATH 里只有 `D:\app\Git\cmd`（有 git.exe，没有 bash.exe），
+> 于是 `bash` 解析到 `C:\Windows\System32\bash.exe`——那是 WSL 启动器，本机没装 WSL，
+> composite action 会直接失败。启动脚本因此先前置 Git 的路径：
+
+```bat
+@echo off
+cd /d "%~dp0"
+set "PATH=D:\app\Git\bin;D:\app\Git\usr\bin;%PATH%"
+"%~dp0run.cmd"
+```
 
 ### 2. 确认代理可达
 
