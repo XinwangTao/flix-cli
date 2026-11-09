@@ -329,6 +329,13 @@ GitHub Release 一次发齐（每份附件旁边都有同名 `.sha256`）：
 发布前本地流程：合入 `main` → 改 `pyproject.toml` 版本与 `CHANGELOG.md` →
 `git tag v<ver>` → `git push origin v<ver>`。
 
+## 仓库自动化
+
+Issue 与 PR 由仓库内的 GH Bot 处理：新 issue 自动首轮分诊，新 PR 自动评审，
+**只改文档 / 测试 / 依赖锁文件**的低风险 PR 在 CI 全绿后自动批准；其余一律打
+`needs-human` 标签转人工。批准规则是确定性的，与模型判断无关，配置在
+`.github/gh-bot-policy.json`，说明见 [docs/GH-BOT.md](docs/GH-BOT.md)。
+
 ## 许可与反馈
 
 本项目以 [MIT](LICENSE) 许可发布。版本变更见 [CHANGELOG.md](CHANGELOG.md)，
