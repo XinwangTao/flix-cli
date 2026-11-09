@@ -74,7 +74,7 @@ jobs:
 
           $trusted = $policy.trusted_associations -contains $env:ASSOC
           if ($trusted) { $toolArgs = @('--allowedTools', $policy.tools) }
-          else { $toolArgs = @('--disallowedTools', $policy.tools) }
+          else { $toolArgs = @('--disallowedTools', $policy.untrusted_disallowed) }
           Write-Host "作者关系=$($env:ASSOC) 是否可信=$trusted"
 
           $prompt = @"
@@ -124,6 +124,9 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 检出 base 分支：PR head 里的 .claude/settings.json 可能试图扩大评审进程权限
+          ref: ${{ github.event.pull_request.base.sha }}
 
       - name: Claude 评审
         shell: pwsh
@@ -137,8 +140,9 @@ jobs:
 
           $policy = (Get-Content .github/gh-bot-policy.json -Raw -Encoding UTF8 | ConvertFrom-Json).reply
           $trusted = $policy.trusted_associations -contains $env:ASSOC
-          if ($trusted) { $toolArgs = @('--allowedTools', $policy.tools) }
-          else { $toolArgs = @('--disallowedTools', $policy.tools) }
+          # 即使作者可信也不给写/执行能力：PR 分支可能自带 .claude/settings.json 试图扩权
+          if ($trusted) { $toolArgs = @('--allowedTools', $policy.tools, '--disallowedTools', $policy.dangerous_tools) }
+          else { $toolArgs = @('--disallowedTools', $policy.untrusted_disallowed) }
 
           $diff = gh pr diff $env:PR_NUMBER --repo $env:GITHUB_REPOSITORY 2>$null | Out-String
           if ([string]::IsNullOrWhiteSpace($diff)) { throw "取不到 PR diff，检查 gh 认证或权限" }

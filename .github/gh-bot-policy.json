@@ -3,7 +3,10 @@
   "version": 2,
   "auto_approve": {
     "enabled": true,
-    "authors": ["dependabot[bot]", "XinwangTao"],
+    "authors": [
+      "dependabot[bot]",
+      "XinwangTao"
+    ],
     "paths": [
       "**/*.md",
       "docs/archify/*.json",
@@ -27,17 +30,24 @@
     "max_files": 25,
     "max_additions": 600,
     "max_deletions": 300,
-    "blocking_labels": ["needs-human"],
+    "blocking_labels": [
+      "needs-human"
+    ],
     "auto_block_label": "gh-bot-needs-human",
-    "require_ci": true,
     "ci_workflow_name": "CI"
   },
   "reply": {
     "model": "ccs-claude-openai--deepseek-v4.1-flash",
-    "trusted_associations": ["OWNER", "MEMBER", "COLLABORATOR"],
+    "trusted_associations": [
+      "OWNER",
+      "MEMBER",
+      "COLLABORATOR"
+    ],
     "tools": "Read,Grep,Glob",
     "max_issue_body_chars": 8000,
     "max_comment_chars": 2000,
-    "max_output_chars": 8000
+    "max_output_chars": 8000,
+    "untrusted_disallowed": "Read,Write,Edit,MultiEdit,Bash,BashOutput,KillShell,Glob,Grep,LS,WebFetch,WebSearch,Task,NotebookEdit",
+    "dangerous_tools": "Bash,Write,Edit,MultiEdit,WebFetch,WebSearch,Task,NotebookEdit"
   }
 }

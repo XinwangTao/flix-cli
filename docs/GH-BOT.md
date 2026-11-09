@@ -189,14 +189,15 @@ JSON
 | 来源 | 文件工具 | 说明 |
 |---|---|---|
 | 仓库协作者（OWNER/MEMBER/COLLABORATOR） | 允许 `Read,Grep,Glob` | 可查仓库代码，质量更高 |
-| 其他人 | `--disallowedTools` 显式禁用 | 只能基于正文回答，读不到任何文件 |
+| 其他人 | `--disallowedTools` 显式禁用整套工具 | 只能基于正文回答，读不到任何文件 |
 | 非协作者的 `@claude` 追问 | 不调用模型 | 直接回一句固定说明，避免刷额度 |
 
 判定侧（`gh-bot-approve.yml`）的硬规则：
 
 - **删除和重命名同样过禁止路径**：删 `src/x.py`、把 `src/x.py` 移到 `docs/` 都会被拦。
 - 新增/删除行数都有上限（`max_additions` / `max_deletions`）。
-- 没有任何文件命中白名单（含空 PR）不批准。
+- 没有任何文件命中白名单（含空 PR）不批准；**删除**也要命中白名单，删掉 `assets/` 这类白名单外文件会被拦。
+- **CI 恒为必需**（没有开关）；手动触发会按 `head_sha` 反查 CI 结论。
 - 批准提交带 `commit_id`，且提交前重新确认 head 未变（防判定后被推送）。
 - 自动拦截标签是 `gh-bot-needs-human`，与人工阻断标签 `needs-human` 分开，避免自动打标导致永久自锁。
 

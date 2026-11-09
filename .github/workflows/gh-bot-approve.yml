@@ -108,7 +108,7 @@ jobs:
             }
 
             if (pr.draft) reasons.push('PR 仍是草稿');
-            if (pr.head.repo.full_name !== `${owner}/${repo}`) {
+            if (!pr.head.repo || pr.head.repo.full_name !== `${owner}/${repo}`) {
               reasons.push('PR 来自 fork，需人工确认来源');
             }
 
@@ -164,8 +164,6 @@ jobs:
                 reasons.push(`${f.filename}（${f.status}）命中禁止路径 ${blocked}`);
                 continue;
               }
-              if (f.status === 'removed') continue; // 删除白名单文件本身无害
-
               const allowed = (policy.paths || []).find((p, i) => allow[i].test(f.filename));
               if (allowed) hitAllow.add(allowed);
               else outside.push(f.filename);
