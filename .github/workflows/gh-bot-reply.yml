@@ -73,7 +73,7 @@ jobs:
 
           # policy 一律取 main 的版本：PR 里改 policy 不能影响本进程的权限设定
           git fetch --depth=1 origin main 2>$null | Out-Null
-          $raw = git show FETCH_HEAD:.github/gh-bot-policy.json
+          $raw = (git show FETCH_HEAD:.github/gh-bot-policy.json) -join "`n"
           if (-not $raw) { throw "取不到 main 上的 policy，拒绝运行（避免用 PR 内容决定自身权限）" }
           $p = ($raw | ConvertFrom-Json).reply
           $model  = if ($p.model)  { $p.model }  else { 'ccs-claude-openai--deepseek-v4.1-flash' }
@@ -148,7 +148,7 @@ jobs:
 
           # policy 一律取 main 的版本：PR 里改 policy 不能影响本进程的权限设定
           git fetch --depth=1 origin main 2>$null | Out-Null
-          $raw = git show FETCH_HEAD:.github/gh-bot-policy.json
+          $raw = (git show FETCH_HEAD:.github/gh-bot-policy.json) -join "`n"
           if (-not $raw) { throw "取不到 main 上的 policy，拒绝运行（避免用 PR 内容决定自身权限）" }
           $p = ($raw | ConvertFrom-Json).reply
           $model  = if ($p.model)  { $p.model }  else { 'ccs-claude-openai--deepseek-v4.1-flash' }
@@ -226,7 +226,7 @@ jobs:
 
           # policy 一律取 main 的版本：PR 里改 policy 不能影响本进程的权限设定
           git fetch --depth=1 origin main 2>$null | Out-Null
-          $raw = git show FETCH_HEAD:.github/gh-bot-policy.json
+          $raw = (git show FETCH_HEAD:.github/gh-bot-policy.json) -join "`n"
           if (-not $raw) { throw "取不到 main 上的 policy，拒绝运行（避免用 PR 内容决定自身权限）" }
           $p = ($raw | ConvertFrom-Json).reply
           $model  = if ($p.model)  { $p.model }  else { 'ccs-claude-openai--deepseek-v4.1-flash' }

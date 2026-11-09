@@ -202,7 +202,8 @@ JSON
 - **删除和重命名同样过禁止路径**：删 `src/x.py`、把 `src/x.py` 移到 `docs/` 都会被拦。
 - 新增/删除行数都有上限（`max_additions` / `max_deletions`）。
 - 没有任何文件命中白名单（含空 PR）不批准；**删除**也要命中白名单，删掉 `assets/` 这类白名单外文件会被拦。
-- **CI 恒为必需**（没有开关）；手动触发会按 `head_sha` 反查 CI 结论。
+- **CI 恒为必需**（没有开关）；手动触发会按 `head_sha` 反查 CI 结论（用 workflow 自带 token，App/PAT 无 `actions: read`）。
+- 转人工标签不存在时 workflow 会自动创建，不会静默丢掉信号。
 - 批准提交带 `commit_id`，且提交前重新确认 head 未变（防判定后被推送）。
 - 自动拦截标签是 `gh-bot-needs-human`，与人工阻断标签 `needs-human` 分开，避免自动打标导致永久自锁。
 
