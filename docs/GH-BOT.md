@@ -10,7 +10,7 @@
 | 新 issue 自动分诊回复 | 不修改代码、不执行命令 |
 | 新 PR 自动评审（只评论） | 不参与批准判断 |
 | 白名单内的低风险 PR 自动 APPROVE | 不处理 fork PR、不处理草稿 |
-| 判定不通过时打 `needs-human` 并说明原因 | 不会静默跳过 |
+| 判定不通过时打 `gh-bot-needs-human` 并评论说明原因 | 预期跳过（无关联 PR、PR 已关）不评论 |
 
 批准**只**由 `.github/gh-bot-policy.json` 的规则决定，模型的输出不参与。
 
@@ -27,7 +27,7 @@
 ### 1. 装 self-hosted runner（必需）
 
 回复与评审要用本机 `cc-switch` 代理，GitHub 托管 runner 在公网够不到局域网，
-所以这两个 job 必须跑在本机 runner 上。
+所以这两个 job 必须跑在本机 runner 上（共三个 job：issue 分诊 / PR 评审 / @claude 追问）。
 
 在仓库 **Settings → Actions → Runners → New self-hosted runner** 选 Windows，
 按页面给出的命令安装，并确保注册时带上额外的 label：
@@ -153,7 +153,7 @@ gh api -X PUT repos/<owner>/<repo>/branches/main/protection --input - <<'JSON'
 {
   "required_status_checks": {"strict": false, "contexts": ["test (3.11)", "test (3.12)"]},
   "enforce_admins": false,
-  "required_pull_request_reviews": {"required_approving_review_count": 1},
+  "required_pull_request_reviews": null,
   "restrictions": null,
   "allow_force_pushes": false,
   "allow_deletions": false
@@ -181,6 +181,35 @@ JSON
 - 换作者白名单：改 `authors`
 - 临时关掉自动批准：`"enabled": false`
 
+## 安全边界（2026-11-09 对抗性审查后重做）
+
+模型进程以 runner 用户身份运行，**实测 `Read` 能读整台机器**（`C:\Windows\win.ini`、
+`bot-app.pem` 都能读出来）。而 issue/评论正文完全由外部人控制。因此采用「能力跟着信任走」：
+
+| 来源 | 文件工具 | 说明 |
+|---|---|---|
+| 仓库协作者（OWNER/MEMBER/COLLABORATOR） | 允许 `Read,Grep,Glob` | 可查仓库代码，质量更高 |
+| 其他人 | `--disallowedTools` 显式禁用整套工具 | 只能基于正文回答，读不到任何文件 |
+
+所有调用都额外加 `--restricted --strict-mcp-config`：
+文件工具被**限制在工作目录内**（实测读不到 `C:\Windows\win.ini`）、忽略仓库自带的
+`.claude/settings.json`、不加载 MCP。权限策略一律从 `main` 读取，取不到就失败，
+不回落到检出目录（避免 PR 用自身内容决定自身权限）。
+| 非协作者的 `@claude` 追问 | 不调用模型 | 直接回一句固定说明，避免刷额度 |
+
+判定侧（`gh-bot-approve.yml`）的硬规则：
+
+- **删除和重命名同样过禁止路径**：删 `src/x.py`、把 `src/x.py` 移到 `docs/` 都会被拦。
+- 新增/删除行数都有上限（`max_additions` / `max_deletions`）。
+- 没有任何文件命中白名单（含空 PR）不批准；**删除**也要命中白名单，删掉 `assets/` 这类白名单外文件会被拦。
+- **CI 恒为必需**（没有开关）；手动触发会按 `head_sha` 反查 CI 结论（用 workflow 自带 token，App/PAT 无 `actions: read`）。
+- 转人工标签不存在时 workflow 会自动创建，不会静默丢掉信号。
+- 批准提交带 `commit_id`，且提交前重新确认 head 未变（防判定后被推送）。
+- 自动拦截标签是 `gh-bot-needs-human`，与人工阻断标签 `needs-human` 分开，避免自动打标导致永久自锁。
+
+残留风险：协作者账号被接管时仍可利用其权限；如需更强隔离，应给 runner 单独低权限账号
+并把私钥移出该账号可读范围。
+
 ## 已知限制
 
 - **fork PR 不自动评审**：`pull_request` 事件在 fork 上拿不到写权限。
@@ -188,3 +217,4 @@ JSON
 - **模型额度**：走本机 cc-switch 代理，代理挂了 job 就失败（会留红叉，不会静默）。
 - **成本**：每次 issue/PR 触发一次模型调用；正文超过
   `reply.max_issue_body_chars`（默认 8000 字）直接跳过，避免被灌水刷额度。
+  该上限只作用于 issue 正文；PR diff 硬编码 12000 字截断；@claude 追问对非协作者不调用模型。

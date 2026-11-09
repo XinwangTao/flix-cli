@@ -79,8 +79,8 @@
       "lane": "brain",
       "col": 2,
       "type": "cloud",
-      "label": "Claude Code Action",
-      "sublabel": "读仓库上下文",
+      "label": "Claude Code CLI",
+      "sublabel": "能力跟着信任走",
       "width": 124
     },
     {
@@ -192,7 +192,7 @@
       "dot": "rose",
       "title": "两条线必须分开",
       "items": [
-        "Claude Code Action 官方禁止批准 PR，只做评论",
+        "Claude Code CLI 只做评论，不参与批准判定",
         "批准由确定性规则执行，模型不参与签字",
         "模型出错最坏丢一条评论，不会放错代码"
       ]

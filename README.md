@@ -336,7 +336,7 @@ Issue 与 PR 由仓库内的 GH Bot 处理：新 issue 自动首轮分诊，新 
 `needs-human` 标签转人工。批准规则是确定性的，与模型判断无关，配置在
 `.github/gh-bot-policy.json`，说明见 [docs/GH-BOT.md](docs/GH-BOT.md)。
 
-需要人工接手时，PR 上会出现 `needs-human` 标签和一条说明原因的评论。
+需要人工接手时，PR 上会出现 `gh-bot-needs-human` 标签和一条说明原因的评论；人工想阻止自动批准，加 `needs-human` 标签。
 
 ## 许可与反馈
 
