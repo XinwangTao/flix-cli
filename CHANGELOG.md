@@ -9,6 +9,8 @@
 - Android 液态玻璃界面：全屏玉青/蓝紫氛围光，玻璃头部/标签/卡片/输入栏，渐变头像与沉浸系统栏。
 
 ### 修复
+- 自动更新解包拒绝越界成员：release zip / 源码 tarball 中的 `../`、绝对路径、越界链接不再落盘；
+  源码更新改用每次新建的私有临时目录，避免固定 `/tmp` 路径被预建。
 - Android：消息长按现在整行响应；文字消息菜单可复制正文，文件消息可复制路径/文件名。
 - Android：前台服务改为 `connectedDevice` 类型，并持 partial wake lock + HIGH_PERF Wi-Fi 锁；
   关屏 45s 后 PC→平板文本/文件仍可送达（`relaydesk-bg-file.txt` 32B 落盘）。

@@ -26,6 +26,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import urllib.error
@@ -303,6 +304,78 @@ class Payload:
     path: Path         # exe file, or the extracted tree root
 
 
+def _inside(root: Path, path: Path) -> bool:
+    """True when ``path`` is ``root`` or one of its descendants."""
+    return path == root or root in path.parents
+
+
+def _safe_extract_zip(archive: Path, workdir: Path) -> list[str]:
+    """Extract a release zip, refusing members that escape ``workdir``.
+
+    The zip comes from the network and auto-update runs as root on a board, so
+    a member named ``../x`` (zip-slip) must never be written outside the
+    disposable staging directory. Returns the file members for layout detection.
+    """
+    workdir = workdir.resolve()
+    try:
+        with zipfile.ZipFile(archive) as zf:
+            bad = zf.testzip()
+            if bad:
+                raise UpdateError("bad-archive", f"zip 损坏: {bad}", EXIT_INSTALL)
+            for info in zf.infolist():
+                target = (workdir / info.filename).resolve()
+                if not _inside(workdir, target):
+                    raise UpdateError("bad-archive",
+                                      f"zip 成员越界: {info.filename}", EXIT_INSTALL)
+            names = [info.filename for info in zf.infolist() if not info.is_dir()]
+            zf.extractall(workdir)
+            return names
+    except UpdateError:
+        raise
+    except (zipfile.BadZipFile, OSError, ValueError) as exc:
+        raise UpdateError("bad-archive", f"zip 无法解包: {exc}", EXIT_INSTALL) from exc
+
+
+def _check_tar_members(tar: tarfile.TarFile, workdir: Path) -> None:
+    """Fallback containment checks for interpreters without ``data_filter``."""
+    for member in tar.getmembers():
+        target = (workdir / member.name).resolve()
+        if not _inside(workdir, target):
+            raise UpdateError("bad-archive",
+                              f"tar 成员越界: {member.name}", EXIT_INSTALL)
+        if member.isdev():
+            raise UpdateError("bad-archive",
+                              f"tar 含设备节点: {member.name}", EXIT_INSTALL)
+        if member.issym() or member.islnk():
+            link = (target.parent / member.linkname).resolve()
+            if not _inside(workdir, link):
+                raise UpdateError(
+                    "bad-archive",
+                    f"tar 链接越界: {member.name} -> {member.linkname}",
+                    EXIT_INSTALL)
+
+
+def _safe_extract_tar(archive: Path, workdir: Path) -> None:
+    """Extract a source tarball with the same containment guarantee as zips.
+
+    Python 3.11.4+/3.12 (what the board runs) has ``filter="data"``: reject
+    absolute paths, ``..``, device nodes and links that leave the destination.
+    Older interpreters get the same checks by hand.
+    """
+    workdir = workdir.resolve()
+    try:
+        with tarfile.open(archive, "r:gz") as tar:
+            if hasattr(tarfile, "data_filter"):
+                tar.extractall(workdir, filter="data")
+                return
+            _check_tar_members(tar, workdir)
+            tar.extractall(workdir)
+    except UpdateError:
+        raise
+    except (tarfile.TarError, OSError, ValueError) as exc:
+        raise UpdateError("bad-archive", f"tar 无法解包: {exc}", EXIT_INSTALL) from exc
+
+
 def extract_payload(archive: str | Path, workdir: str | Path, *,
                     exe_name: str = EXE_NAME) -> Payload:
     """Unpack and decide whether the zip is one exe or a directory tree.
@@ -312,12 +385,7 @@ def extract_payload(archive: str | Path, workdir: str | Path, *,
     """
     archive, workdir = Path(archive), Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(archive) as zf:
-        bad = zf.testzip()
-        if bad:
-            raise UpdateError("bad-archive", f"zip 损坏: {bad}", EXIT_INSTALL)
-        names = [info.filename for info in zf.infolist() if not info.is_dir()]
-        zf.extractall(workdir)
+    names = _safe_extract_zip(archive, workdir)
     target = exe_name.lower()
     matches = [n for n in names if Path(n).name.lower() == target]
     if not matches:
@@ -896,59 +964,59 @@ def check_update(repo: str = REPO_DEFAULT, current: str | None = None) -> dict:
 
 
 def install_from_source(tag: str, repo: str = REPO_DEFAULT,
-                        workdir: str | Path = "/tmp/flixcli-update") -> str:
+                        workdir: str | Path | None = None) -> str:
     """Download the GitHub source tarball for `tag` and install it in place.
 
     Used on Linux boxes that run from source (board deployments): the published
     binaries are x86_64/Windows only, so the source tarball is the update.
     Returns the installed version string.
+
+    Each run gets a fresh private directory; ``workdir`` is only its parent.
+    A fixed, world-writable staging path (the old ``/tmp/flixcli-update``) could
+    be pre-created as a symlink and have its target wiped before extraction.
     """
-    import subprocess
-    import tarfile
+    parent = Path(workdir).expanduser() if workdir else None
+    if parent is not None:
+        parent.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix="flixcli-update-",
+                                 dir=str(parent) if parent else None))
+    try:
+        url = f"https://api.github.com/repos/{repo}/tarball/{tag}"
+        archive = work / "source.tar.gz"
+        with _open(url) as resp, open(archive, "wb") as fh:
+            while True:
+                chunk = resp.read(1 << 16)
+                if not chunk:
+                    break
+                fh.write(chunk)
+        _safe_extract_tar(archive, work)
+        roots = [p for p in work.iterdir() if p.is_dir()]
+        packages = [p for p in roots if (p / "pyproject.toml").is_file()]
+        roots = packages or roots
+        if not roots:
+            raise UpdateError("bad-archive", "源码包里没有目录", EXIT_INSTALL)
+        src = roots[0]
 
-    work = Path(workdir)
-    if work.exists():
-        for child in work.iterdir():
-            if child.is_dir():
-                import shutil
-                shutil.rmtree(child, ignore_errors=True)
-            else:
-                child.unlink(missing_ok=True)
-    work.mkdir(parents=True, exist_ok=True)
-
-    url = f"https://api.github.com/repos/{repo}/tarball/{tag}"
-    archive = work / "source.tar.gz"
-    with _open(url) as resp, open(archive, "wb") as fh:
-        while True:
-            chunk = resp.read(1 << 16)
-            if not chunk:
-                break
-            fh.write(chunk)
-    with tarfile.open(archive, "r:gz") as tar:
-        tar.extractall(work)
-    roots = [p for p in work.iterdir() if p.is_dir()]
-    if not roots:
-        raise UpdateError("bad-archive", "源码包里没有目录")
-    src = roots[0]
-
-    import sys
-    uv = _find_uv()
-    if uv:
-        cmd = [uv, "pip", "install", "--python", sys.executable, "--reinstall", str(src)]
-    else:
-        # uv 建的 venv 默认没有 pip：先补一个再说
-        # uv/pip spew UTF-8 (paths may contain non-ASCII: 用户目录、中文路径);
-        # text=True 会按 Windows 本地代码页解码并在更新自检里抛 UnicodeDecodeError。
-        subprocess.run([sys.executable, "-m", "ensurepip", "--upgrade"],
-                       capture_output=True, text=True,
-                       encoding="utf-8", errors="replace", timeout=300)
-        cmd = [sys.executable, "-m", "pip", "install", "--force-reinstall",
-               "--no-input", str(src)]
-    proc = subprocess.run(cmd, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", timeout=600)
-    if proc.returncode != 0:
-        raise UpdateError("install-failed", (proc.stderr or proc.stdout)[-400:])
-    return tag.lstrip("vV")
+        uv = _find_uv()
+        if uv:
+            cmd = [uv, "pip", "install", "--python", sys.executable,
+                   "--reinstall", str(src)]
+        else:
+            # uv 建的 venv 默认没有 pip：先补一个再说
+            # uv/pip spew UTF-8 (paths may contain non-ASCII: 用户目录、中文路径);
+            # text=True 会按 Windows 本地代码页解码并在更新自检里抛 UnicodeDecodeError。
+            subprocess.run([sys.executable, "-m", "ensurepip", "--upgrade"],
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=300)
+            cmd = [sys.executable, "-m", "pip", "install", "--force-reinstall",
+                   "--no-input", str(src)]
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=600)
+        if proc.returncode != 0:
+            raise UpdateError("install-failed", (proc.stderr or proc.stdout)[-400:])
+        return tag.lstrip("vV")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def shutil_which(name: str) -> str | None:
