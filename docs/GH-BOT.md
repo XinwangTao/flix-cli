@@ -132,13 +132,21 @@ App 安装 token 提交批准；App 权限只有 `contents: read`、`issues: wri
 所以必须合进 `main` 才会自动触发。合并后手动跑一次
 **GH Bot · 低风险放行**（`workflow_dispatch`，填一个 PR 号）做冒烟测试。
 
-### 5. 分支保护（可选但建议）
+### 5. 分支保护
 
-main 建议开启：必需检查 `test (3.11)`、`test (3.12)` + 必需 1 个批准，
-`enforce_admins` 关掉（管理员可绕过，避免把维护者自己锁死）。
+只建议开启 **必需状态检查**（`test (3.11)`、`test (3.12)`）。
 
-> **顺序很重要**：先建好机器人身份、确认它能批准，再打开「必需批准」。
-> 否则你自己写的 PR 既不能自批、机器人又批不了，会直接卡死。
+> [!warning] 不要开「必需 1 个批准」
+> 实测（2026-11-09，PR #25）：GitHub App `flix-cli-gh-bot[bot]` 已提交
+> `APPROVED`，合并状态仍是 `BLOCKED / REVIEW_REQUIRED`。
+> **GitHub 不把机器人/App 的批准计入「必需批准数」**。
+> 而你自己又不能批准自己的 PR，所以一旦开启这条，你的 PR 会被永久卡住，
+> 只能走管理员旁路合并。
+>
+> 机器人批准在这里的作用是**信号**（明确的 APPROVED + 说明），不是闸门。
+> 真正的闸门是 `.github/gh-bot-policy.json` 里的白名单判定。
+>
+> 如果确实要人工批准这道门，需要**人类**作为协作者去点 Approve。
 
 ```bash
 gh api -X PUT repos/<owner>/<repo>/branches/main/protection --input - <<'JSON'
