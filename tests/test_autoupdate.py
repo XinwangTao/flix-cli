@@ -7,6 +7,7 @@ disk (a half-applied swap leaves the user with nothing that launches).
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sys
 import tempfile
@@ -73,6 +74,112 @@ class ManagedInstanceTests(unittest.TestCase):
         ]
         self.assertEqual(au.managed_instances(items), [])
 
+    def test_quoted_command_line_still_parses_the_role(self):
+        """Win32 reports `"C:\\...\\RelayDesk.exe" serve ...`; the closing quote
+        must not become the first argument (that hid every serve from the
+        updater and left the daemon on the old build)."""
+        payload = json.dumps([
+            {"ProcessId": 11, "ExecutablePath": r"C:\x\RelayDesk.exe",
+             "CommandLine": '"C:\\x\\RelayDesk.exe" serve --device-port 18991 --api-port 18998'},
+            {"ProcessId": 12, "ExecutablePath": r"C:\x\RelayDesk.exe",
+             "CommandLine": r'C:\x\RelayDesk.exe agent --reply "hi there"'},
+            {"ProcessId": 13, "ExecutablePath": r"C:\x\RelayDesk.exe",
+             "CommandLine": '"C:\\x\\RelayDesk.exe"'},
+        ])
+        with mock.patch.object(au, "_run_powershell", return_value=payload):
+            found = au.list_instances()
+        self.assertEqual([i["args"] for i in found],
+                         ["serve --device-port 18991 --api-port 18998",
+                          'agent --reply "hi there"', ""])
+        self.assertEqual([i["pid"] for i in au.managed_instances(found, self_pid=0)],
+                         [11, 12, 13])
+
+    def test_onefile_parent_and_child_restart_once(self):
+        """Both halves of a PyInstaller onefile image must be stopped, but only
+        one relaunch may happen: a second daemon would lose the port race and
+        trip the health check into rolling back."""
+        items = [
+            {"pid": 20, "exe": r"C:\x\RelayDesk.exe",
+             "args": "serve --device-port 18991 --api-port 18998"},
+            {"pid": 21, "exe": r"C:\x\RelayDesk.exe",
+             "args": "serve --device-port 18991 --api-port 18998"},
+        ]
+        self.assertEqual([i["pid"] for i in au.managed_instances(items, self_pid=0)],
+                         [20, 21])
+        self.assertEqual([i["pid"] for i in au.restart_targets(items)], [20])
+
+    def test_parent_link_beats_argv_when_identifying_onefile_children(self):
+        """The OS parent link is the discriminator, not identical argv: the
+        child (21) exists only because 20 re-executed itself."""
+        items = [
+            {"pid": 20, "parent": 1, "exe": r"C:\x\RelayDesk.exe", "args": "serve"},
+            {"pid": 21, "parent": 20, "exe": r"C:\x\RelayDesk.exe", "args": "serve"},
+        ]
+        self.assertEqual([i["pid"] for i in au.restart_targets(items)], [20])
+
+    def test_unrelated_processes_with_same_argv_are_both_restarted(self):
+        """Two independent agents may share an exe and argv; dropping one after
+        the swap would silently kill work the user started."""
+        items = [
+            {"pid": 20, "parent": 1, "exe": r"C:\x\RelayDesk.exe", "args": "agent --reply hi"},
+            {"pid": 30, "parent": 2, "exe": r"C:\x\RelayDesk.exe", "args": "agent --reply hi"},
+        ]
+        self.assertEqual([i["pid"] for i in au.restart_targets(items)], [20, 30])
+
+    def test_port_owner_must_be_a_new_process(self):
+        """An open port is not proof of a successful update: the daemon we
+        failed to stop can still own it."""
+        with mock.patch.object(au, "_port_owner", return_value=4242):
+            self.assertFalse(au._instance_ok(
+                {"process": object(), "args": "serve --api-port 18998"}, old_pids=[4242]))
+            self.assertTrue(au._instance_ok(
+                {"process": object(), "args": "serve --api-port 18998"}, old_pids=[1, 2]))
+        with mock.patch.object(au, "_port_owner", return_value=None):
+            self.assertFalse(au._instance_ok(
+                {"process": object(), "args": "serve --api-port 18998"}))
+
+    def test_port_owner_reads_the_listening_pid(self):
+        netstat = (
+            "  TCP    0.0.0.0:18991          0.0.0.0:0              LISTENING       52644\n"
+            "  TCP    127.0.0.1:18998        0.0.0.0:0              LISTENING       52644\n"
+            "  TCP    127.0.0.1:18998        127.0.0.1:50000        ESTABLISHED     52644\n")
+        completed = type("R", (), {"stdout": netstat})()
+        with mock.patch.object(au.subprocess, "run", return_value=completed):
+            self.assertEqual(au._port_owner(18998), 52644)
+            self.assertIsNone(au._port_owner(9999))
+
+    def test_ambiguous_running_installs_refuse_to_guess(self):
+        """Two installs have different state keys and channels; swapping the
+        wrong one is worse than asking for --exe."""
+        running = [
+            {"pid": 1, "exe": r"C:\a\RelayDesk.exe", "args": "serve"},
+            {"pid": 2, "exe": r"D:\b\RelayDesk.exe", "args": ""},
+        ]
+        with mock.patch.dict(os.environ, {}, clear=False), \
+                mock.patch.object(au, "list_instances", return_value=running):
+            os.environ.pop("RELAYDESK_EXE", None)
+            with self.assertRaises(au.UpdateError) as caught:
+                au.detect_target()
+        self.assertEqual(caught.exception.kind, "ambiguous-target")
+
+    def test_lock_from_a_dead_pid_is_not_respected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lock = Path(tmp) / "update.lock"
+            lock.write_text("999999 2026-11-09T10:00:00\n", encoding="utf-8")
+            with mock.patch.object(au, "_pid_exists", return_value=False):
+                with au.UpdateLock(lock) as held:
+                    self.assertTrue(held.acquired)
+
+    def test_lock_from_a_live_pid_still_blocks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lock = Path(tmp) / "update.lock"
+            lock.write_text("4242 2026-11-09T10:00:00\n", encoding="utf-8")
+            with mock.patch.object(au, "_pid_exists", return_value=True):
+                with self.assertRaises(au.UpdateError) as caught:
+                    with au.UpdateLock(lock):
+                        pass
+        self.assertEqual(caught.exception.kind, "busy")
+
     def test_install_leaves_mcp_and_the_updater_running(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -100,6 +207,73 @@ class ManagedInstanceTests(unittest.TestCase):
             stopped = [call.args[0] for call in stop.call_args_list]
             self.assertEqual([[i["pid"] for i in batch] for batch in stopped], [[888]])
             self.assertEqual(result["leftRunning"], [os.getpid(), 777])
+
+    def test_install_stops_both_halves_but_restarts_one_serve(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            exe = tmp_path / "RelayDesk.exe"
+            exe.write_bytes(FAKE_EXE)
+            downloads = tmp_path / "dl"
+            downloads.mkdir()
+            asset_name = "RelayDesk-v9.9.9-win64.zip"
+            archive = make_zip(downloads / asset_name, {"RelayDesk.exe": FAKE_EXE_V2})
+            rel = release("v9.9.9", asset_name, au.sha256_file(archive),
+                          size=archive.stat().st_size)
+            pair = [
+                {"pid": 20, "exe": str(exe),
+                 "args": "serve --device-port 18991 --api-port 18998"},
+                {"pid": 21, "exe": str(exe),
+                 "args": "serve --device-port 18991 --api-port 18998"},
+            ]
+            with mock.patch.object(au, "fetch_releases", return_value=[rel]), \
+                    mock.patch.object(au, "list_instances", return_value=pair), \
+                    mock.patch.object(au, "stop_instances",
+                                      side_effect=lambda items: [i["pid"] for i in items]) as stop, \
+                    mock.patch.object(au, "start_instance", return_value=None) as start, \
+                    mock.patch.object(au, "wait_healthy", return_value=True):
+                result = au.run_update(exe=str(exe), state_path=tmp_path / "s.json",
+                                       log_path=tmp_path / "u.log",
+                                       downloads_dir=downloads)
+            self.assertEqual(result["status"], "installed")
+            self.assertEqual([i["pid"] for i in stop.call_args.args[0]], [20, 21])
+            self.assertEqual(start.call_count, 1)
+            self.assertEqual(start.call_args.args[1],
+                             "serve --device-port 18991 --api-port 18998")
+
+    def test_surviving_process_aborts_before_swap_and_relaunches_the_victims(self):
+        """If one old process cannot be killed we must not swap, but the ones
+        we did stop have to come back — otherwise the update takes the service
+        down and delivers nothing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            exe = tmp_path / "RelayDesk.exe"
+            exe.write_bytes(FAKE_EXE)
+            downloads = tmp_path / "dl"
+            downloads.mkdir()
+            asset_name = "RelayDesk-v9.9.9-win64.zip"
+            archive = make_zip(downloads / asset_name, {"RelayDesk.exe": FAKE_EXE_V2})
+            rel = release("v9.9.9", asset_name, au.sha256_file(archive),
+                          size=archive.stat().st_size)
+            running = [
+                {"pid": 888, "parent": 1, "exe": str(exe),
+                 "args": "serve --api-port 59998"},
+                {"pid": 999, "parent": 2, "exe": str(exe),
+                 "args": "serve --api-port 59998"},
+            ]
+            with mock.patch.object(au, "fetch_releases", return_value=[rel]), \
+                    mock.patch.object(au, "list_instances", return_value=running), \
+                    mock.patch.object(au, "stop_instances",
+                                      side_effect=lambda items: [i["pid"] for i in items]), \
+                    mock.patch.object(au, "_wait_gone", return_value={888}), \
+                    mock.patch.object(au, "start_instance", return_value=None) as start:
+                with self.assertRaises(au.UpdateError) as caught:
+                    au.run_update(exe=str(exe), state_path=tmp_path / "s.json",
+                                  log_path=tmp_path / "u.log",
+                                  downloads_dir=downloads)
+            self.assertEqual(caught.exception.kind, "busy")
+            self.assertEqual(exe.read_bytes(), FAKE_EXE)
+            self.assertEqual(start.call_count, 1)
+            self.assertEqual(start.call_args.args[1], "serve --api-port 59998")
 
 
 class LogTests(unittest.TestCase):
