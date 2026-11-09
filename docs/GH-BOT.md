@@ -38,26 +38,26 @@ gh-bot
 
 （GitHub 会自动再加 `self-hosted`、`Windows`、`X64`。）
 
-装好后把 runner 服务设成开机自启，否则关机后 job 会一直排队。
-
-> **必须用普通用户身份运行，不能用 LocalSystem / SYSTEM。**
-> 官方 action 是 composite + bash，而 Git Bash 在 LocalSystem 下会直接报
-> `WSL_E_LOCAL_SYSTEM_NOT_SUPPORTED`，任务秒失败。本机的做法是用户级计划任务：
+装好后把 runner 设成开机自启，否则关机后 job 会一直排队。本机用的是用户级计划任务：
 
 ```powershell
-schtasks /Create /TN "GitHubActionsRunner-flix-cli" `
-  /TR "D:\actions-runner-flix-cli\start-runner.cmd" /SC ONLOGON /RL HIGHEST /F
+schtasks /Create /TN "GitHubActionsRunner-<repo>" `
+  /TR "<runner 安装目录>\start-runner.cmd" /SC ONLOGON /RL HIGHEST /F
 ```
 
-> **还必须让 runner 找到 Git 自带的 bash。**
-> 本机 PATH 里只有 `D:\app\Git\cmd`（有 git.exe，没有 bash.exe），
-> 于是 `bash` 解析到 `C:\Windows\System32\bash.exe`——那是 WSL 启动器，本机没装 WSL，
-> composite action 会直接失败。启动脚本因此先前置 Git 的路径：
+> **用普通用户身份运行，不要用 LocalSystem / SYSTEM。**
+> LocalSystem 下 Git Bash 直接报 `WSL_E_LOCAL_SYSTEM_NOT_SUPPORTED`，
+> 任何 `shell: bash` 的步骤都会秒失败。
+
+> **若步骤里用到 bash，还要让 runner 找到 Git 自带的 bash。**
+> 常见 PATH 里只有 `<Git 安装目录>\cmd`（有 git.exe、没有 bash.exe），
+> `bash` 会解析到 `C:\Windows\System32\bash.exe`——那是 WSL 启动器。
+> 启动脚本里先前置 Git 路径：
 
 ```bat
 @echo off
 cd /d "%~dp0"
-set "PATH=D:\app\Git\bin;D:\app\Git\usr\bin;%PATH%"
+set "PATH=<Git 安装目录>\bin;<Git 安装目录>\usr\bin;%PATH%"
 "%~dp0run.cmd"
 ```
 
@@ -75,20 +75,18 @@ curl -sS -X POST http://127.0.0.1:15721/v1/messages \
 返回带 `content` 的 JSON 即可。若代理换了端口，同步改
 `gh-bot-reply.yml` 里的 `ANTHROPIC_BASE_URL`。
 
-### 2.5 复用本机 bun（强烈建议）
+### 2.5 指定 Claude Code CLI 路径
 
-官方 action 默认每次从 GitHub CDN 下载 Bun，在慢速网络下实测要十分钟以上，
-能把 job 拖到超时。workflow 默认指向本机已装的 bun：
-
-```
-C:\Users\Administrator\.bun\bin\bun.exe
-```
-
-换机器时不用改文件，设一个仓库变量即可覆盖：
+回复与评审直接调用本机已装的 `claude` 可执行文件，不走官方 composite action
+（它依赖 bun + bash，在 Windows runner 上踩坑多）。路径写在 workflow 的
+`CLAUDE_EXE` 环境变量里：
 
 ```bash
-gh variable set BUN_EXE --repo <owner>/<repo> --body "D:\path\to\bun.exe"
+npm root -g          # 例如 C:\Users\<user>\AppData\Roaming\npm\node_modules
+# CLAUDE_EXE = <上面的路径>\@anthropic-ai\claude-code\bin\claude.exe
 ```
+
+换机器时改这一处即可。
 
 ### 3. 配置机器人身份（强烈建议）
 

@@ -214,9 +214,15 @@ jobs:
             } catch (e) {
               // GitHub 禁止 Actions 自带 token 提交批准；没有 GH_BOT_TOKEN 时会 422。
               // 这不是判定失败，降级为"条件已满足，待人工点一下"。
-              if (!/not permitted to approve/i.test(e.message || '')) throw e;
+              const msg = e.message || '';
+              const permissionIssue =
+                /not permitted (to create or )?approve/i.test(msg) ||
+                /cannot approve your own/i.test(msg) ||
+                /resource not accessible by integration/i.test(msg) ||
+                /403/.test(msg);
+              if (!permissionIssue) throw e;
 
-              const READY = '<!-- gh-bot:ready -->';
+              const READY = `<!-- gh-bot:ready:${pr.head.sha} -->`;
               let readyPosted = false;
               try {
                 const comments = await github.paginate(github.rest.issues.listComments, {
