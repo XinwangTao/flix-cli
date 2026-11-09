@@ -236,6 +236,7 @@ jobs:
           $trustedList = if ($p.trusted_associations) { $p.trusted_associations } else { @('OWNER','MEMBER','COLLABORATOR') }
 
           $trusted = $trustedList -contains $env:ASSOC
+          $danger = if ($p.dangerous_tools) { $p.dangerous_tools } else { 'Bash,Write,Edit,MultiEdit,WebFetch,WebSearch,Task,NotebookEdit' }
 
           # 非协作者不消耗模型额度：公开仓库上任何人刷 @claude 都会变成成本放大器
           if (-not $trusted) {
@@ -257,7 +258,7 @@ jobs:
             $($env:COMMENT_BODY)
             "@
 
-            $answer = & $env:CLAUDE_EXE -p $prompt --allowedTools $tools --restricted --strict-mcp-config --model $model 2>$null | Out-String
+            $answer = & $env:CLAUDE_EXE -p $prompt --allowedTools $tools --disallowedTools $danger --restricted --strict-mcp-config --model $model 2>$null | Out-String
             if ([string]::IsNullOrWhiteSpace($answer)) { throw "Claude 没有返回内容" }
             if ($answer.Length -gt $maxOut) { $answer = $answer.Substring(0, $maxOut) + "`n`n…（已截断）" }
           }
