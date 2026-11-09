@@ -197,6 +197,12 @@ JSON
 `.claude/settings.json`、不加载 MCP；`--bare` 还会跳过 CLAUDE.md 自动发现（实测：
 PR 里塞一个 `CLAUDE.md` 会让内容进入评审上下文，加 `--bare` 后不会）。
 
+**外部来源的分诊在空目录里执行**（不进仓库工作区），即使工具名单漂移也读不到仓库内容；
+checkout 一律 `persist-credentials: false`，避免 job token 落进 `.git/config`。
+
+> `--restricted` 是当前唯一挡住「用户级 CLAUDE.md 被原文吐出」的开关（实测：不加它，
+> 一句提示词就能让模型逐字复述 `~/.claude/CLAUDE.md`）。**不要为了排查问题把它删掉。**
+
 **按天成本上限**（`reply.max_runs_per_day`，默认 120）只约束**外部来源**的 issue 分诊：
 既防刷额度，又不会把维护者自己挡在门外（协作者与 PR 评审不计入）。
 权限策略一律从 `main` 读取，取不到就失败，不回落到检出目录。

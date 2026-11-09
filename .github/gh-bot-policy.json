@@ -45,7 +45,7 @@
     "max_issue_body_chars": 8000,
     "max_comment_chars": 2000,
     "max_output_chars": 8000,
-    "untrusted_disallowed": "Read,Write,Edit,MultiEdit,Bash,BashOutput,KillShell,Glob,Grep,LS,NotebookRead,NotebookEdit,WebFetch,WebSearch,Task,Skill,SlashCommand",
+    "untrusted_disallowed": "Read,Write,Edit,MultiEdit,Bash,BashOutput,KillShell,Glob,Grep,LS,NotebookRead,NotebookEdit,WebFetch,WebSearch,Task,Skill,SlashCommand,ListAgents,SendMessage,ToolSearch,EnterWorktree,ExitWorktree,CronCreate,CronDelete,CronList,DesignSync,ReportFindings,ScheduleWakeup,TaskCreate,TaskGet,TaskList,TaskUpdate,TaskStop",
     "dangerous_tools": "Bash,Write,Edit,MultiEdit,WebFetch,WebSearch,Task,NotebookEdit",
     "max_runs_per_day": 120
   }
