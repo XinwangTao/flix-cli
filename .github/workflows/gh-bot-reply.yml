@@ -22,7 +22,6 @@ permissions:
   contents: read
   issues: write
   pull-requests: write
-  id-token: write
 
 # 同一 issue/PR 串行，避免两条评论打架
 concurrency:
@@ -69,6 +68,7 @@ jobs:
         if: steps.guard.outputs.skip != 'true'
         uses: anthropics/claude-code-action@v1
         with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           anthropic_api_key: PROXY_MANAGED
           # 复用本机已装的 bun，避免每次从 GitHub CDN 下载（实测 10 分钟以上）
           path_to_bun_executable: ${{ vars.BUN_EXE || 'C:\Users\Administrator\.bun\bin\bun.exe' }}
@@ -107,6 +107,7 @@ jobs:
       - name: Claude 评审
         uses: anthropics/claude-code-action@v1
         with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           anthropic_api_key: PROXY_MANAGED
           # 复用本机已装的 bun，避免每次从 GitHub CDN 下载（实测 10 分钟以上）
           path_to_bun_executable: ${{ vars.BUN_EXE || 'C:\Users\Administrator\.bun\bin\bun.exe' }}
@@ -141,6 +142,7 @@ jobs:
       - name: Claude 回答追问
         uses: anthropics/claude-code-action@v1
         with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           anthropic_api_key: PROXY_MANAGED
           # 复用本机已装的 bun，避免每次从 GitHub CDN 下载（实测 10 分钟以上）
           path_to_bun_executable: ${{ vars.BUN_EXE || 'C:\Users\Administrator\.bun\bin\bun.exe' }}
