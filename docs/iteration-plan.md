@@ -7,11 +7,10 @@ Android 改动必须跑 `F:/projects/_agent-runs/android-deploy.sh <apk> com.rel
 
 ## 下一步（按顺序）
 
-1. Web 发送页 `/send` 失败时保留输入并显示服务端 `error/detail`（L0，非安卓单测）。
-2. 群聊网页同毫秒消息去重：接口返回气泡 id，页面回读最新毫秒并按 id 去重（L0，非安卓单测）。
-3. 板子重复部署清理已删除模块（L1，先补 Archify 图并确认；并行任务已备
+1. 群聊网页同毫秒消息去重：接口返回气泡 id，页面回读最新毫秒并按 id 去重（L0，非安卓单测）。
+2. 板子重复部署清理已删除模块（L1，先补 Archify 图并确认；并行任务已备
    `flix_board_deploy_workflow` 草稿）。
-4. Web 同名上传自动改名（L1，先补图确认）。
+3. Web 同名上传自动改名（L1，先补图确认）。
 
 ## 待上机验证
 
@@ -24,7 +23,8 @@ Android 改动必须跑 `F:/projects/_agent-runs/android-deploy.sh <apk> com.rel
 
 - 本地 `main` 0622b04：v2.4.0（lite/full + Acrylic）合并、液态玻璃 UI、Android 文件
   `openFileDescriptor` fallback/8891 通道自愈/关屏保活/长按复制、自动更新解包防穿越与
-  最高版本选择、per_page 100/404 回退/token/源码版本校验、Web 设备刷新/上传详情/群页面错误。
+  最高版本选择、per_page 100/404 回退/token/源码版本校验、Web 设备刷新/上传详情/群页面错误、
+  `/send` 失败保留输入与 JSON 502。
 - 测试：340 passed + 111 subtests（e2e 与缺 hypothesis 的 fuzz 除外）。
 - 手机：PKJ110 运行 2.4.6 (9)；截图 `device-shot-copy-menu.png`、`device-shot-copy-pasted.png`、
   `device-shot-final.png`（均在 `F:/projects/_agent-runs/`）。

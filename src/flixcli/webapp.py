@@ -49,6 +49,7 @@ color:#fff;font-size:15px;cursor:pointer}
 <button onclick="document.getElementById('file').click()">文件</button>
 <button id="send">发送</button>
 </div>
+<p id="serr" style="color:#f66;text-align:center;margin:4px 0"></p>
 <p style="text-align:center;margin:6px 0"><a id="glink" href="#"
 style="color:#7ab8ff">群聊视图 →</a></p>
 <script>
@@ -89,11 +90,26 @@ ws.onmessage = e => { if (e.data === 'refresh') location.reload(); else add(e.da
 async function sendText(){
   const i=document.getElementById('msg');const v=i.value.trim();if(!v)return;
   const to=document.getElementById('dev').value;
-  if(!to){ws.send(v);add(v,true,'本机');i.value='';return;}
-  const r=await fetch('/send',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({pin:PIN,to,text:v})});
-  const j=await r.json().catch(()=>({}));
-  add(v,true,(j.ok?'已送达 ':'失败 ')+JSON.stringify(j).slice(0,60));i.value='';
+  const err=document.getElementById('serr');
+  if(!to){
+    if(ws.readyState!==WebSocket.OPEN){
+      err.textContent='发送失败：本机通道未连接';
+      return;
+    }
+    ws.send(v);add(v,true,'本机');i.value='';err.textContent='';return;
+  }
+  try{
+    const r=await fetch('/send',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({pin:PIN,to,text:v})});
+    const j=(await r.json().catch(()=>null))||{};
+    if(!r.ok || j.ok===false){
+      throw new Error([j.error,j.detail].filter(Boolean).join(' — ')||('HTTP '+r.status));
+    }
+    err.textContent='';add(v,true,'已送达');i.value='';
+  }catch(e){
+    // A failed send keeps the text in the input so the visitor can retry.
+    err.textContent='发送失败：'+e.message;
+  }
 }
 document.getElementById('send').onclick = sendText;
 document.getElementById('msg').addEventListener('keydown', e=>{if(e.key==='Enter')sendText();});
@@ -476,13 +492,19 @@ def make_web_app(store, ident: dict, on_web_text: Callable[[str], None],
         text = str(payload.get("text", "")).strip()
         if not text:
             return web.json_response({"ok": False, "error": "empty"})
-        if to.startswith("group:"):
-            from .groupchat import send_group_text
+        try:
+            if to.startswith("group:"):
+                from .groupchat import send_group_text
+                result = await send_group_text(store, ident, to[6:], text)
+            elif not send_text_fn:
+                return web.json_response({"ok": False, "error": "no-route"})
+            else:
+                result = await send_text_fn(to, text)
+        except Exception as exc:  # noqa: BLE001 - one bad send must not 500 the page
             return web.json_response(
-                await send_group_text(store, ident, to[6:], text))
-        if not send_text_fn:
-            return web.json_response({"ok": False, "error": "no-route"})
-        return web.json_response(await send_text_fn(to, text))
+                {"ok": False, "error": "send-failed",
+                 "detail": str(exc)[:200]}, status=502)
+        return web.json_response(result)
 
     # -- group transcript view (read-only; same PIN auth) --------------------
 

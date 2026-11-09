@@ -55,6 +55,11 @@ class WebPagePortTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("saved.forwardError", page)
         self.assertIn("saved.name !== f.name", page)
         self.assertIn("/ws?pin=", page)
+        self.assertIn('id="serr"', page)
+        self.assertIn("if(!r.ok || j.ok===false)", page)
+        self.assertIn("发送失败：", page)
+        self.assertIn("ws.readyState!==WebSocket.OPEN", page)
+        self.assertIn("err.textContent='';add(v,true,'已送达');i.value='';", page)
 
     async def test_group_list_uses_text_nodes_and_reports_errors(self):
         r = await self.client.get(f"/group?pin={self.pin}")
@@ -92,6 +97,52 @@ class WebPagePortTests(unittest.IsolatedAsyncioTestCase):
         saved = (await r.json())["saved"][0]
         self.assertFalse(saved["forwarded"])
         self.assertIn("boom", saved["forwardError"])
+
+
+class WebSendFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name) / "case"
+        self.root.mkdir()
+        self.store = Store(self.root / "db.sqlite")
+        self.store.set_pref("saveDir", str(self.root / "downloads"))
+        self.pin = self.store.own_web_pin()
+
+    async def asyncTearDown(self):
+        await self.client.close()
+        self.store.close()
+        self._tmp.cleanup()
+
+    async def _start(self, sender):
+        app, _push = make_web_app(
+            self.store, ME, lambda *_: None,
+            lambda: str(self.root / "downloads"), 8891, send_text_fn=sender)
+        self.client = TestClient(TestServer(app))
+        await self.client.start_server()
+
+    async def test_sender_exception_is_reported_as_json(self):
+        async def boom(to, text):
+            raise RuntimeError("transport down")
+
+        await self._start(boom)
+        r = await self.client.post("/send", json={
+            "pin": self.pin, "to": "peer-fp", "text": "hi"})
+        self.assertEqual(r.status, 502)
+        body = await r.json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["error"], "send-failed")
+        self.assertIn("transport down", body["detail"])
+
+    async def test_successful_sender_result_is_passed_through(self):
+        async def ok(to, text):
+            return {"ok": True, "to": to, "queued": text}
+
+        await self._start(ok)
+        r = await self.client.post("/send", json={
+            "pin": self.pin, "to": "peer-fp", "text": "hi"})
+        self.assertEqual(r.status, 200)
+        self.assertEqual(await r.json(),
+                         {"ok": True, "to": "peer-fp", "queued": "hi"})
 
 
 if __name__ == "__main__":
