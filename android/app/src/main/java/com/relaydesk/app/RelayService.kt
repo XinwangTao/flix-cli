@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.wifi.WifiManager
 import android.os.IBinder
+import android.os.PowerManager
 import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.Executors
@@ -46,6 +47,8 @@ class RelayService : Service() {
     private var server: ChannelServer? = null
     private var discovery: Discovery? = null
     private var multicastLock: WifiManager.MulticastLock? = null
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
     private var worker: ScheduledExecutorService? = null
 
     override fun onCreate() {
@@ -56,11 +59,26 @@ class RelayService : Service() {
         createChannels()
         // Must be foreground within 5s of startForegroundService.
         startForeground(NOTIF_SERVICE, serviceNotification("正在启动…"),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
         Runtime.service = this
 
         val wifi = applicationContext.getSystemService(WifiManager::class.java)
         multicastLock = wifi.createMulticastLock("relaydesk").apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+        // HyperOS parks background apps aggressively: without these the accept
+        // loop stops draining its backlog once the screen goes off, so TCP
+        // connects time out while the socket still shows LISTEN.
+        val power = getSystemService(PowerManager::class.java)
+        wakeLock = power.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK, "relaydesk:channel").apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+        @Suppress("DEPRECATION")
+        wifiLock = wifi.createWifiLock(
+            WifiManager.WIFI_MODE_FULL_HIGH_PERF, "relaydesk:channel").apply {
             setReferenceCounted(false)
             acquire()
         }
@@ -98,6 +116,8 @@ class RelayService : Service() {
         discovery?.stop()
         runCatching { server?.stop() }
         multicastLock?.takeIf { it.isHeld }?.release()
+        runCatching { wakeLock?.takeIf { it.isHeld }?.release() }
+        runCatching { wifiLock?.takeIf { it.isHeld }?.release() }
         Runtime.serviceRunning = false
         Runtime.servicePort = 0
         Runtime.service = null

@@ -9,6 +9,8 @@
 - Android 液态玻璃界面：全屏玉青/蓝紫氛围光，玻璃头部/标签/卡片/输入栏，渐变头像与沉浸系统栏。
 
 ### 修复
+- Android：前台服务改为 `connectedDevice` 类型，并持 partial wake lock + HIGH_PERF Wi-Fi 锁；
+  关屏 45s 后 PC→平板文本/文件仍可送达（`relaydesk-bg-file.txt` 32B 落盘）。
 - Android：文件接收在 `MediaStore.openOutputStream()` 返回 null（Android 17/HyperOS）时改用
   `openFileDescriptor`；前台服务每 30s 自检通道，accept 卡死时重建并重新 announce。
 - 群组状态只在一端生效：GUI 建群会推 `rdGroupSync`，CLI 的 `flix group create --member` /
