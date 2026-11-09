@@ -23,7 +23,6 @@ import json
 import os
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -402,9 +401,19 @@ def detect_target(*, explicit: str | None = None, platform: str | None = None) -
         return Path(env)
     if getattr(sys, "frozen", False) and Path(sys.executable).name.lower() == EXE_NAME.lower():
         return Path(sys.executable)
-    for instance in list_instances(exe_name=EXE_NAME):
-        if instance.get("exe"):
-            return Path(instance["exe"])
+    running = [i for i in list_instances(exe_name=EXE_NAME) if i.get("exe")]
+    paths = sorted({str(Path(i["exe"]).resolve()) for i in running})
+    if len(paths) == 1:
+        return Path(paths[0])
+    if len(paths) > 1:
+        # Two installs (say, a dev build in dist\\ and the desktop copy) have
+        # different state keys and different update channels. Guessing wrong
+        # swaps the binary the user did not launch, so refuse and let the
+        # caller name one.
+        listing = "\n".join(f"  {p}" for p in paths)
+        raise UpdateError("ambiguous-target",
+                          "发现多个正在运行的 RelayDesk，无法判断要更新哪一个：\n"
+                          f"{listing}\n请用 --exe 指定", EXIT_ENV)
     candidates = [Path.cwd() / "dist" / EXE_NAME]
     if platform == "win32":
         home = Path(os.environ.get("USERPROFILE") or Path.home())
@@ -447,12 +456,18 @@ def _args_after_exe(command: str, exe_path: str) -> str:
 
 
 def list_instances(*, exe_name: str = EXE_NAME, exe: str | Path | None = None) -> list[dict]:
-    """Running copies as {pid, exe, args}. Empty off-Windows."""
+    """Running copies as {pid, parent, exe, args}. Empty off-Windows.
+
+    `parent` is what identifies a PyInstaller onefile pair: the bootloader and
+    the process it re-executes share the image and the command line, so argv
+    text cannot tell them apart, but the OS parent link can.
+    """
     if sys.platform != "win32":
         return []
     script = (
         f"Get-CimInstance Win32_Process -Filter \"Name='{exe_name}'\" | "
-        "Select-Object ProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress")
+        "Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine | "
+        "ConvertTo-Json -Compress")
     try:
         raw = _run_powershell(script).strip()
     except (OSError, subprocess.SubprocessError):
@@ -473,7 +488,9 @@ def list_instances(*, exe_name: str = EXE_NAME, exe: str | Path | None = None) -
             continue
         command = item.get("CommandLine") or ""
         args = _args_after_exe(command, path)
-        found.append({"pid": int(item.get("ProcessId") or 0), "exe": path, "args": args})
+        found.append({"pid": int(item.get("ProcessId") or 0),
+                      "parent": int(item.get("ParentProcessId") or 0),
+                      "exe": path, "args": args})
     return found
 
 
@@ -516,11 +533,25 @@ def restart_targets(instances: list[dict]) -> list[dict]:
     but restarting both would launch two daemons; the duplicate loses the port
     race and exits, which the health check reads as a failed update and rolls
     back a perfectly good build.
+
+    The OS parent link is the reliable discriminator. Two *unrelated* processes
+    that happen to share an exe and argv (say, two identical agents) are both
+    kept; deduplicating on argv alone would silently drop one after the swap.
+    Instances without parent information fall back to argv grouping.
     """
-    groups: dict[tuple[str, str], dict] = {}
+    by_pid = {int(i.get("pid") or 0): i for i in instances}
+    groups: dict[tuple, dict] = {}
     for instance in instances:
-        key = (str(instance.get("exe") or "").lower(),
-               " ".join((instance.get("args") or "").split()))
+        pid = int(instance.get("pid") or 0)
+        parent = by_pid.get(int(instance.get("parent") or 0))
+        if (parent is not None and int(parent.get("pid") or 0) != pid
+                and str(parent.get("exe") or "").lower() == str(instance.get("exe") or "").lower()):
+            continue                      # onefile child; its bootloader gets relaunched
+        if "parent" in instance:
+            key: tuple = ("pid", pid)     # every other process is its own instance
+        else:
+            key = ("argv", str(instance.get("exe") or "").lower(),
+                   " ".join((instance.get("args") or "").split()))
         groups.setdefault(key, instance)
     return list(groups.values())
 
@@ -545,6 +576,21 @@ def stop_instances(instances: list[dict], *, timeout: float = 12.0) -> list[int]
         subprocess.run(["taskkill", "/PID", pid, "/F"], capture_output=True,
                        creationflags=flags)
     return [int(p) for p in pids]
+
+
+def _wait_gone(pids, *, timeout: float = 5.0) -> set[int]:
+    """Force-kill returns before the process is gone; confirm before swapping.
+
+    A surviving process keeps the old image mapped and the port bound, which
+    would make the swap either fail or silently leave the old build serving.
+    """
+    remaining = {int(p) for p in pids if int(p or 0) > 0}
+    deadline = time.monotonic() + timeout
+    while remaining and time.monotonic() < deadline:
+        remaining = {p for p in remaining if _pid_exists(p)}
+        if remaining:
+            time.sleep(0.3)
+    return remaining
 
 
 def _pid_alive(pid: str) -> bool:
@@ -594,16 +640,46 @@ def _port_of(args: str, flag: str, default: int) -> int:
     return int(match.group(1)) if match else default
 
 
-def wait_healthy(restarted: list[dict], *, timeout: float = 60.0) -> bool:
-    """A `serve` instance must bind its API port again; a GUI copy only has to
-    survive the window where a broken build dies on startup."""
+def _port_owner(port: int) -> int | None:
+    """PID currently LISTENing on `port`, or None.
+
+    Checking only "port is open" is not proof the update took: the process we
+    failed to stop can keep answering on that port, and the updater would
+    record a successful install while the old build serves traffic.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        completed = subprocess.run(["netstat", "-ano", "-p", "tcp"],
+                                   capture_output=True, text=True, encoding="utf-8",
+                                   errors="replace", timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in (completed.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) < 5 or parts[0].upper() != "TCP" or parts[3].upper() != "LISTENING":
+            continue
+        _host, _, port_text = parts[1].rpartition(":")
+        if port_text != str(port):
+            continue
+        try:
+            return int(parts[4])
+        except ValueError:
+            return None
+    return None
+
+
+def wait_healthy(restarted: list[dict], *, timeout: float = 60.0,
+                 old_pids=()) -> bool:
+    """A `serve` instance must own its API port with a new process; a GUI copy
+    only has to survive the window where a broken build dies on startup."""
     if not restarted:
         return True
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if any(_crashed(item) for item in restarted):
             return False
-        if all(_instance_ok(item) for item in restarted):
+        if all(_instance_ok(item, old_pids) for item in restarted):
             return True
         time.sleep(1.0)
     return False
@@ -614,20 +690,14 @@ def _crashed(item: dict) -> bool:
     return process is not None and process.poll() is not None
 
 
-def _instance_ok(item: dict) -> bool:
+def _instance_ok(item: dict, old_pids=()) -> bool:
     if item.get("process") is None:
         return False  # spawn failed; nothing is running to be healthy
     if "serve" in (item.get("args") or ""):
-        return _tcp_open(_port_of(item["args"], "--api-port", 8898))
+        port = _port_of(item["args"], "--api-port", 8898)
+        owner = _port_owner(port)
+        return owner is not None and owner not in set(old_pids)
     return time.monotonic() - item.get("started", 0.0) >= item.get("grace", 5.0)
-
-
-def _tcp_open(port: int, host: str = "127.0.0.1", timeout: float = 1.5) -> bool:
-    try:
-        with socket.create_connection((host, port), timeout=timeout):
-            return True
-    except OSError:
-        return False
 
 
 # ---------------------------------------------------------------- install
@@ -688,6 +758,40 @@ def prune_backups(folder: str | Path, keep: int = BACKUP_KEEP) -> list[str]:
 
 # ---------------------------------------------------------------- lock
 
+def _pid_exists(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        return _pid_alive(str(pid))
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _lock_is_stale(path: Path, stale_after: float) -> bool:
+    """A lock whose owning PID is gone is stale immediately.
+
+    Age alone made a crashed updater block every retry for 45 minutes — the
+    `failed busy` runs in this machine's log were exactly that. The age limit
+    stays as a fallback for unreadable or PID-reused locks.
+    """
+    try:
+        age = time.time() - path.stat().st_mtime
+    except OSError:
+        return True
+    if age > stale_after:
+        return True
+    try:
+        pid = int(path.read_text(encoding="utf-8").split()[0])
+    except (OSError, ValueError, IndexError):
+        return False
+    return not _pid_exists(pid)
+
+
 class UpdateLock:
     """One updater at a time: the scheduled task and a manual run can overlap."""
 
@@ -698,13 +802,18 @@ class UpdateLock:
 
     def __enter__(self) -> "UpdateLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        if self.path.exists() and time.time() - self.path.stat().st_mtime > self.stale_after:
+        if self.path.exists() and _lock_is_stale(self.path, self.stale_after):
             with contextlib.suppress(OSError):
                 self.path.unlink()
         try:
             fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
-            raise UpdateError("busy", "另一个更新进程正在运行（update.lock 存在）", EXIT_INSTALL)
+            try:
+                owner = self.path.read_text(encoding="utf-8").strip() or "未知"
+            except OSError:
+                owner = "未知"
+            raise UpdateError("busy", f"另一个更新进程正在运行（update.lock: {owner}）",
+                              EXIT_INSTALL)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(f"{os.getpid()} {time.strftime('%Y-%m-%dT%H:%M:%S')}\n")
         self.acquired = True
@@ -831,12 +940,27 @@ def run_update(*, repo: str = REPO_DEFAULT, api_base: str = API_DEFAULT,
                  path=log_path, echo=echo)
         if managed:
             stop_instances(managed)
+            survivors = _wait_gone({int(i.get("pid") or 0) for i in managed})
+            if survivors:
+                # We may have stopped some of the set; bring those back before
+                # aborting, or the user loses a service the update never
+                # replaced.
+                for instance in restart_targets(managed):
+                    if int(instance.get("pid") or 0) not in survivors:
+                        start_instance(target, instance.get("args") or "")
+                raise UpdateError("busy", f"旧进程无法结束，放弃替换：{sorted(survivors)}",
+                                  EXIT_INSTALL)
 
         backups: list[Path] = []
-        if payload.kind == "exe":
-            backups.append(swap_exe(target, payload.path, stamp=stamp))
-        else:
-            backups.extend(swap_tree(target.parent, payload.path, stamp=stamp))
+        try:
+            if payload.kind == "exe":
+                backups.append(swap_exe(target, payload.path, stamp=stamp))
+            else:
+                backups.extend(swap_tree(target.parent, payload.path, stamp=stamp))
+        except OSError as exc:
+            # A locked or read-only exe must surface as a normal update failure
+            # (rollback path, exit code), not as a traceback out of the CLI.
+            raise UpdateError("install", f"替换 {target} 失败：{exc}", EXIT_INSTALL) from exc
         result["backups"] = [str(b) for b in backups]
         new_sha = sha256_file(target)
 
@@ -847,7 +971,8 @@ def run_update(*, repo: str = REPO_DEFAULT, api_base: str = API_DEFAULT,
                 restarted.append({"process": process, "args": instance.get("args") or "",
                                   "started": time.monotonic(), "grace": 5.0})
         result["restarted"] = [r["process"].pid for r in restarted if r["process"]]
-        healthy = wait_healthy(restarted, timeout=wait_s)
+        healthy = wait_healthy(restarted, timeout=wait_s,
+                               old_pids=[i["pid"] for i in managed])
 
         if not healthy:
             log_line("unhealthy -> rollback", path=log_path, echo=echo)
