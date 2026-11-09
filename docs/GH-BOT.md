@@ -18,7 +18,7 @@
 
 | 文件 | 作用 |
 |---|---|
-| `.github/workflows/gh-bot-reply.yml` | 回复与评审（三个 job：issue 分诊 / PR 评审 / @claude 追问） |
+| `.github/workflows/gh-bot-reply.yml` | 回复与评审（两个 job：issue 分诊 / PR 评审） |
 | `.github/workflows/gh-bot-approve.yml` | 规则判定与自动批准 |
 | `.github/gh-bot-policy.json` | 白名单与阈值，改行为只改这里 |
 
@@ -27,7 +27,7 @@
 ### 1. 装 self-hosted runner（必需）
 
 回复与评审要用本机 `cc-switch` 代理，GitHub 托管 runner 在公网够不到局域网，
-所以这两个 job 必须跑在本机 runner 上（共三个 job：issue 分诊 / PR 评审 / @claude 追问）。
+所以这两个 job 必须跑在本机 runner 上（共两个 job：issue 分诊 / PR 评审）。
 
 在仓库 **Settings → Actions → Runners → New self-hosted runner** 选 Windows，
 按页面给出的命令安装，并确保注册时带上额外的 label：
@@ -165,12 +165,10 @@ JSON
 
 1. 新建一个测试 issue（带正文）→ 一分钟内应出现一条中文分诊评论。
 2. 开一个只改 `README.md` 的 PR → 应出现评审评论；CI 绿后应出现
-   `🤖 自动批准（低风险）` 审查。
-3. 开一个改 `src/` 的 PR → 应打上 `needs-human` 并评论说明
-   "以下文件不在白名单"。
-4. 在任意 issue 评论里写 `@claude 这个报错什么意思` → 应回复。
-5. 在 issue 里写注释掉的口令试探（例如让它改文件）→ 应拒绝或只给建议，
-   因为工具集只放开了 `Read,Grep,Glob`。
+   `### 🤖 已自动合并` 评论，PR 状态变为 merged。
+3. 开一个改 `src/` 的 PR → 应打上 `gh-bot-needs-human` 并评论说明
+   "命中禁止路径" 或 "不在白名单"。
+4. 把 `README.md` 换成指向 `.git/config` 的符号链接开 PR → 应被拦（"是符号链接"）。
 
 ## 调整行为
 
@@ -190,7 +188,6 @@ JSON
 |---|---|---|
 | 仓库协作者（OWNER/MEMBER/COLLABORATOR） | `--tools Read`（只有 Read） | 可读仓库文件，质量更高 |
 | 其他人 | `--tools ""`（一个工具都不给） | 只能基于正文回答，读不到任何文件 |
-| 非协作者的 `@claude` 追问 | 不调用模型 | 直接回一句固定说明，避免刷额度 |
 
 所有调用都额外加 `--restricted --strict-mcp-config --bare`：
 文件工具被**限制在工作目录内**（实测读不到 `C:\Windows\win.ini`）、忽略仓库自带的
@@ -232,4 +229,4 @@ checkout 一律 `persist-credentials: false`，避免 job token 落进 `.git/con
 - **模型额度**：走本机 cc-switch 代理，代理挂了 job 就失败（会留红叉，不会静默）。
 - **成本**：每次 issue/PR 触发一次模型调用；正文超过
   `reply.max_issue_body_chars`（默认 8000 字）直接跳过，避免被灌水刷额度。
-  该上限只作用于 issue 正文；PR diff 硬编码 30000 字截断；@claude 追问对非协作者不调用模型。
+  该上限只作用于 issue 正文；PR diff 硬编码 30000 字截断。

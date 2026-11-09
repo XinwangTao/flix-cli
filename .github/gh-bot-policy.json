@@ -33,7 +33,9 @@
       "needs-human"
     ],
     "auto_block_label": "gh-bot-needs-human",
-    "ci_workflow_name": "CI"
+    "ci_workflow_name": "CI",
+    "auto_merge": true,
+    "merge_method": "squash"
   },
   "reply": {
     "model": "ccs-claude-openai--deepseek-v4.1-flash",
@@ -44,7 +46,6 @@
     ],
     "tools": "Read",
     "max_issue_body_chars": 8000,
-    "max_comment_chars": 2000,
     "max_output_chars": 8000,
     "max_runs_per_day": 120
   }

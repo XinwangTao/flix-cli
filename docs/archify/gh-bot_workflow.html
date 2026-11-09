@@ -5130,15 +5130,15 @@
           <text data-detail="context" x="707.6" y="384" class="t-muted" font-size="8" text-anchor="middle">路径·作者·CI 全绿</text>
         </g>
 
-        <g id="node-approve" data-node-id="approve" data-node-label="自动 APPROVE" tabindex="0" role="button" aria-label="聚焦自动 APPROVE，写明批准依据, 放行闸门 › 放行判定" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="写明批准依据" data-node-tag="机器人身份" data-node-context="放行闸门 › 放行判定">
-          <title>自动 APPROVE · 写明批准依据 · 放行闸门 › 放行判定 · 机器人身份</title>
+        <g id="node-approve" data-node-id="approve" data-node-label="自动合并" tabindex="0" role="button" aria-label="聚焦自动合并，squash + 说明, 放行闸门 › 放行判定" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="squash + 说明" data-node-tag="机器人身份" data-node-context="放行闸门 › 放行判定">
+          <title>自动合并 · squash + 说明 · 放行闸门 › 放行判定 · 机器人身份</title>
           <rect x="810" y="338" width="92" height="68" rx="6" class="c-mask"/>
           <rect x="810" y="338" width="92" height="68" rx="6" class="c-cloud" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(816 344) scale(0.6875)">
             <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="856" y="359" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">自动 APPROVE</text>
-          <text data-detail="context" x="856" y="376" class="t-muted" font-size="8" text-anchor="middle">写明批准依据</text>
+          <text data-node-label="" data-detail-anchor="" x="856" y="359" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">自动合并</text>
+          <text data-detail="context" x="856" y="376" class="t-muted" font-size="8" text-anchor="middle">squash + 说明</text>
         <text data-detail="fine" x="856" y="394" class="t-cloud" font-size="7" text-anchor="middle">机器人身份</text>
         </g>
 
@@ -5166,8 +5166,8 @@
           <text data-detail="context" x="707.6" y="510" class="t-muted" font-size="8" text-anchor="middle">needs-human 标签</text>
         </g>
 
-        <g id="node-degrade" data-node-id="degrade" data-node-label="降级确认" tabindex="0" role="button" aria-label="聚焦降级确认，token 无批准权, 失败与人工兜底 › 放行判定" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="token 无批准权" data-node-tag="评论留痕" data-node-context="失败与人工兜底 › 放行判定">
-          <title>降级确认 · token 无批准权 · 失败与人工兜底 › 放行判定 · 评论留痕</title>
+        <g id="node-degrade" data-node-id="degrade" data-node-label="未合并告警" tabindex="0" role="button" aria-label="聚焦未合并告警，无权限/冲突, 失败与人工兜底 › 放行判定" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="无权限/冲突" data-node-tag="评论留痕" data-node-context="失败与人工兜底 › 放行判定">
+          <title>未合并告警 · 无权限/冲突 · 失败与人工兜底 › 放行判定 · 评论留痕</title>
           <rect x="810" y="464" width="92" height="68" rx="6" class="c-mask"/>
           <rect x="810" y="464" width="92" height="68" rx="6" class="c-frontend" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(816 470) scale(0.6875)">
@@ -5176,8 +5176,8 @@
             <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
             <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
           </g>
-          <text data-node-label="" data-detail-anchor="" x="856" y="485" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">降级确认</text>
-          <text data-detail="context" x="856" y="502" class="t-muted" font-size="8" text-anchor="middle">token 无批准权</text>
+          <text data-node-label="" data-detail-anchor="" x="856" y="485" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">未合并告警</text>
+          <text data-detail="context" x="856" y="502" class="t-muted" font-size="8" text-anchor="middle">无权限/冲突</text>
         <text data-detail="fine" x="856" y="520" class="t-frontend" font-size="7" text-anchor="middle">评论留痕</text>
         </g>
 
@@ -5436,7 +5436,7 @@
         </div>
         <ul>
           <li>&bull; Claude Code CLI 只做评论，不参与批准判定</li>
-          <li>&bull; 批准由确定性规则执行，模型不参与签字</li>
+          <li>&bull; 合并由确定性规则触发，模型不参与</li>
           <li>&bull; 模型出错最坏丢一条评论，不会放错代码</li>
         </ul>
       </div>
