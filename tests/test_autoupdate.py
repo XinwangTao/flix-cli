@@ -7,6 +7,7 @@ disk (a half-applied swap leaves the user with nothing that launches).
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sys
 import tempfile
@@ -73,6 +74,40 @@ class ManagedInstanceTests(unittest.TestCase):
         ]
         self.assertEqual(au.managed_instances(items), [])
 
+    def test_quoted_command_line_still_parses_the_role(self):
+        """Win32 reports `"C:\\...\\RelayDesk.exe" serve ...`; the closing quote
+        must not become the first argument (that hid every serve from the
+        updater and left the daemon on the old build)."""
+        payload = json.dumps([
+            {"ProcessId": 11, "ExecutablePath": r"C:\x\RelayDesk.exe",
+             "CommandLine": '"C:\\x\\RelayDesk.exe" serve --device-port 18991 --api-port 18998'},
+            {"ProcessId": 12, "ExecutablePath": r"C:\x\RelayDesk.exe",
+             "CommandLine": r'C:\x\RelayDesk.exe agent --reply "hi there"'},
+            {"ProcessId": 13, "ExecutablePath": r"C:\x\RelayDesk.exe",
+             "CommandLine": '"C:\\x\\RelayDesk.exe"'},
+        ])
+        with mock.patch.object(au, "_run_powershell", return_value=payload):
+            found = au.list_instances()
+        self.assertEqual([i["args"] for i in found],
+                         ["serve --device-port 18991 --api-port 18998",
+                          'agent --reply "hi there"', ""])
+        self.assertEqual([i["pid"] for i in au.managed_instances(found, self_pid=0)],
+                         [11, 12, 13])
+
+    def test_onefile_parent_and_child_restart_once(self):
+        """Both halves of a PyInstaller onefile image must be stopped, but only
+        one relaunch may happen: a second daemon would lose the port race and
+        trip the health check into rolling back."""
+        items = [
+            {"pid": 20, "exe": r"C:\x\RelayDesk.exe",
+             "args": "serve --device-port 18991 --api-port 18998"},
+            {"pid": 21, "exe": r"C:\x\RelayDesk.exe",
+             "args": "serve --device-port 18991 --api-port 18998"},
+        ]
+        self.assertEqual([i["pid"] for i in au.managed_instances(items, self_pid=0)],
+                         [20, 21])
+        self.assertEqual([i["pid"] for i in au.restart_targets(items)], [20])
+
     def test_install_leaves_mcp_and_the_updater_running(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -100,6 +135,38 @@ class ManagedInstanceTests(unittest.TestCase):
             stopped = [call.args[0] for call in stop.call_args_list]
             self.assertEqual([[i["pid"] for i in batch] for batch in stopped], [[888]])
             self.assertEqual(result["leftRunning"], [os.getpid(), 777])
+
+    def test_install_stops_both_halves_but_restarts_one_serve(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            exe = tmp_path / "RelayDesk.exe"
+            exe.write_bytes(FAKE_EXE)
+            downloads = tmp_path / "dl"
+            downloads.mkdir()
+            asset_name = "RelayDesk-v9.9.9-win64.zip"
+            archive = make_zip(downloads / asset_name, {"RelayDesk.exe": FAKE_EXE_V2})
+            rel = release("v9.9.9", asset_name, au.sha256_file(archive),
+                          size=archive.stat().st_size)
+            pair = [
+                {"pid": 20, "exe": str(exe),
+                 "args": "serve --device-port 18991 --api-port 18998"},
+                {"pid": 21, "exe": str(exe),
+                 "args": "serve --device-port 18991 --api-port 18998"},
+            ]
+            with mock.patch.object(au, "fetch_releases", return_value=[rel]), \
+                    mock.patch.object(au, "list_instances", return_value=pair), \
+                    mock.patch.object(au, "stop_instances",
+                                      side_effect=lambda items: [i["pid"] for i in items]) as stop, \
+                    mock.patch.object(au, "start_instance", return_value=None) as start, \
+                    mock.patch.object(au, "wait_healthy", return_value=True):
+                result = au.run_update(exe=str(exe), state_path=tmp_path / "s.json",
+                                       log_path=tmp_path / "u.log",
+                                       downloads_dir=downloads)
+            self.assertEqual(result["status"], "installed")
+            self.assertEqual([i["pid"] for i in stop.call_args.args[0]], [20, 21])
+            self.assertEqual(start.call_count, 1)
+            self.assertEqual(start.call_args.args[1],
+                             "serve --device-port 18991 --api-port 18998")
 
 
 class LogTests(unittest.TestCase):

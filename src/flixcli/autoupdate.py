@@ -428,6 +428,24 @@ def _run_powershell(script: str, timeout: float = 20.0) -> str:
     return completed.stdout
 
 
+def _args_after_exe(command: str, exe_path: str) -> str:
+    """The argument text following the executable in a Win32 command line.
+
+    The executable is normally quoted (`"C:\\...\\RelayDesk.exe" serve ...`).
+    Splitting on the file name leaves the closing quote in front of the real
+    arguments, so every role looked like `"` — and the updater stopped seeing
+    `serve`/`agent` at all, leaving the live daemon running the old build.
+    Drop that quote (and only that one) before returning.
+    """
+    name = Path(exe_path).name if exe_path else ""
+    if not command or not name:
+        return ""
+    tail = command.split(name, 1)[-1].strip()
+    if tail.startswith('"'):
+        tail = tail[1:].lstrip()
+    return tail
+
+
 def list_instances(*, exe_name: str = EXE_NAME, exe: str | Path | None = None) -> list[dict]:
     """Running copies as {pid, exe, args}. Empty off-Windows."""
     if sys.platform != "win32":
@@ -454,7 +472,7 @@ def list_instances(*, exe_name: str = EXE_NAME, exe: str | Path | None = None) -
         if wanted and path and Path(path).resolve() != wanted:
             continue
         command = item.get("CommandLine") or ""
-        args = command.split(str(Path(path).name), 1)[-1].strip() if path else ""
+        args = _args_after_exe(command, path)
         found.append({"pid": int(item.get("ProcessId") or 0), "exe": path, "args": args})
     return found
 
@@ -488,6 +506,23 @@ def managed_instances(instances: list[dict], *, self_pid: int | None = None) -> 
         if args.split()[0].lower() in LONG_LIVED_ROLES:
             managed.append(instance)
     return managed
+
+
+def restart_targets(instances: list[dict]) -> list[dict]:
+    """One relaunch per logical instance.
+
+    A PyInstaller onefile build runs as a parent bootloader plus a child with
+    the same image path and the same command line. Both have to be stopped,
+    but restarting both would launch two daemons; the duplicate loses the port
+    race and exits, which the health check reads as a failed update and rolls
+    back a perfectly good build.
+    """
+    groups: dict[tuple[str, str], dict] = {}
+    for instance in instances:
+        key = (str(instance.get("exe") or "").lower(),
+               " ".join((instance.get("args") or "").split()))
+        groups.setdefault(key, instance)
+    return list(groups.values())
 
 
 def stop_instances(instances: list[dict], *, timeout: float = 12.0) -> list[int]:
@@ -807,7 +842,7 @@ def run_update(*, repo: str = REPO_DEFAULT, api_base: str = API_DEFAULT,
 
         restarted: list[dict] = []
         if restart and managed:
-            for instance in managed:
+            for instance in restart_targets(managed):
                 process = start_instance(target, instance.get("args") or "")
                 restarted.append({"process": process, "args": instance.get("args") or "",
                                   "started": time.monotonic(), "grace": 5.0})
@@ -821,7 +856,7 @@ def run_update(*, repo: str = REPO_DEFAULT, api_base: str = API_DEFAULT,
                     with contextlib.suppress(OSError):
                         item["process"].kill()
             _restore(backups, target)
-            for instance in managed:
+            for instance in restart_targets(managed):
                 start_instance(target, instance.get("args") or "")
             return {"ok": False, "error": "unhealthy-rollback", "exe": str(target),
                     "backups": [str(b) for b in backups],
