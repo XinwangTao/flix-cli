@@ -69,7 +69,11 @@ jobs:
           $OutputEncoding = [Console]::OutputEncoding = [Text.Encoding]::UTF8
           if (-not $env:CLAUDE_EXE) { throw "未设置仓库变量 CLAUDE_EXE，见 docs/GH-BOT.md 2.5" }
 
-          $p = (Get-Content .github/gh-bot-policy.json -Raw -Encoding UTF8 | ConvertFrom-Json).reply
+          # policy 一律取 main 的版本：PR 里改 policy 不能影响本进程的权限设定
+          git fetch --depth=1 origin main 2>$null | Out-Null
+          $raw = git show FETCH_HEAD:.github/gh-bot-policy.json
+          if (-not $raw) { $raw = Get-Content .github/gh-bot-policy.json -Raw -Encoding UTF8 }
+          $p = ($raw | ConvertFrom-Json).reply
           $model  = if ($p.model)  { $p.model }  else { 'ccs-claude-openai--deepseek-v4.1-flash' }
           $tools  = if ($p.tools)  { $p.tools }  else { 'Read,Grep,Glob' }
           $noTool = if ($p.untrusted_disallowed) { $p.untrusted_disallowed } else { 'Read,Write,Edit,MultiEdit,Bash,BashOutput,KillShell,Glob,Grep,LS,WebFetch,WebSearch,Task,NotebookEdit' }
@@ -129,9 +133,6 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-        with:
-          # 检出 base 分支：PR head 里的 .claude/settings.json 可能扩大评审进程权限
-          ref: ${{ github.event.pull_request.base.sha }}
 
       - name: Claude 评审
         shell: pwsh
@@ -143,7 +144,11 @@ jobs:
           $OutputEncoding = [Console]::OutputEncoding = [Text.Encoding]::UTF8
           if (-not $env:CLAUDE_EXE) { throw "未设置仓库变量 CLAUDE_EXE，见 docs/GH-BOT.md 2.5" }
 
-          $p = (Get-Content .github/gh-bot-policy.json -Raw -Encoding UTF8 | ConvertFrom-Json).reply
+          # policy 一律取 main 的版本：PR 里改 policy 不能影响本进程的权限设定
+          git fetch --depth=1 origin main 2>$null | Out-Null
+          $raw = git show FETCH_HEAD:.github/gh-bot-policy.json
+          if (-not $raw) { $raw = Get-Content .github/gh-bot-policy.json -Raw -Encoding UTF8 }
+          $p = ($raw | ConvertFrom-Json).reply
           $model  = if ($p.model)  { $p.model }  else { 'ccs-claude-openai--deepseek-v4.1-flash' }
           $tools  = if ($p.tools)  { $p.tools }  else { 'Read,Grep,Glob' }
           $noTool = if ($p.untrusted_disallowed) { $p.untrusted_disallowed } else { 'Read,Write,Edit,MultiEdit,Bash,BashOutput,KillShell,Glob,Grep,LS,WebFetch,WebSearch,Task,NotebookEdit' }
@@ -158,7 +163,7 @@ jobs:
 
           $diff = gh pr diff $env:PR_NUMBER --repo $env:GITHUB_REPOSITORY 2>$null | Out-String
           if ([string]::IsNullOrWhiteSpace($diff)) { throw "取不到 PR diff，检查 gh 认证或权限" }
-          if ($diff.Length -gt 12000) { $diff = $diff.Substring(0, 12000) + "`n...(diff 过长已截断)" }
+          if ($diff.Length -gt 30000) { $diff = $diff.Substring(0, 30000) + "`n...(diff 过长已截断)" }
 
           $prompt = @"
           你在评审这个仓库的一个拉取请求。先看下面的 diff，如需更多上下文用 Read/Grep/Glob 查仓库，
@@ -217,7 +222,11 @@ jobs:
           $OutputEncoding = [Console]::OutputEncoding = [Text.Encoding]::UTF8
           if (-not $env:CLAUDE_EXE) { throw "未设置仓库变量 CLAUDE_EXE，见 docs/GH-BOT.md 2.5" }
 
-          $p = (Get-Content .github/gh-bot-policy.json -Raw -Encoding UTF8 | ConvertFrom-Json).reply
+          # policy 一律取 main 的版本：PR 里改 policy 不能影响本进程的权限设定
+          git fetch --depth=1 origin main 2>$null | Out-Null
+          $raw = git show FETCH_HEAD:.github/gh-bot-policy.json
+          if (-not $raw) { $raw = Get-Content .github/gh-bot-policy.json -Raw -Encoding UTF8 }
+          $p = ($raw | ConvertFrom-Json).reply
           $model  = if ($p.model)  { $p.model }  else { 'ccs-claude-openai--deepseek-v4.1-flash' }
           $tools  = if ($p.tools)  { $p.tools }  else { 'Read,Grep,Glob' }
           $maxOut = if ($p.max_output_chars) { [int]$p.max_output_chars } else { 8000 }
