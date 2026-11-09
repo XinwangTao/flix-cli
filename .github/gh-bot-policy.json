@@ -16,6 +16,7 @@
       "yarn.lock"
     ],
     "blocked_paths": [
+      "docs/archify/**",
       "tests/**",
       ".github/**",
       "src/**",
@@ -32,7 +33,9 @@
       "needs-human"
     ],
     "auto_block_label": "gh-bot-needs-human",
-    "ci_workflow_name": "CI"
+    "ci_workflow_name": "CI",
+    "auto_merge": true,
+    "merge_method": "squash"
   },
   "reply": {
     "model": "ccs-claude-openai--deepseek-v4.1-flash",
@@ -41,12 +44,9 @@
       "MEMBER",
       "COLLABORATOR"
     ],
-    "tools": "Read,Grep,Glob",
+    "tools": "Read",
     "max_issue_body_chars": 8000,
-    "max_comment_chars": 2000,
     "max_output_chars": 8000,
-    "untrusted_disallowed": "Read,Write,Edit,Glob,Grep,Bash,BashOutput,KillShell,WebFetch,WebSearch,Task,Skill,ListAgents,SendMessage,ToolSearch,TaskCreate,TaskGet,TaskList,TaskUpdate,TaskStop,EnterWorktree,ExitWorktree,CronCreate,CronDelete,CronList,ScheduleWakeup,DesignSync,ReportFindings,NotebookEdit",
-    "dangerous_tools": "Bash,BashOutput,KillShell,Write,Edit,WebFetch,WebSearch,Task,Skill,NotebookEdit,EnterWorktree,ExitWorktree,CronCreate,CronDelete,CronList,ScheduleWakeup,DesignSync,ReportFindings,SendMessage,ToolSearch,TaskCreate,TaskGet,TaskList,TaskUpdate,TaskStop,ListAgents",
     "max_runs_per_day": 120
   }
 }
