@@ -3,6 +3,24 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号与 GitHub Release 标签一致。
 可执行产物见 [Releases](https://github.com/XinwangTao/flix-cli/releases)。
 
+## [v2.4.0] - 2026-11-09
+
+### 新增
+- Windows 11 原生 Acrylic 毛玻璃：由 DWM 实时渲染窗口背后的内容，窗口移动/换背景都正确；
+  DWM 不可用时自动回落到原有的截图材质。
+- Windows 发布拆成两个包：默认 `win64.zip`（lite，不含媒体栈）与 `win64-full.zip`
+  （含 aiortc/av/numpy/PIL，保留屏幕共享）。自动更新默认只取 lite，已安装 full 的机器保持 full 通道。
+
+### 变更
+- 打包裁剪：不再收集未使用的 Qt 模块（Qml/Quick/Pdf/虚拟键盘/OpenGL）、软件 OpenGL 回退、
+  多余插件与 140+ 语言翻译；默认不打包 media 可选依赖。lite 包从约 109 MB 降到约 42 MB。
+- Windows lite/full 包均包含 PTY 支持（`.[gui,pty]`），`shell --pty` 在冻结包中可用。
+- `flix ui`（Tk 窗口）退役，调用时返回明确提示并指向 `flix gui`。
+
+### 修复
+- 单文件包体积与启动时的临时解压开销（Qt 与 media 依赖不再整包塞入）。
+- 毛玻璃材质在窗口移动后裁错区域、显示冻结桌面快照的问题（改用系统材质后不再有自绘层）。
+
 ## [v2.3.0] - 2026-11-06
 
 ### 安全

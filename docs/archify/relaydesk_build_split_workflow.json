@@ -1,0 +1,226 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RelayDesk 双包构建与发布（lite / full）",
+    "locale": "zh-CN",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    {
+      "id": "flow",
+      "label": "发布流水线"
+    },
+    {
+      "id": "exception",
+      "label": "失败与人工出口",
+      "variant": "exception"
+    }
+  ],
+  "phases": [],
+  "mainPath": [
+    "push_tag",
+    "test",
+    "build_lite",
+    "smoke",
+    "verify_assets",
+    "release",
+    "autoupdate"
+  ],
+  "nodes": [
+    {
+      "id": "push_tag",
+      "lane": "flow",
+      "col": 0,
+      "type": "frontend",
+      "label": "推送 v* tag",
+      "sublabel": "version 必须与 tag 一致"
+    },
+    {
+      "id": "test",
+      "lane": "flow",
+      "col": 1,
+      "type": "security",
+      "label": "单测与版本",
+      "sublabel": "pytest / pyproject",
+      "tag": "阻塞"
+    },
+    {
+      "id": "build_lite",
+      "lane": "flow",
+      "col": 2,
+      "type": "backend",
+      "label": "构建 lite 包",
+      "sublabel": "pip install -e .[gui]",
+      "tag": "默认发布"
+    },
+    {
+      "id": "build_full",
+      "lane": "flow",
+      "col": 2,
+      "type": "backend",
+      "label": "构建 full 包",
+      "sublabel": "含 media 屏幕共享",
+      "tag": "附加产物",
+      "yOffset": 130
+    },
+    {
+      "id": "smoke",
+      "lane": "flow",
+      "col": 3,
+      "type": "security",
+      "label": "冒烟验证",
+      "sublabel": "窗口版校验版本输出",
+      "tag": "阻塞"
+    },
+    {
+      "id": "verify_assets",
+      "lane": "flow",
+      "col": 4,
+      "type": "security",
+      "label": "产物齐全校验",
+      "sublabel": "每个文件 + .sha256"
+    },
+    {
+      "id": "release",
+      "lane": "flow",
+      "col": 5,
+      "type": "cloud",
+      "label": "发布 Release",
+      "sublabel": "lite 为主包，full 并列"
+    },
+    {
+      "id": "autoupdate",
+      "lane": "flow",
+      "col": 5,
+      "type": "external",
+      "label": "客户端自更新",
+      "sublabel": "默认取 lite 包",
+      "yOffset": 140
+    },
+    {
+      "id": "stop",
+      "lane": "exception",
+      "col": 1,
+      "type": "security",
+      "label": "停止发布",
+      "sublabel": "门禁红灯即终止"
+    },
+    {
+      "id": "hold_publish",
+      "lane": "exception",
+      "col": 4,
+      "type": "security",
+      "label": "挂起发版",
+      "sublabel": "full 包缺失待决定"
+    },
+    {
+      "id": "manual_rerun",
+      "lane": "exception",
+      "col": 2,
+      "type": "messagebus",
+      "label": "人工补跑",
+      "sublabel": "workflow_dispatch",
+      "tag": "owner: 维护者"
+    }
+  ],
+  "edges": [
+    {
+      "from": "push_tag",
+      "to": "test"
+    },
+    {
+      "from": "test",
+      "to": "build_lite",
+      "label": "绿"
+    },
+    {
+      "from": "test",
+      "to": "build_full",
+      "label": "同一 tag 并行",
+      "role": "branch"
+    },
+    {
+      "from": "build_lite",
+      "to": "smoke",
+      "variant": "emphasis"
+    },
+    {
+      "from": "build_full",
+      "to": "smoke",
+      "label": "两个产物体积与启动均验",
+      "role": "branch"
+    },
+    {
+      "from": "smoke",
+      "to": "verify_assets"
+    },
+    {
+      "from": "verify_assets",
+      "to": "release"
+    },
+    {
+      "from": "release",
+      "to": "autoupdate",
+      "label": "latest 指向 lite",
+      "variant": "emphasis"
+    },
+    {
+      "from": "test",
+      "to": "stop",
+      "label": "红",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "from": "verify_assets",
+      "to": "hold_publish",
+      "label": "缺文件或 sha256",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "from": "stop",
+      "to": "manual_rerun",
+      "label": "修复后",
+      "variant": "dashed",
+      "role": "return"
+    },
+    {
+      "from": "hold_publish",
+      "to": "release",
+      "label": "人工确认只发 lite",
+      "variant": "dashed",
+      "role": "branch"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "两个包，一套流程",
+      "items": [
+        "lite 只装 PySide6，不含 av/numpy/PIL/aiortc，约 52 MB",
+        "full 额外装 media 依赖，保留屏幕共享",
+        "同一 tag、同一 spec，只差安装行"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "失败即止",
+      "items": [
+        "单测或版本号不一致直接停发",
+        "产物缺失或缺 sha256 不发版",
+        "full 包失败挂起待人工决定，不自动降级"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "兼容底线",
+      "items": [
+        "lite 缺依赖时 media_transport 优雅降级",
+        "默认更新通道只取 lite",
+        "PTY 与 Qt 裁剪必须在冒烟里实测"
+      ]
+    }
+  ]
+}

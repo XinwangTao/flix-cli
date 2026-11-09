@@ -966,8 +966,13 @@ def cmd_agent(args) -> int:
 
 
 def cmd_ui(args) -> int:
-    from . import ui
-    return ui.main(args)
+    # The Tk window was retired: it was the only thing pulling the Tcl/Tk
+    # runtime (~2.3 MB) into the frozen build. The Qt window replaces it.
+    emit({"error": "ui-removed",
+          "detail": "the Tk window is gone; use `flix gui` (Qt window)",
+          "hint": "run RelayDesk with no arguments for the desktop window"},
+         args.json)
+    return 5
 
 
 def cmd_mcp(args) -> int:
