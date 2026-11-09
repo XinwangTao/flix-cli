@@ -1,13 +1,14 @@
 {
-  "_comment": "GitHub Bot 放行策略。改这个文件即改行为，不需要动 workflow。serve 于 .github/workflows/gh-bot-approve.yml。",
-  "version": 1,
+  "_comment": "GitHub Bot 放行策略。改这个文件即改行为，不需要动 workflow。",
+  "version": 2,
   "auto_approve": {
     "enabled": true,
     "authors": ["dependabot[bot]", "XinwangTao"],
     "paths": [
-      "docs/**",
       "**/*.md",
-      "tests/**",
+      "docs/archify/*.json",
+      "docs/archify/*.html",
+      "tests/**/*.py",
       "requirements*.txt",
       "poetry.lock",
       "uv.lock",
@@ -15,21 +16,28 @@
       "yarn.lock"
     ],
     "blocked_paths": [
-      ".github/workflows/**",
+      ".github/**",
       "src/**",
       "scripts/**",
       "pyproject.toml",
-      "**/*.spec"
+      "**/*.spec",
+      "**/conftest.py",
+      "tests/e2e.py"
     ],
     "max_files": 25,
     "max_additions": 600,
+    "max_deletions": 300,
     "blocking_labels": ["needs-human"],
+    "auto_block_label": "gh-bot-needs-human",
     "require_ci": true,
     "ci_workflow_name": "CI"
   },
   "reply": {
     "model": "ccs-claude-openai--deepseek-v4.1-flash",
+    "trusted_associations": ["OWNER", "MEMBER", "COLLABORATOR"],
+    "tools": "Read,Grep,Glob",
     "max_issue_body_chars": 8000,
-    "allowed_tools": "Read,Grep,Glob"
+    "max_comment_chars": 2000,
+    "max_output_chars": 8000
   }
 }
