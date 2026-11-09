@@ -195,16 +195,52 @@ jobs:
               return;
             }
 
-            await github.rest.pulls.createReview({
-              owner, repo, pull_number: prNumber,
-              event: 'APPROVE',
-              body: [
-                '### 🤖 自动批准（低风险）',
-                notes.join('\n'),
-                summary,
-                '',
-                '判定规则：`.github/gh-bot-policy.json`。',
-                '如需人工复核：加 `needs-human` 标签或直接驳回本次审查。',
-              ].join('\n'),
-            });
-            core.notice('已自动批准');
+            const approveBody = [
+              '### 🤖 自动批准（低风险）',
+              notes.join('\n'),
+              summary,
+              '',
+              '判定规则：`.github/gh-bot-policy.json`。',
+              '如需人工复核：加 `needs-human` 标签或直接驳回本次审查。',
+            ].join('\n');
+
+            try {
+              await github.rest.pulls.createReview({
+                owner, repo, pull_number: prNumber,
+                event: 'APPROVE',
+                body: approveBody,
+              });
+              core.notice('已自动批准');
+            } catch (e) {
+              // GitHub 禁止 Actions 自带 token 提交批准；没有 GH_BOT_TOKEN 时会 422。
+              // 这不是判定失败，降级为"条件已满足，待人工点一下"。
+              const msg = e.message || '';
+              const status = e.status || (e.response && e.response.status) || 0;
+              const permissionIssue =
+                status === 403 ||
+                /not permitted (to create or )?approve/i.test(msg) ||
+                /cannot approve your own/i.test(msg) ||
+                /resource not accessible by integration/i.test(msg) ||
+                /status:?\s*403/i.test(msg);
+              if (!permissionIssue) throw e;
+
+              const READY = `<!-- gh-bot:ready:${pr.head.sha} -->`;
+              let readyPosted = false;
+              try {
+                const comments = await github.paginate(github.rest.issues.listComments, {
+                  owner, repo, issue_number: prNumber, per_page: 100,
+                });
+                readyPosted = comments.some(c => (c.body || '').includes(READY));
+              } catch (err) { core.warning(`查评论失败: ${err.message}`); }
+
+              if (!readyPosted) {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: prNumber,
+                  body: `${READY}\n### ✅ 已满足自动批准条件\n` +
+                    '判定全部通过，但当前 token 没有批准权限（GitHub 禁止 Actions 自带 token 批准）。\n' +
+                    '配置仓库 secret `GH_BOT_TOKEN`（独立 bot 账号的 PAT）后即可自动批准。\n\n' +
+                    `${summary}\n\n规则文件：\`.github/gh-bot-policy.json\``,
+                });
+              }
+              core.notice('无批准权限，已改发待人工确认评论');
+            }

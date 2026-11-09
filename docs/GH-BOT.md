@@ -38,7 +38,28 @@ gh-bot
 
 （GitHub 会自动再加 `self-hosted`、`Windows`、`X64`。）
 
-装好后把 runner 服务设成开机自启，否则关机后 job 会一直排队。
+装好后把 runner 设成开机自启，否则关机后 job 会一直排队。本机用的是用户级计划任务：
+
+```powershell
+schtasks /Create /TN "GitHubActionsRunner-<repo>" `
+  /TR "<runner 安装目录>\start-runner.cmd" /SC ONLOGON /RL HIGHEST /F
+```
+
+> **用普通用户身份运行，不要用 LocalSystem / SYSTEM。**
+> LocalSystem 下 Git Bash 直接报 `WSL_E_LOCAL_SYSTEM_NOT_SUPPORTED`，
+> 任何 `shell: bash` 的步骤都会秒失败。
+
+> **若步骤里用到 bash，还要让 runner 找到 Git 自带的 bash。**
+> 常见 PATH 里只有 `<Git 安装目录>\cmd`（有 git.exe、没有 bash.exe），
+> `bash` 会解析到 `C:\Windows\System32\bash.exe`——那是 WSL 启动器。
+> 启动脚本里先前置 Git 路径：
+
+```bat
+@echo off
+cd /d "%~dp0"
+set "PATH=<Git 安装目录>\bin;<Git 安装目录>\usr\bin;%PATH%"
+"%~dp0run.cmd"
+```
 
 ### 2. 确认代理可达
 
@@ -54,20 +75,22 @@ curl -sS -X POST http://127.0.0.1:15721/v1/messages \
 返回带 `content` 的 JSON 即可。若代理换了端口，同步改
 `gh-bot-reply.yml` 里的 `ANTHROPIC_BASE_URL`。
 
-### 2.5 复用本机 bun（强烈建议）
+### 2.5 指定 Claude Code CLI 路径
 
-官方 action 默认每次从 GitHub CDN 下载 Bun，在慢速网络下实测要十分钟以上，
-能把 job 拖到超时。workflow 默认指向本机已装的 bun：
-
-```
-C:\Users\Administrator\.bun\bin\bun.exe
-```
-
-换机器时不用改文件，设一个仓库变量即可覆盖：
+回复与评审直接调用本机已装的 `claude` 可执行文件，不走官方 composite action
+（它依赖 bun + bash，在 Windows runner 上踩坑多）。路径由**仓库变量** `CLAUDE_EXE` 提供：
 
 ```bash
-gh variable set BUN_EXE --repo <owner>/<repo> --body "D:\path\to\bun.exe"
+# 先看全局 npm 根目录，再拼出 exe 路径
+npm root -g
+# 例如 Windows：<npm 根目录>\@anthropic-ai\claude-code\bin\claude.exe
+
+# 写成仓库变量（不是 secret，只是路径）
+gh variable set CLAUDE_EXE --repo <owner>/<repo> \
+  --body '<npm 根目录>\@anthropic-ai\claude-code\bin\claude.exe'
 ```
+
+没配这个变量时，workflow 会直接报「未设置仓库变量 CLAUDE_EXE」。
 
 ### 3. 配置机器人身份（强烈建议）
 

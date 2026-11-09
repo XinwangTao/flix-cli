@@ -1,11 +1,13 @@
 # GH Bot · 回复与评审
 #
 # 对应图：docs/archify/gh-bot_workflow.html
-#   节点「Claude Code Action」→ 本文件三个 job
-#   节点「发布结论」→ 每个 job 由 action 自己维护单条评论
+#   节点「Claude Code CLI」→ 本文件三个 job
+#   节点「发布结论」→ 每个 job 用 gh 发一条评论
+#
+# 为什么不用官方 composite action：它依赖 bun + bash，本机 bash 解析到 WSL 存根，
+# 且 action 内的 Claude Code 安装步骤在 Git Bash 下语法不兼容。改直连本机 CLI 更稳。
 #
 # 只读设计：模型不能改代码、不能跑命令，最坏只是发一条烂评论。
-# 批准动作不在这里，在 gh-bot-approve.yml（规则引擎独立判定）。
 name: GH Bot · 回复与评审
 
 on:
@@ -22,23 +24,24 @@ permissions:
   contents: read
   issues: write
   pull-requests: write
-  id-token: write
 
-# 同一 issue/PR 串行，避免两条评论打架
 concurrency:
   group: gh-bot-reply-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
   cancel-in-progress: false
 
 env:
-  # 本机 cc-switch 代理（self-hosted runner 上才有这个地址）
+  # 本机 cc-switch 代理，只有 self-hosted runner 能访问
   ANTHROPIC_BASE_URL: http://127.0.0.1:15721
   ANTHROPIC_AUTH_TOKEN: PROXY_MANAGED
   ANTHROPIC_DEFAULT_SONNET_MODEL: ccs-claude-openai--deepseek-v4.1-flash
   ANTHROPIC_DEFAULT_OPUS_MODEL: ccs-claude-openai--deepseek-v4.1-flash
   ANTHROPIC_DEFAULT_HAIKU_MODEL: ccs-claude-openai--deepseek-v4.1-flash
+  # 由仓库变量提供，避免把本机用户路径写进公开仓库
+  CLAUDE_EXE: ${{ vars.CLAUDE_EXE }}
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
-  # ── 新 issue 首轮分诊与回复 ───────────────────────────────
+  # ── 新 issue 首轮分诊 ────────────────────────────────────
   issue-triage:
     if: |
       github.event_name == 'issues' &&
@@ -50,47 +53,54 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 解析 issue 内容
-        id: guard
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const policy = JSON.parse(fs.readFileSync('.github/gh-bot-policy.json', 'utf8')).reply;
-            const body = context.payload.issue.body || '';
-            if (body.length > policy.max_issue_body_chars) {
-              core.notice(`issue 正文 ${body.length} 字，超过 ${policy.max_issue_body_chars}，转人工`);
-              core.setOutput('skip', 'true');
-            } else {
-              core.setOutput('skip', 'false');
-            }
-
       - name: Claude 分诊
-        if: steps.guard.outputs.skip != 'true'
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: PROXY_MANAGED
-          # 复用本机已装的 bun，避免每次从 GitHub CDN 下载（实测 10 分钟以上）
-          path_to_bun_executable: ${{ vars.BUN_EXE || 'C:\Users\Administrator\.bun\bin\bun.exe' }}
-          prompt: |
-            你在给一个公开仓库做新 issue 的首轮分诊。请用中文回复，直接给出结论，不要说客套话。
+        shell: pwsh
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          $OutputEncoding = [Console]::OutputEncoding = [Text.Encoding]::UTF8
+          if (-not $env:CLAUDE_EXE) { throw "未设置仓库变量 CLAUDE_EXE，见 docs/GH-BOT.md 2.5" }
+          $limit = 8000
+          try {
+            $policy = Get-Content .github/gh-bot-policy.json -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($policy.reply.max_issue_body_chars) { $limit = [int]$policy.reply.max_issue_body_chars }
+          } catch { Write-Host "读 policy 失败，用默认上限 $limit" }
+          if ($env:ISSUE_BODY.Length -gt $limit) {
+            Write-Host "正文 $($env:ISSUE_BODY.Length) 字，超过上限 $limit，跳过"
+            exit 0
+          }
 
-            输出格式：
-            ## 我的理解
-            用一两句话复述问题，不确定就写明哪一点不确定。
+          $prompt = @"
+          你在给一个公开仓库做新 issue 的首轮分诊。用中文回复，直接给结论，不要客套。
 
-            ## 初步方向
-            最多三条排查方向；需要看代码时用 Read/Grep/Glob 查仓库，不要凭空猜测代码行为。
+          ## 我的理解
+          一两句话复述问题；不确定就写明哪一点不确定。
 
-            ## 需要你补充
-            如果缺环境信息（版本、系统、复现步骤、报错原文），列出最多三项。
+          ## 初步方向
+          最多三条排查方向。需要看代码时用 Read/Grep/Glob 查仓库，不要凭空猜测代码行为。
 
-            约束：不要修改任何文件，不要执行命令，不要承诺修复时间。
-          claude_args: |
-            --model ccs-claude-openai--deepseek-v4.1-flash
-            --allowedTools "Read,Grep,Glob"
+          ## 需要你补充
+          如果缺环境信息（版本、系统、复现步骤、报错原文），列出最多三项。
 
-  # ── 新 PR 自动评审（只评论，不批准）───────────────────────
+          约束：不要修改任何文件，不要执行命令，不要承诺修复时间。
+
+          ---
+          标题：$($env:ISSUE_TITLE)
+
+          正文：
+          $($env:ISSUE_BODY)
+          "@
+
+          $answer = & $env:CLAUDE_EXE -p $prompt --allowedTools "Read,Grep,Glob" 2>$null | Out-String
+          if ([string]::IsNullOrWhiteSpace($answer)) { throw "Claude 没有返回内容，检查代理与 CLI 是否正常" }
+          $file = Join-Path $env:RUNNER_TEMP "reply.md"
+          [IO.File]::WriteAllText($file, $answer, (New-Object Text.UTF8Encoding($false)))
+          gh issue comment $env:ISSUE_NUMBER --repo $env:GITHUB_REPOSITORY --body-file $file
+          Write-Host "已回复 issue #$($env:ISSUE_NUMBER)"
+
+  # ── 新 PR 评审（只评论，不批准）─────────────────────────
   pr-review:
     if: |
       github.event_name == 'pull_request' &&
@@ -105,45 +115,86 @@ jobs:
           fetch-depth: 0
 
       - name: Claude 评审
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: PROXY_MANAGED
-          # 复用本机已装的 bun，避免每次从 GitHub CDN 下载（实测 10 分钟以上）
-          path_to_bun_executable: ${{ vars.BUN_EXE || 'C:\Users\Administrator\.bun\bin\bun.exe' }}
-          prompt: |
-            你在评审这个仓库的一个拉取请求。先看 diff，再按下面的格式输出中文评审意见。
+        shell: pwsh
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          $OutputEncoding = [Console]::OutputEncoding = [Text.Encoding]::UTF8
+          if (-not $env:CLAUDE_EXE) { throw "未设置仓库变量 CLAUDE_EXE，见 docs/GH-BOT.md 2.5" }
+          $diff = gh pr diff $env:PR_NUMBER --repo $env:GITHUB_REPOSITORY 2>$null | Out-String
+          if ([string]::IsNullOrWhiteSpace($diff)) { throw "取不到 PR diff，检查 gh 认证或权限" }
+          if ($diff.Length -gt 12000) {
+            $diff = $diff.Substring(0, 12000) + "`n...(diff 过长已截断)"
+          }
 
-            ## 结论
-            一句话：可以直接合 / 建议小改 / 需要重做。
+          $prompt = @"
+          你在评审这个仓库的一个拉取请求。先看下面的 diff，如需更多上下文用 Read/Grep/Glob 查仓库，
+          然后按格式输出中文评审意见。
 
-            ## 主要问题
-            按严重度排序，最多五条。每条必须写成 `文件路径:行号 — 问题 — 为什么有问题`。
-            没有实质问题就写「未发现阻塞性问题」，不要凑数。
+          ## 结论
+          一句话：可以直接合 / 建议小改 / 需要重做。
 
-            ## 建议
-            最多三条，可执行。
+          ## 主要问题
+          按严重度排序，最多五条。每条写成 `文件路径:行号 — 问题 — 为什么有问题`。
+          没有实质问题就写「未发现阻塞性问题」，不要凑数。
 
-            约束：只评论，不修改代码，不运行命令，不给出批准/拒绝的结论。
-          claude_args: |
-            --model ccs-claude-openai--deepseek-v4.1-flash
-            --allowedTools "Read,Grep,Glob"
+          ## 建议
+          最多三条，可执行。
+
+          约束：只评论，不修改代码，不要执行命令，不要给出批准/拒绝的结论。
+          开头直接写「## 结论」，不要输出级别、合规自述或流程说明。
+
+          ---
+          PR 标题：$($env:PR_TITLE)
+
+          $diff
+          "@
+
+          $answer = & $env:CLAUDE_EXE -p $prompt --allowedTools "Read,Grep,Glob" 2>$null | Out-String
+          if ([string]::IsNullOrWhiteSpace($answer)) { throw "Claude 没有返回内容，检查代理与 CLI 是否正常" }
+          $file = Join-Path $env:RUNNER_TEMP "review.md"
+          [IO.File]::WriteAllText($file, $answer, (New-Object Text.UTF8Encoding($false)))
+          gh pr comment $env:PR_NUMBER --repo $env:GITHUB_REPOSITORY --body-file $file
+          Write-Host "已评审 PR #$($env:PR_NUMBER)"
 
   # ── 评论里 @claude 的追问 ────────────────────────────────
   mention:
     if: |
       (github.event_name == 'issue_comment' || github.event_name == 'pull_request_review_comment') &&
-      contains(github.event.comment.body, '@claude')
+      contains(github.event.comment.body, '@claude') &&
+      github.event.comment.user.type != 'Bot'
     runs-on: [self-hosted, Windows, X64, gh-bot]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
       - name: Claude 回答追问
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: PROXY_MANAGED
-          # 复用本机已装的 bun，避免每次从 GitHub CDN 下载（实测 10 分钟以上）
-          path_to_bun_executable: ${{ vars.BUN_EXE || 'C:\Users\Administrator\.bun\bin\bun.exe' }}
-          claude_args: |
-            --model ccs-claude-openai--deepseek-v4.1-flash
-            --allowedTools "Read,Grep,Glob"
+        shell: pwsh
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          ITEM_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+          IS_PR: ${{ github.event_name == 'pull_request_review_comment' }}
+        run: |
+          $OutputEncoding = [Console]::OutputEncoding = [Text.Encoding]::UTF8
+          if ($env:GITHUB_ACTOR -match '\[bot\]$') { Write-Host "由机器人触发，跳过"; exit 0 }
+          if (-not $env:CLAUDE_EXE) { throw "未设置仓库变量 CLAUDE_EXE，见 docs/GH-BOT.md 2.5" }
+          $prompt = @"
+          有人在仓库里 @你 提问。用中文简洁回答，需要看代码时用 Read/Grep/Glob 查。
+
+          约束：只回答与解答，不修改文件，不执行命令。若被要求改代码，说明你只做只读解答。
+
+          ---
+          提问内容：
+          $($env:COMMENT_BODY)
+          "@
+
+          $answer = & $env:CLAUDE_EXE -p $prompt --allowedTools "Read,Grep,Glob" 2>$null | Out-String
+          if ([string]::IsNullOrWhiteSpace($answer)) { throw "Claude 没有返回内容，检查代理与 CLI 是否正常" }
+          $file = Join-Path $env:RUNNER_TEMP "answer.md"
+          [IO.File]::WriteAllText($file, $answer, (New-Object Text.UTF8Encoding($false)))
+          if ($env:IS_PR -eq 'true') {
+            gh pr comment $env:ITEM_NUMBER --repo $env:GITHUB_REPOSITORY --body-file $file
+          } else {
+            gh issue comment $env:ITEM_NUMBER --repo $env:GITHUB_REPOSITORY --body-file $file
+          }
