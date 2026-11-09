@@ -242,30 +242,43 @@ class MainActivity : Activity() {
         val wide = resources.configuration.smallestScreenWidthDp >= 600
         // Wide screens lose room to the chat pane, so the header tightens up.
         val iconPad = if (wide) dp(8) else dp(13)
-        val root = FrameLayout(this).apply { setBackgroundColor(getColor(R.color.bg)) }
+        val root = FrameLayout(this)
+        root.addView(AmbientBackdropView(this, wantsLightTheme()),
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                                     ViewGroup.LayoutParams.MATCH_PARENT))
 
         // -- device list screen --
         listScreen = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(getColor(R.color.bg))
         }
         val listHeader = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(dp(16), dp(12), dp(12), dp(12))
-            setBackgroundColor(getColor(R.color.bgHeader))
+            setPadding(dp(18), dp(14), dp(12), dp(14))
+            background = glass(24)
             gravity = Gravity.CENTER_VERTICAL
         }
         val brandColumn = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-        brandColumn.addView(TextView(this).apply {
+        val brandRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        brandRow.addView(View(this).apply {
+            background = circle(getColor(R.color.accent))
+            layoutParams = LinearLayout.LayoutParams(dp(7), dp(7)).apply {
+                rightMargin = dp(8)
+            }
+        })
+        brandRow.addView(TextView(this).apply {
             text = "RelayDesk"
             setTextColor(getColor(R.color.textPrimary))
             textSize = if (wide) 19f else 22f
             setTypeface(typeface, Typeface.BOLD)
             maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
         })
+        brandColumn.addView(brandRow)
         brandColumn.addView(TextView(this).apply {
             text = if (alias.isNotEmpty()) "本机 · $alias" else "本机"
             setTextColor(getColor(R.color.textMuted)); textSize = 11f
@@ -280,7 +293,7 @@ class MainActivity : Activity() {
                 setTextColor(getColor(R.color.textPrimary))
                 textSize = size
                 gravity = Gravity.CENTER
-                background = tappable(getColor(R.color.iconBg), dp(10))
+                background = glassButton(12)
                 layoutParams = LinearLayout.LayoutParams(dp(36), dp(36)).apply {
                     leftMargin = dp(6)
                 }
@@ -299,24 +312,23 @@ class MainActivity : Activity() {
 
         tabDevices = TextView(this).apply {
             gravity = Gravity.CENTER
-            setPadding(dp(18), dp(6), dp(18), dp(6))
+            setPadding(dp(20), dp(7), dp(20), dp(7))
         }
         tabGroups = TextView(this).apply {
             gravity = Gravity.CENTER
-            setPadding(dp(18), dp(6), dp(18), dp(6))
+            setPadding(dp(20), dp(7), dp(20), dp(7))
         }
         tabDevices.setOnClickListener { switchListMode(MODE_DEVICES) }
         tabGroups.setOnClickListener { switchListMode(MODE_GROUPS) }
         val tabRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(16), 0, dp(16), dp(10))
-            setBackgroundColor(getColor(R.color.bgHeader))
+            setPadding(dp(16), dp(2), dp(16), dp(8))
         }
         val segmented = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            background = roundRect(getColor(R.color.chipBg), dp(11))
-            setPadding(dp(3), dp(3), dp(3), dp(3))
+            background = glass(14)
+            setPadding(dp(4), dp(4), dp(4), dp(4))
         }
         segmented.addView(tabDevices)
         segmented.addView(tabGroups)
@@ -327,7 +339,7 @@ class MainActivity : Activity() {
         deviceList = ListView(this).apply {
             adapter = devicesAdapter
             divider = null
-            setPadding(dp(8), dp(2), dp(8), dp(8))
+            setPadding(dp(10), dp(6), dp(10), dp(12))
             clipToPadding = false
         }
         deviceList.setOnItemClickListener { _, _, position, _ ->
@@ -375,10 +387,10 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
             addView(TextView(this@MainActivity).apply {
                 text = "◎"
-                setTextColor(getColor(R.color.accent)); textSize = 26f
+                setTextColor(getColor(R.color.accent)); textSize = 28f
                 gravity = Gravity.CENTER
-                background = circle(getColor(R.color.iconBg))
-                layoutParams = LinearLayout.LayoutParams(dp(64), dp(64))
+                background = glassOrb()
+                layoutParams = LinearLayout.LayoutParams(dp(72), dp(72))
             })
             addView(emptyTitle, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -398,7 +410,7 @@ class MainActivity : Activity() {
             setTextColor(getColor(R.color.chipText)); textSize = 11f
             gravity = Gravity.CENTER
             setPadding(dp(12), dp(6), dp(12), dp(6))
-            background = roundRect(getColor(R.color.chipBg), dp(9))
+            background = glass(12)
         }
         val footer = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -406,8 +418,14 @@ class MainActivity : Activity() {
             setPadding(dp(16), dp(2), dp(16), dp(12))
             addView(serviceState)
         }
-        listScreen.addView(listHeader)
-        listScreen.addView(tabRow)
+        listScreen.addView(listHeader, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            setMargins(dp(12), dp(10), dp(12), dp(2))
+        })
+        listScreen.addView(tabRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            setMargins(dp(12), 0, dp(12), dp(2))
+        })
         listScreen.addView(listContainer,
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         listScreen.addView(footer)
@@ -415,19 +433,18 @@ class MainActivity : Activity() {
         // -- chat screen --
         chatScreen = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(getColor(R.color.bg))
             visibility = View.GONE
         }
         val chatHeader = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(dp(12), dp(12), dp(16), dp(12))
-            setBackgroundColor(getColor(R.color.bgHeader))
+            setPadding(dp(12), dp(12), dp(14), dp(12))
+            background = glass(24)
             gravity = Gravity.CENTER_VERTICAL
         }
         val back = TextView(this).apply {
             text = "‹"; setTextColor(getColor(R.color.textPrimary)); textSize = 24f
             gravity = Gravity.CENTER
-            background = tappable(getColor(R.color.iconBg), dp(10))
+            background = glassButton(12)
             layoutParams = LinearLayout.LayoutParams(dp(36), dp(36)).apply {
                 rightMargin = dp(8)
             }
@@ -448,7 +465,7 @@ class MainActivity : Activity() {
         }
         pairButton = Button(this).apply {
             text = "配对"; textSize = 13f
-            setTextColor(Color.WHITE); backgroundTintList = android.content.res
+            setTextColor(getColor(R.color.textOnAccent)); backgroundTintList = android.content.res
                 .ColorStateList.valueOf(getColor(R.color.accent))
             setPadding(dp(18), dp(4), dp(18), dp(4))
         }
@@ -456,7 +473,7 @@ class MainActivity : Activity() {
         val searchToggle = TextView(this).apply {
             text = "⌕"; setTextColor(getColor(R.color.textPrimary)); textSize = 19f
             gravity = Gravity.CENTER
-            background = tappable(getColor(R.color.iconBg), dp(10))
+            background = glassButton(12)
             layoutParams = LinearLayout.LayoutParams(dp(36), dp(36)).apply {
                 leftMargin = dp(6)
             }
@@ -467,8 +484,8 @@ class MainActivity : Activity() {
 
         transferState = TextView(this).apply {
             setTextColor(getColor(R.color.accent)); textSize = 12f
-            setPadding(dp(16), dp(6), dp(16), dp(6))
-            setBackgroundColor(getColor(R.color.bgPanel))
+            setPadding(dp(16), dp(7), dp(16), dp(7))
+            background = glass(14)
             visibility = View.GONE
         }
 
@@ -484,7 +501,7 @@ class MainActivity : Activity() {
         val composer = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(dp(10), dp(8), dp(10), dp(10))
-            setBackgroundColor(getColor(R.color.bgPanel))
+            background = glass(22)
             gravity = Gravity.BOTTOM
         }
         val attach = TextView(this).apply {
@@ -496,15 +513,14 @@ class MainActivity : Activity() {
         inputEdit = EditText(this).apply {
             hint = "输入消息"; setHintTextColor(getColor(R.color.textMuted))
             setTextColor(getColor(R.color.textPrimary))
-            background = outlined(getColor(R.color.bgBubbleIn),
-                                  getColor(R.color.divider), dp(14))
+            background = glass(16)
             setPadding(dp(14), dp(10), dp(14), dp(10))
             textSize = 14f
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
         sendButton = Button(this).apply {
             text = "发送"; textSize = 14f
-            setTextColor(Color.WHITE)
+            setTextColor(getColor(R.color.textOnAccent))
             backgroundTintList = android.content.res.ColorStateList.valueOf(
                 getColor(R.color.accent))
             layoutParams = LinearLayout.LayoutParams(
@@ -527,7 +543,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(14), dp(4), dp(10), dp(4))
-            setBackgroundColor(getColor(R.color.bgPanel))
+            background = glass(16)
             visibility = View.GONE
         }
         searchEdit = EditText(this).apply {
@@ -559,26 +575,34 @@ class MainActivity : Activity() {
         searchRow.addView(searchCount)
         searchRow.addView(searchClose)
 
-        chatScreen.addView(chatHeader)
-        chatScreen.addView(View(this).apply {
-            setBackgroundColor(getColor(R.color.divider))
-        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1))
-        chatScreen.addView(transferState)
-        chatScreen.addView(searchRow)
+        chatScreen.addView(chatHeader, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            setMargins(dp(12), dp(10), dp(12), dp(2))
+        })
+        chatScreen.addView(transferState, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            setMargins(dp(12), dp(2), dp(12), 0)
+        })
+        chatScreen.addView(searchRow, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            setMargins(dp(12), 0, dp(12), dp(2))
+        })
         chatScreen.addView(messageList,
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-        chatScreen.addView(composer)
+        chatScreen.addView(composer, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            setMargins(dp(10), dp(4), dp(10), dp(10))
+        })
 
         // -- settings screen (v2D) --
         settingsScreen = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(getColor(R.color.bg))
             visibility = View.GONE
         }
         val settingsHeader = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(dp(8), dp(12), dp(16), dp(12))
-            setBackgroundColor(getColor(R.color.bgHeader))
+            setPadding(dp(10), dp(12), dp(16), dp(12))
+            background = glass(24)
             gravity = Gravity.CENTER_VERTICAL
         }
         settingsHeader.addView(TextView(this).apply {
@@ -594,7 +618,10 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), dp(2), dp(14), dp(28))
         }
-        settingsScreen.addView(settingsHeader)
+        settingsScreen.addView(settingsHeader, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            setMargins(dp(12), dp(10), dp(12), dp(2))
+        })
         settingsScreen.addView(ScrollView(this).apply {
             isFillViewport = true
             addView(settingsBody)
@@ -610,9 +637,9 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
             addView(TextView(this@MainActivity).apply {
                 text = "✉"
-                setTextColor(getColor(R.color.accent)); textSize = 30f
+                setTextColor(getColor(R.color.accent)); textSize = 32f
                 gravity = Gravity.CENTER
-                background = circle(getColor(R.color.iconBg))
+                background = glassOrb()
                 layoutParams = LinearLayout.LayoutParams(dp(84), dp(84))
             })
             addView(TextView(this@MainActivity).apply {
@@ -639,6 +666,7 @@ class MainActivity : Activity() {
         root.addView(settingsScreen, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         setContentView(root)
+        applyGlassWindow(root)
         updateTabStyles()
         applyShell()
     }
@@ -719,6 +747,74 @@ class MainActivity : Activity() {
             cornerRadius = radiusPx.toFloat()
             setStroke(widthPx, stroke)
         }
+
+    /** Translucent liquid-glass surface used by the shell. */
+    private fun glass(radiusDp: Int, selected: Boolean = false): GlassDrawable {
+        val fillTop = getColor(if (selected) R.color.glassSelected else R.color.glassTop)
+        val fillBottom = getColor(if (selected) R.color.glassSelected else R.color.glassBottom)
+        return GlassDrawable(
+            radius = dp(radiusDp).toFloat(),
+            fillTop = fillTop,
+            fillBottom = fillBottom,
+            borderTop = getColor(if (selected) R.color.accent else R.color.glassBorderTop),
+            borderBottom = getColor(if (selected) R.color.accent else R.color.glassBorderBottom),
+            highlight = getColor(R.color.glassHighlight),
+            strokeWidth = dp(1).toFloat(),
+        )
+    }
+
+    private fun glassButton(radiusDp: Int): android.graphics.drawable.Drawable =
+        android.graphics.drawable.RippleDrawable(
+            android.content.res.ColorStateList.valueOf(rippleColor()),
+            glass(radiusDp), null)
+
+    private fun glassTab(): android.graphics.drawable.Drawable =
+        android.graphics.drawable.RippleDrawable(
+            android.content.res.ColorStateList.valueOf(rippleColor()),
+            glass(9, selected = true), null)
+
+    private fun avatarDrawable(group: Boolean = false): android.graphics.drawable.GradientDrawable =
+        android.graphics.drawable.GradientDrawable(
+            android.graphics.drawable.GradientDrawable.Orientation.TL_BR,
+            intArrayOf(
+                getColor(if (group) R.color.groupAvatarTop else R.color.avatarTop),
+                getColor(if (group) R.color.groupAvatarBottom else R.color.avatarBottom)))
+            .apply {
+                shape = android.graphics.drawable.GradientDrawable.OVAL
+                setStroke(dp(1), getColor(R.color.glassBorderTop))
+            }
+
+    private fun glassOrb(): android.graphics.drawable.GradientDrawable =
+        android.graphics.drawable.GradientDrawable(
+            android.graphics.drawable.GradientDrawable.Orientation.TL_BR,
+            intArrayOf(getColor(R.color.glassTop), getColor(R.color.glassBottom)))
+            .apply {
+                shape = android.graphics.drawable.GradientDrawable.OVAL
+                setStroke(dp(1), getColor(R.color.glassBorderTop))
+            }
+
+    /** Edge-to-edge window; the ambient field runs behind the system bars. */
+    private fun applyGlassWindow(root: android.view.View) {
+        if (android.os.Build.VERSION.SDK_INT < 30) return
+        window.setDecorFitsSystemWindows(false)
+        window.statusBarColor = android.graphics.Color.TRANSPARENT
+        window.navigationBarColor = android.graphics.Color.TRANSPARENT
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            window.isNavigationBarContrastEnforced = false
+        }
+        val lightBars = android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
+            android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+        window.insetsController?.setSystemBarsAppearance(
+            if (wantsLightTheme()) lightBars else 0, lightBars)
+        root.setOnApplyWindowInsetsListener { _, insets ->
+            val bars = insets.getInsets(android.view.WindowInsets.Type.systemBars())
+            for (screen in arrayOf(listScreen, chatScreen, settingsScreen, paneHint)) {
+                screen.setPadding(0, bars.top, 0, bars.bottom)
+            }
+            insets
+        }
+        root.requestApplyInsets()
+    }
 
     private fun rippleColor(): Int =
         if (wantsLightTheme()) 0x1A000000 else 0x24FFFFFF
@@ -854,10 +950,8 @@ class MainActivity : Activity() {
             if (devOn) Typeface.NORMAL else Typeface.BOLD)
         tabDevices.textSize = 13.5f
         tabGroups.textSize = 13.5f
-        tabDevices.background =
-            if (devOn) tappable(getColor(R.color.bgElevated), dp(9)) else null
-        tabGroups.background =
-            if (devOn) null else tappable(getColor(R.color.bgElevated), dp(9))
+        tabDevices.background = if (devOn) glassTab() else null
+        tabGroups.background = if (devOn) null else glassTab()
     }
 
     /** The active adapter decides whether the empty hint shows. */
@@ -954,22 +1048,18 @@ class MainActivity : Activity() {
             val selected = dualPane && currentPeer?.optString("fingerprint") == fp
             val row = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
-                background = if (selected)
-                    outlined(getColor(R.color.selectedBg), getColor(R.color.accent),
-                             dp(16), dp(2))
-                else
-                    outlined(getColor(R.color.bgPanel), getColor(R.color.divider), dp(16))
-                setPadding(dp(12), dp(11), dp(12), dp(11))
+                background = glass(22, selected)
+                setPadding(dp(14), dp(12), dp(12), dp(12))
                 gravity = Gravity.CENTER_VERTICAL
-                layoutParams = AbsParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(4))
+                layoutParams = AbsParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(9))
             }
             row.addView(TextView(this@MainActivity).apply {
                 text = name.take(1).uppercase()
-                setTextColor(Color.WHITE); textSize = 17f
+                setTextColor(getColor(R.color.textOnAccent)); textSize = 17f
                 setTypeface(typeface, Typeface.BOLD)
                 gravity = Gravity.CENTER
-                background = circle(avatarColor(fp))
-                layoutParams = LinearLayout.LayoutParams(dp(44), dp(44))
+                background = avatarDrawable(false)
+                layoutParams = LinearLayout.LayoutParams(dp(46), dp(46))
             })
             val textColumn = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.VERTICAL
@@ -994,11 +1084,11 @@ class MainActivity : Activity() {
                 }
                 alpha = if (isOnline(dev)) 1f else 0.45f
             })
-            fun chip(label: String, textColor: Int, fill: Int) =
+            fun chip(label: String, textColor: Int) =
                 TextView(this@MainActivity).apply {
                     text = label; textSize = 9.5f; setTextColor(textColor)
-                    setPadding(dp(6), dp(2), dp(6), dp(2))
-                    background = roundRect(fill, dp(6))
+                    setPadding(dp(7), dp(2), dp(7), dp(2))
+                    background = glass(8, selected = true)
                     layoutParams = LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT).apply {
@@ -1006,14 +1096,12 @@ class MainActivity : Activity() {
                     }
                 }
             if (store.isPaired(fp)) {
-                titleRow.addView(chip("已配对", getColor(R.color.chipText),
-                                      getColor(R.color.chipBg)))
+                titleRow.addView(chip("已配对", getColor(R.color.accent)))
             }
             // `pinned` is stamped by dedupeDevices so a pin survives the peer
             // re-creating its fingerprint.
             if (dev.optInt("pinned") > 0) {
-                titleRow.addView(chip("置顶", getColor(R.color.accent),
-                                      getColor(R.color.selectedBg)))
+                titleRow.addView(chip("置顶", getColor(R.color.accent)))
             }
             val last = store.lastMessage(fp)
             val preview = TextView(this@MainActivity).apply {
@@ -1064,6 +1152,11 @@ class MainActivity : Activity() {
                 })
             }
             row.addView(rightColumn)
+            row.addView(TextView(this@MainActivity).apply {
+                text = "›"; textSize = 20f
+                setTextColor(getColor(R.color.textMuted))
+                setPadding(dp(6), 0, dp(2), 0)
+            })
             return row
         }
     }
@@ -1084,22 +1177,19 @@ class MainActivity : Activity() {
             val group = items[position]
             val gid = group.optString("id")
             val name = group.optString("name").ifEmpty { "群聊" }
+            val selected = dualPane && currentGroup?.optString("id") == gid
             val row = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
-                background = roundRect(getColor(R.color.bgPanel), dp(14))
-                setPadding(dp(12), dp(12), dp(12), dp(12))
+                background = glass(22, selected)
+                setPadding(dp(14), dp(13), dp(12), dp(13))
                 gravity = Gravity.CENTER_VERTICAL
-                layoutParams = AbsParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(4))
-            }
-            if (dualPane && currentGroup?.optString("id") == gid) {
-                (row.background as android.graphics.drawable.GradientDrawable)
-                    .setStroke(dp(2), getColor(R.color.accent))
+                layoutParams = AbsParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(9))
             }
             row.addView(TextView(this@MainActivity).apply {
-                text = "群"; setTextColor(Color.WHITE); textSize = 15f
+                text = "群"; setTextColor(getColor(R.color.textOnAccent)); textSize = 15f
                 setTypeface(typeface, Typeface.BOLD); gravity = Gravity.CENTER
-                background = circle(avatarColor(gid))
-                layoutParams = LinearLayout.LayoutParams(dp(42), dp(42))
+                background = avatarDrawable(true)
+                layoutParams = LinearLayout.LayoutParams(dp(44), dp(44))
             })
             val textColumn = LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.VERTICAL
@@ -1167,6 +1257,11 @@ class MainActivity : Activity() {
                 })
             }
             row.addView(rightColumn)
+            row.addView(TextView(this@MainActivity).apply {
+                text = "›"; textSize = 20f
+                setTextColor(getColor(R.color.textMuted))
+                setPadding(dp(6), 0, dp(2), 0)
+            })
             return row
         }
     }

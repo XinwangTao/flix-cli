@@ -31,4 +31,16 @@
     <color name="chipText">#3F4C46</color>       <!-- text_dim -->
     <color name="selectedBg">#1A12795B</color>   <!-- accent_soft, 10% -->
     <color name="iconBg">#F5F3EE</color>         <!-- surface_hi -->
+
+    <!-- Liquid-glass surfaces: translucent, with a light-catching rim. -->
+    <color name="glassTop">#B8FFFFFF</color>
+    <color name="glassBottom">#5CFFFFFF</color>
+    <color name="glassBorderTop">#4DFFFFFF</color>
+    <color name="glassBorderBottom">#1A000000</color>
+    <color name="glassHighlight">#66FFFFFF</color>
+    <color name="glassSelected">#2612795B</color>
+    <color name="avatarTop">#2FA483</color>
+    <color name="avatarBottom">#0B4F3B</color>
+    <color name="groupAvatarTop">#A98BFF</color>
+    <color name="groupAvatarBottom">#4B32A0</color>
 </resources>
