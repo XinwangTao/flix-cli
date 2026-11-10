@@ -10,16 +10,18 @@ Android 改动必须跑 `F:/projects/_agent-runs/android-deploy.sh <apk> com.rel
 来源：`fix/relaydesk-hardening` 中尚未进主干的修复（已核对的等价移植见文末）。均为防御性校验/
 限流，不改状态机与对外契约语义，按 L0 处理。
 
-1. `daemon.py` 校验 `--device-port`/`--api-port` 1–65535、`--web-port` 0–65535（移植 2d66d4e）。
-2. 自动更新：源码包下载上限 64 MiB（移植 6767cb4）。
-3. 自动更新：按运行架构选择 release 资产（移植 ec73373；当前只按平台匹配）。
-4. 自动更新：systemd 服务重启校验与 `execv` 回退（移植 f3415e9）。
-5. 部署脚本：本地/远端私有暂存包 + healthz 轮询 30s（移植 ccf8093）。
-6. Web 上传临时文件唯一化：并发同名上传不再共用 `<name>.flixdownload`（L0，非安卓单测）。
-7. `EndpointTracker` 定期清理过期空指纹（移植 49c205d；当前只在 remember 时清自己的行）。
-8. 板子重复部署清理已删除模块（L1，先补 Archify 图并确认；并行任务已备
+1. 桌面端氛围背景：工作区加入缓慢漂移的玉青/蓝紫径向光晕（Qt 自绘，静态或低帧率），
+   与 Acrylic/玻璃层共存（Inspira 风格，L0）。
+2. `daemon.py` 校验 `--device-port`/`--api-port` 1–65535、`--web-port` 0–65535（移植 2d66d4e）。
+3. 自动更新：源码包下载上限 64 MiB（移植 6767cb4）。
+4. 自动更新：按运行架构选择 release 资产（移植 ec73373；当前只按平台匹配）。
+5. 自动更新：systemd 服务重启校验与 `execv` 回退（移植 f3415e9）。
+6. 部署脚本：本地/远端私有暂存包 + healthz 轮询 30s（移植 ccf8093）。
+7. Web 上传临时文件唯一化：并发同名上传不再共用 `<name>.flixdownload`（L0，非安卓单测）。
+8. `EndpointTracker` 定期清理过期空指纹（移植 49c205d；当前只在 remember 时清自己的行）。
+9. 板子重复部署清理已删除模块（L1，先补 Archify 图并确认；并行任务已备
    `flix_board_deploy_workflow` 草稿）。
-9. Web 同名上传自动改名（L1，先补图确认）。
+10. Web 同名上传自动改名（L1，先补图确认）。
 
 ## 待上机验证
 
@@ -39,6 +41,7 @@ Android 改动必须跑 `F:/projects/_agent-runs/android-deploy.sh <apk> com.rel
   群页面错误、`/send` 失败保留输入与 JSON 502、群聊网页同毫秒消息按 id 去重、发现报文
   指纹/端口/显示字段边界校验、Web 上传按接收上限限流、`/healthz` 探测容错、
   桌面端按钮高对比（实色 accent 描边 + 主按钮渐变，边界达非文本 3:1）。
+- 视觉参考 Inspira UI（Vue/Nuxt 组件库，无法直接用于 Qt/Android/aiohttp，只移植视觉语言）。
 
 ### hardening 已核对等价（无需再移植）
 
