@@ -107,7 +107,9 @@ class FileNameLengthTests(unittest.TestCase):
                     self.assertLessEqual(_encoded_len(fitted), self._budget(tmp))
                     self.assertEqual(fitted.encode("utf-8").decode("utf-8"), fitted)
                     ext = os.path.splitext(raw)[1]
-                    if ext and len(ext) <= 32:
+                    # "." / ".." are not extensions in _fit_file_name; a bare
+                    # trailing dot is allowed to disappear when fitting.
+                    if ext and ext not in (".", "..") and len(ext) <= 32:
                         self.assertTrue(fitted.endswith(ext), fitted)
                     self.assertNotIn(fitted, (".", ".."))
 
