@@ -7,6 +7,15 @@
 
 ### 新增
 
+## [2.5.1] - 2026-11-10
+
+### 修复
+- 源码 tarball 的绝对路径成员在所有 Python 版本上都会被显式拒绝（3.11.18 的
+  `data_filter` 会静默规整路径而不是报错）。
+- Linux 接收端同名文件第二次落盘时，碰撞后缀不再把已拟合的文件名重新推过
+  `NAME_MAX` 预留预算。
+- 发现报文的属性测试只对已规范化（无首尾空白、非空）的指纹做往返断言。
+
 ## [2.5.0] - 2026-11-10
 
 ### 新增
@@ -236,6 +245,7 @@
 - Android 平板端：页头与分段控件重排、卡片式列表与空状态、会话页视觉统一。
 - 配对后自动补推群快照；修复测试污染真实配置导致收文件静默失败。
 
+[v2.5.1]: https://github.com/XinwangTao/flix-cli/compare/v2.5.0...v2.5.1
 [v2.5.0]: https://github.com/XinwangTao/flix-cli/compare/v2.4.0...v2.5.0
 [v2.3.0]: https://github.com/XinwangTao/flix-cli/compare/v2.2.1...v2.3.0
 [v2.2.1]: https://github.com/XinwangTao/flix-cli/compare/v2.2.0...v2.2.1
