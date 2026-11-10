@@ -1,0 +1,20 @@
+# 配网模式：板子自己发 AP（RelayDesk-Setup），手机/电脑连上后打开页面选 Wi-Fi。
+# 安装：sudo cp deploy/wifi-provision.service /etc/systemd/system/
+#       sudo systemctl enable --now wifi-provision
+# 只在需要配网时启用；正常已联网时用 board-wifi.service（STA）。
+[Unit]
+Description=RelayDesk Wi-Fi provisioning AP
+After=network.target
+Before=board-wifi.service
+
+Conflicts=wifi-sta.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/flixcli/scripts/wifi_ap_setup.sh
+ExecStop=/bin/sh -c '[ -f /run/hostapd-relaydesk.pid ] && kill $(cat /run/hostapd-relaydesk.pid) 2>/dev/null || true'
+ExecStop=/bin/sh -c '[ -f /run/wifi-provision.pid ] && kill $(cat /run/wifi-provision.pid) 2>/dev/null || true'
+
+[Install]
+WantedBy=multi-user.target

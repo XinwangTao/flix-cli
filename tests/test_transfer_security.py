@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import tempfile
 import unittest
 import uuid
@@ -12,7 +13,171 @@ from aiohttp import ClientSession, web
 
 from flixcli.config import Store
 from flixcli.model import BUBBLE_FILE
-from flixcli.server import make_app
+from flixcli.server import (_SUFFIX_RESERVE, _encoded_len, _fit_file_name,
+                            _name_capacity, _reserve_destination,
+                            _sanitize_file_name, make_app)
+
+
+class FileNameSanitizeTests(unittest.TestCase):
+    """Peer filenames are POSIX-legal but may be illegal on the receiving OS."""
+
+    def test_windows_rewrites_illegal_chars_and_device_names(self):
+        cases = {
+            "linux:colon?.txt": "linux_colon_.txt",
+            # ntpath.basename("a:notes.txt") is "notes.txt" (drive letter), so
+            # a board's one-character prefix used to disappear from savedAs.
+            "a:notes.txt": "a_notes.txt",
+            "1:2.txt": "1_2.txt",
+            "a*b|c.txt": "a_b_c.txt",
+            'quote"and<angle>.txt': "quote_and_angle_.txt",
+            "trailing.": "trailing",
+            "trailing . ": "trailing",
+            "CON": "_CON",
+            "nul.txt": "_nul.txt",
+            "COM7.log": "_COM7.log",
+            "tab\there.txt": "tab_here.txt",
+            "": "file",
+            "  ": "file",
+        }
+        for raw, want in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(_sanitize_file_name(raw, windows=True), want)
+
+    def test_posix_keeps_legal_names_untouched(self):
+        for name in ("linux:colon?.txt", "a*b|c.txt", "trailing.", "CON",
+                     r"back\slash.txt"):
+            with self.subTest(name=name):
+                self.assertEqual(_sanitize_file_name(name, windows=False), name)
+
+    def test_path_components_are_flattened_either_way(self):
+        self.assertEqual(_sanitize_file_name("../../etc/passwd"), "passwd")
+        # A backslash inside a peer basename is data, not a separator: Linux
+        # allows `back\slash.txt`. Treating it as a path used to drop the
+        # prefix (savedAs "slash.txt"), and two distinct files could collide.
+        self.assertEqual(_sanitize_file_name(r"back\slash.txt", windows=True),
+                         "back_slash.txt")
+        self.assertEqual(_sanitize_file_name(r"C:\tmp\evil.txt", windows=True),
+                         "C__tmp_evil.txt")
+        self.assertEqual(_sanitize_file_name(r"..\evil.txt", windows=True),
+                         ".._evil.txt")
+        # On POSIX it is a perfectly legal character and must survive as-is;
+        # no escaped directory exists there, so traversal is still impossible.
+        self.assertEqual(_sanitize_file_name(r"..\evil.txt", windows=False),
+                         r"..\evil.txt")
+
+
+class FileNameLengthTests(unittest.TestCase):
+    """A name that is legal on the sender may not fit on the receiver.
+
+    ext4 caps a component at NAME_MAX = 255 *bytes*, NTFS at 255 UTF-16 units
+    (plus MAX_PATH when long paths are off). A Windows peer sends
+    "长文件名…×30.txt" = 364 bytes: the board's os.open(O_EXCL) failed with
+    ENAMETOOLONG, the receiver swallowed it and answered 409 "destination
+    exists", so the sender reported upload-failed for a perfectly good file.
+    """
+
+    @staticmethod
+    def _budget(root) -> int:
+        return _name_capacity(root) - _SUFFIX_RESERVE
+
+    def test_collision_suffix_stays_inside_the_name_budget(self):
+        """A second send must not push the fitted name past the reserve.
+
+        The first fit leaves 8 bytes for " (n)"; appending the suffix to an
+        already-maxed name produced a 251-byte component on Linux (budget
+        247) and failed the receiver's own guarantee.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.realpath(tmp)
+            budget = _name_capacity(root) - _SUFFIX_RESERVE
+            name = _fit_file_name("x" * 400 + ".txt", root)
+            (Path(root) / name).write_bytes(b"first")
+            path, reason = _reserve_destination(root, name)
+            self.assertTrue(path, reason)
+            self.assertLessEqual(
+                _encoded_len(os.path.basename(path)), budget)
+
+    def test_long_name_is_fitted_not_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for raw in ("长文件名" * 30 + ".txt", "a" * 400 + ".bin",
+                        "长" * 200 + "."):
+                with self.subTest(raw=raw[:12]):
+                    fitted = _fit_file_name(raw, tmp)
+                    self.assertTrue(fitted)
+                    self.assertLessEqual(_encoded_len(fitted), self._budget(tmp))
+                    self.assertEqual(fitted.encode("utf-8").decode("utf-8"), fitted)
+                    ext = os.path.splitext(raw)[1]
+                    # "." / ".." are not extensions in _fit_file_name; a bare
+                    # trailing dot is allowed to disappear when fitting.
+                    if ext and ext not in (".", "..") and len(ext) <= 32:
+                        self.assertTrue(fitted.endswith(ext), fitted)
+                    self.assertNotIn(fitted, (".", ".."))
+
+    def test_short_names_are_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in ("a.txt", "长文件名.txt", "linux:colon?.txt"):
+                with self.subTest(name=name):
+                    self.assertEqual(_fit_file_name(name, tmp), name)
+
+    def test_overlong_transfer_succeeds_with_fitted_saved_name(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                downloads = root / "downloads"
+                downloads.mkdir()
+                store = Store(root / "db.sqlite")
+                store.set_pref("saveDir", str(downloads))
+                sender = "sender"
+                ident = {"fingerprint": "self", "alias": "test",
+                         "deviceModel": "Windows"}
+                store.upsert_device(sender, ip="127.0.0.1", port=19594)
+                store.add_pair(sender, "0000")
+                app = make_app(store, ident, lambda *_: None)
+                runner = web.AppRunner(app)
+                await runner.setup()
+                await web.TCPSite(runner, "127.0.0.1", 19594).start()
+                try:
+                    raw = "长文件名" * 30 + ".txt"
+                    body = b"overlong name still arrives"
+                    saved = []
+                    for _ in range(2):  # a resend must fit in the same budget
+                        rid = str(uuid.uuid4())
+                        bubble = {"id": rid, "from": sender, "to": "self",
+                                  "type": BUBBLE_FILE, "time": 1, "groupId": "",
+                                  "content": {"state": 2,
+                                              "meta": {"resourceId": rid, "name": raw,
+                                                       "size": len(body),
+                                                       "mimeType": "text/plain"},
+                                              "waitingForAccept": True}}
+                        async with ClientSession() as client:
+                            r = await client.post("http://127.0.0.1:19594/bubble",
+                                                  json=bubble)
+                            self.assertEqual(r.status, 200)
+                            r = await client.post("http://127.0.0.1:19594/file",
+                                                  params={"share_id": rid,
+                                                          "file_name": raw},
+                                                  data=body)
+                            self.assertEqual(r.status, 200, await r.text())
+                        row = store.con.execute(
+                            "SELECT path FROM file_contents WHERE resource_id=?",
+                            (rid,)).fetchone()
+                        self.assertTrue(row and row[0], "nothing recorded on disk")
+                        saved.append(Path(row[0]))
+                    self.assertEqual(len(set(saved)), 2, saved)
+                    for path in saved:
+                        self.assertTrue(path.exists(), path)
+                        self.assertEqual(path.read_bytes(), body)
+                        self.assertLessEqual(_encoded_len(path.name),
+                                             self._budget(str(downloads)))
+                    # The declared name is what the sender wrote, untouched.
+                    name = store.con.execute(
+                        "SELECT name FROM file_contents WHERE resource_id=?",
+                        (rid,)).fetchone()[0]
+                    self.assertEqual(name, raw)
+                finally:
+                    await runner.cleanup()
+                    store.close()
+        asyncio.run(run())
 
 
 class TransferSecurityTests(unittest.TestCase):
@@ -83,8 +248,124 @@ class TransferSecurityTests(unittest.TestCase):
                         await client.post("http://127.0.0.1:19592/bubble", json=bubble)
                         r = await client.post("http://127.0.0.1:19592/file",
                                               params={"share_id": rid, "file_name": "safe.bin"}, data=b"new!")
-                        self.assertEqual(r.status, 409)
+                        # A resend must succeed, but never clobber the old file.
+                        self.assertEqual(r.status, 200)
                     self.assertEqual(target.read_bytes(), b"original")
+                    self.assertEqual((downloads / "safe (1).bin").read_bytes(), b"new!")
+                    # And a third copy keeps counting instead of reusing the name.
+                    rid = str(uuid.uuid4())
+                    bubble["id"] = rid
+                    bubble["content"]["meta"]["resourceId"] = rid
+                    async with ClientSession() as client:
+                        await client.post("http://127.0.0.1:19592/bubble", json=bubble)
+                        r = await client.post("http://127.0.0.1:19592/file",
+                                              params={"share_id": rid, "file_name": "safe.bin"}, data=b"3rd!")
+                        self.assertEqual(r.status, 200)
+                    self.assertEqual((downloads / "safe (2).bin").read_bytes(), b"3rd!")
+                finally:
+                    await runner.cleanup(); store.close()
+        asyncio.run(run())
+
+    def test_hostile_peer_name_lands_under_sanitized_name(self):
+        """A Linux peer's `linux:colon?.txt` must not fail after the transfer.
+
+        Reproduces the board→PC case: NTFS treats ":" as an alternate data
+        stream, so the O_EXCL reservation succeeded on "~/Downloads/linux"
+        while os.replace onto the real name died with WinError 123 — the
+        receiver answered 400 "upload-failed" with the payload fully received
+        and left a stray empty file behind.
+        """
+        async def run():
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); downloads = root / "downloads"; downloads.mkdir()
+                store = Store(root / "db.sqlite")
+                store.set_pref("saveDir", str(downloads))
+                sender = "sender"
+                ident = {"fingerprint": "self", "alias": "test", "deviceModel": "Windows"}
+                store.upsert_device(sender, ip="127.0.0.1", port=19593)
+                store.add_pair(sender, "0000")
+                app = make_app(store, ident, lambda *_: None)
+                runner = web.AppRunner(app); await runner.setup()
+                await web.TCPSite(runner, "127.0.0.1", 19593).start()
+                try:
+                    raw = "linux:colon?.txt"
+                    body = b"from a linux board"
+                    rid = str(uuid.uuid4())
+                    bubble = {"id": rid, "from": sender, "to": "self", "type": BUBBLE_FILE,
+                              "time": 1, "groupId": "", "content": {"state": 2,
+                              "meta": {"resourceId": rid, "name": raw, "size": len(body),
+                                       "mimeType": "text/plain"},
+                              "waitingForAccept": True}}
+                    async with ClientSession() as client:
+                        r = await client.post("http://127.0.0.1:19593/bubble", json=bubble)
+                        self.assertEqual(r.status, 200)
+                        r = await client.post("http://127.0.0.1:19593/file",
+                                              params={"share_id": rid, "file_name": raw},
+                                              data=body)
+                        self.assertEqual(r.status, 200, await r.text())
+                    saved = downloads / _sanitize_file_name(raw)
+                    self.assertEqual(saved.read_bytes(), body)
+                    # Nothing may be created under the raw (illegal) name, and
+                    # in particular no NTFS data-stream stub ("linux").
+                    self.assertFalse((downloads / "linux").exists())
+                finally:
+                    await runner.cleanup(); store.close()
+        asyncio.run(run())
+
+    def test_backslash_in_peer_name_is_not_a_path_separator(self):
+        """`back\\slash.txt` is one Linux file, not `slash.txt` in a dir.
+
+        The board's own sender uses os.path.basename (POSIX), so the declared
+        name keeps the backslash. The receiver used to split on it, dropping
+        the "back\\" prefix in savedAs and making `a\\x.txt` / `b\\x.txt`
+        collide. It must be sanitised as one component (`back_slash.txt`) and
+        the /file filename check must agree instead of rejecting the upload.
+        """
+        async def run():
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); downloads = root / "downloads"; downloads.mkdir()
+                store = Store(root / "db.sqlite")
+                store.set_pref("saveDir", str(downloads))
+                sender = "sender"
+                ident = {"fingerprint": "self", "alias": "test",
+                         "deviceModel": "Windows"}
+                store.upsert_device(sender, ip="127.0.0.1", port=19595)
+                store.add_pair(sender, "0000")
+                app = make_app(store, ident, lambda *_: None)
+                runner = web.AppRunner(app); await runner.setup()
+                await web.TCPSite(runner, "127.0.0.1", 19595).start()
+                try:
+                    raw = r"back\slash.txt"
+                    body = b"single posix component"
+                    rid = str(uuid.uuid4())
+                    bubble = {"id": rid, "from": sender, "to": "self",
+                              "type": BUBBLE_FILE, "time": 1, "groupId": "",
+                              "content": {"state": 2,
+                              "meta": {"resourceId": rid, "name": raw,
+                                       "size": len(body),
+                                       "mimeType": "text/plain"},
+                              "waitingForAccept": True}}
+                    async with ClientSession() as client:
+                        r = await client.post("http://127.0.0.1:19595/bubble",
+                                              json=bubble)
+                        self.assertEqual(r.status, 200)
+                        # A name that no longer matches the bubble is still
+                        # rejected; only the separator handling changed.
+                        r = await client.post("http://127.0.0.1:19595/file",
+                                              params={"share_id": rid,
+                                                      "file_name": "other.bin"},
+                                              data=body)
+                        self.assertEqual(r.status, 400)
+                        r = await client.post("http://127.0.0.1:19595/file",
+                                              params={"share_id": rid,
+                                                      "file_name": raw},
+                                              data=body)
+                        self.assertEqual(r.status, 200, await r.text())
+                    expected = _sanitize_file_name(raw)
+                    self.assertTrue(expected.startswith("back"), expected)
+                    self.assertEqual((downloads / expected).read_bytes(), body)
+                    # The old bug wrote the truncated remainder instead.
+                    self.assertFalse((downloads / "slash.txt").exists())
                 finally:
                     await runner.cleanup(); store.close()
         asyncio.run(run())

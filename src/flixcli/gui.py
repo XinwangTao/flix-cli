@@ -881,6 +881,21 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(980, 640)
         if self.width() < 980 or self.height() < 640:
             self.resize(1280, 840)
+        # The window is active from here on; hand the surface back to DWM.
+        self._sync_native_backdrop()
+        # Qt may reset the immersive-dark attribute while finishing show, so
+        # re-assert it once the event loop has settled.
+        QTimer.singleShot(0, self._sync_native_backdrop)
+        QTimer.singleShot(120, self._sync_native_backdrop)
+
+    def changeEvent(self, event):
+        # Windows drops Acrylic for an inactive window and paints its own solid
+        # fallback, so focus changes read as a flash between glass and paint.
+        # Keep our blurred still visible while inactive and restore the DWM
+        # surface as soon as the window is active again.
+        if event.type() == QEvent.ActivationChange:
+            self._sync_native_backdrop()
+        super().changeEvent(event)
 
     def closeEvent(self, event):
         self.timer.stop()
@@ -908,6 +923,12 @@ class MainWindow(QMainWindow):
         """
         if sys.platform != "win32":
             return False
+        if os.environ.get("RELAYDESK_NATIVE_GLASS", "").strip().lower() not in (
+                "1", "true", "yes"):
+            # Windows disables Acrylic for an inactive window, so the material
+            # visibly flips whenever focus moves. The app's own blurred still
+            # stays constant; opt into the live DWM surface explicitly.
+            return False
         try:
             hwnd = int(self.winId())
             dwm = ctypes.windll.dwmapi
@@ -930,6 +951,30 @@ class MainWindow(QMainWindow):
             return True
         except Exception:
             return False
+
+    def _sync_native_backdrop(self) -> None:
+        """Pick DWM or the app's own still based on window activation.
+
+        Windows 11 only keeps Acrylic on the active window; an inactive window
+        falls back to a system-painted solid, which looks like the background
+        switching between translucent and flat every time focus moves. Paint
+        the cached blurred still while inactive instead, so both states read
+        as the same material.
+
+        The DWM attributes are rewritten here, not only when active: Qt resets
+        ``DWMWA_USE_IMMERSIVE_DARK_MODE`` when the window is shown, which left
+        a dark app with light Acrylic (the cyan cast) until the next focus
+        change.
+        """
+        root = getattr(self, "glass_root", None)
+        if root is None:
+            return
+        native = bool(getattr(self, "_native_glass", False))
+        if native:
+            # Re-assert dark mode and backdrop type even while inactive.
+            native = self._apply_system_backdrop()
+        root.set_native(native and self.isActiveWindow()
+                        and self._glass_visible())
 
     def _enable_round_corners(self):
         if sys.platform == "win32":
@@ -1016,7 +1061,7 @@ class MainWindow(QMainWindow):
         # accepts it, the app stops compositing its own still; otherwise the
         # snapshot fallback above stays active.
         self._native_glass = self._apply_system_backdrop()
-        self.glass_root.set_native(self._native_glass)
+        self._sync_native_backdrop()
         if self._native_glass:
             # The first stylesheet ran before we knew DWM would own the
             # surface, so it still carried the heavy fallback alphas.
@@ -1722,8 +1767,7 @@ class MainWindow(QMainWindow):
         root.set_material(QColor(colors["bg"]), alpha, self._glass_visible())
         # Toggling the checkbox must switch DWM between Acrylic and none too,
         # otherwise the window keeps a live blur the user just turned off.
-        if getattr(self, "_native_glass", False):
-            self._apply_system_backdrop()
+        self._sync_native_backdrop()
 
     def _sync_glass_button(self):
         check = getattr(self, "glass_check", None)
@@ -2215,20 +2259,26 @@ class MainWindow(QMainWindow):
         self.self_id = (payload.get("self") or {}).get("id", "")
         self.notify_new_bubbles(payload.get("bubbles") or [])
         self.connection_dot.setProperty("online", True)
-        self.connection_dot.style().unpolish(self.connection_dot)
-        self.connection_dot.style().polish(self.connection_dot)
+        if not getattr(self, "_connection_online", False):
+            self._connection_online = True
+            self.connection_dot.style().unpolish(self.connection_dot)
+            self.connection_dot.style().polish(self.connection_dot)
         devices = payload.get("devices") or []
         adb = (payload.get("adb") or {}).get("devices", [])
-        self.sidebar_footer.setText(
-            f"{len(devices)} 台设备 · {len(payload.get('groups') or [])} 个群组 · {len(adb)} 条 ADB 连接")
+        footer = (f"{len(devices)} 台设备 · {len(payload.get('groups') or [])} 个群组 "
+                  f"· {len(adb)} 条 ADB 连接")
+        if self.sidebar_footer.text() != footer:
+            self.sidebar_footer.setText(footer)
         self.save_dir = (payload.get("settings") or {}).get("saveDir") or ""
-        self.settings_text.setText(
+        settings_text = (
             f"本机别名：{(payload.get('self') or {}).get('alias', '未设置')}\n"
             f"指纹：{self.self_id}\n"
             f"控制台端口：http://127.0.0.1:{self.api_port}\n"
             f"设备通道端口：{(payload.get('self') or {}).get('port', '未设置')}\n"
             f"下载目录：{(payload.get('settings') or {}).get('saveDir') or '系统 Downloads'}\n"
             f"活动媒体会话：{len((payload.get('media') or {}).get('sessions', []))}")
+        if self.settings_text.text() != settings_text:
+            self.settings_text.setText(settings_text)
         self.populate_sidebar()
         self.populate_transfers()
         self.populate_adb()
@@ -2245,8 +2295,6 @@ class MainWindow(QMainWindow):
             return
         current_data = self.entity_list.currentItem().data(Qt.UserRole) if self.entity_list.currentItem() else None
         query = self.search.text().strip().lower()
-        self.entity_list.blockSignals(True)
-        self.entity_list.clear()
         mode = getattr(self, "mode", "devices")
         entities = []
         # transfers/settings replace the workspace, not the sidebar: a dead 320
@@ -2271,6 +2319,14 @@ class MainWindow(QMainWindow):
                                  f"{device.get('state')} · {device.get('serial')}",
                                  device.get("serial", ""), "adb",
                                  device.get("authorized", False)))
+        # Keep the widget tree stable: a 2.5 s poll that rebuilds every row
+        # forces a whole-window repaint and makes the DWM material flicker.
+        signature = (mode, query, tuple(entities))
+        if signature == getattr(self, "_sidebar_signature", None):
+            return
+        self._sidebar_signature = signature
+        self.entity_list.blockSignals(True)
+        self.entity_list.clear()
         for title, subtitle, key, kind, online in entities:
             if query and query not in (title + " " + subtitle + " " + key).lower():
                 continue
@@ -3727,7 +3783,7 @@ QFrame#rail { background: $bg_rail; border-right: 1px solid $border; }
 QPushButton#railButton {
     background: transparent; border: 1px solid transparent; border-radius: $r_md;
 }
-QPushButton#railButton:hover { background: $surface_hi; border-color: $border; }
+QPushButton#railButton:hover { background: $accent_soft; border-color: $accent_line; }
 QPushButton#railButton:checked {
     background: $accent_soft; border-color: $accent_line;
 }
@@ -3743,9 +3799,9 @@ QLabel#sidebarTitle {
     color: $muted; font-size: $fs_xs; font-weight: 700; padding: 6px 2px 0 2px;
 }
 QPushButton#roundBtn {
-    background: $surface; border: 1px solid $border; border-radius: $r_sm;
+    background: $surface; border: 1px solid $accent; border-radius: $r_sm;
 }
-QPushButton#roundBtn:hover { background: $surface_hi; border-color: $border_hi; }
+QPushButton#roundBtn:hover { background: $accent_soft; border-color: $accent; }
 QPushButton#roundBtn:pressed { background: $surface_2; }
 QPushButton#roundBtn:focus { border-color: $accent; }
 QPushButton#roundBtn:disabled { background: transparent; border-color: $border_soft; }
@@ -3795,7 +3851,7 @@ QFrame#headerToolbar {
 QPushButton#headerBtn {
     background: transparent; border: 1px solid transparent; border-radius: $r_sm;
 }
-QPushButton#headerBtn:hover { background: $surface_hi; border-color: $border; }
+QPushButton#headerBtn:hover { background: $accent_soft; border-color: $accent_line; }
 QPushButton#headerBtn:pressed { background: $surface_2; }
 QPushButton#headerBtn:focus { border-color: $accent; }
 
@@ -3835,9 +3891,9 @@ QTextEdit#composerEdit {
     selection-background-color: $accent; selection-color: $on_accent;
 }
 QPushButton#chipBtn {
-    background: transparent; border: 1px solid $border; border-radius: $r_sm;
+    background: transparent; border: 1px solid $accent; border-radius: $r_sm;
 }
-QPushButton#chipBtn:hover { background: $surface_hi; border-color: $border_hi; }
+QPushButton#chipBtn:hover { background: $accent_soft; border-color: $accent; }
 QPushButton#chipBtn:pressed { background: $surface_2; }
 QPushButton#chipBtn:focus { border-color: $accent; }
 QPushButton#newMsgPill {
@@ -3850,32 +3906,38 @@ QPushButton#newMsgPill:focus { border-color: $on_accent; }
 
 /* --------------------------------------------------------------- buttons */
 QPushButton {
-    background: $surface; color: $text; border: 1px solid $border;
-    border-radius: $r_sm; padding: 7px 12px; font-size: $fs_md;
+    background: $surface; color: $text; border: 1px solid $accent;
+    border-radius: $r_md; padding: 7px 12px; font-size: $fs_md;
 }
-QPushButton:hover { background: $surface_hi; border-color: $border_hi; }
-QPushButton:pressed { background: $surface_2; }
-QPushButton:disabled { color: $muted; border-color: $border_soft; background: transparent; }
-QPushButton:focus { border-color: $accent; }
+QPushButton:hover { background: $accent_soft; border-color: $accent; }
+QPushButton:pressed { background: $surface_2; border-color: $accent_press; }
+QPushButton:disabled { color: $muted; border-color: $border_soft; background: $surface; }
+QPushButton:focus { background: $accent_soft; border-color: $accent_hi; }
 
 QPushButton#sendButton, QPushButton#primaryBtn {
-    background: $accent; color: $on_accent; border: 1px solid $accent_edge;
-    border-radius: $r_sm; font-weight: 600;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 $accent_hi, stop:1 $accent);
+    color: $on_accent; border: 1px solid $accent_edge;
+    border-radius: $r_md; font-weight: 700;
 }
 QPushButton#sendButton { padding: 8px 18px; font-size: $fs_md; }
 QPushButton#primaryBtn { padding: 9px 18px; font-size: $fs_md; }
-QPushButton#sendButton:hover, QPushButton#primaryBtn:hover { background: $accent_hi; }
-QPushButton#sendButton:pressed, QPushButton#primaryBtn:pressed { background: $accent_press; }
+QPushButton#sendButton:hover, QPushButton#primaryBtn:hover {
+    background: $accent_hi;
+}
+QPushButton#sendButton:pressed, QPushButton#primaryBtn:pressed {
+    background: $accent_press;
+}
 QPushButton#sendButton:disabled, QPushButton#primaryBtn:disabled {
     background: $surface_2; color: $muted; border-color: $border;
 }
 QPushButton#sendButton:focus, QPushButton#primaryBtn:focus { border-color: $on_accent; }
 QPushButton#secondaryButton {
-    background: transparent; color: $text_dim; border: 1px solid $border;
-    border-radius: $r_sm; padding: 8px 14px; font-size: $fs_md;
+    background: transparent; color: $accent; border: 1px solid $accent;
+    border-radius: $r_md; padding: 8px 14px; font-size: $fs_md; font-weight: 600;
 }
 QPushButton#secondaryButton:hover {
-    background: $surface_hi; border-color: $border_hi; color: $text;
+    background: $accent_soft; border-color: $accent; color: $accent_hi;
 }
 QPushButton#secondaryButton:pressed { background: $surface_2; }
 QPushButton#secondaryButton:disabled { color: $muted; border-color: $border_soft; }

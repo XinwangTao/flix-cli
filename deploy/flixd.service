@@ -1,0 +1,25 @@
+# flixd on a headless Linux box (ARM boards such as Quectel QCM6490).
+# Template: scripts/deploy_board.sh 会替换 @DIR@ / @WEB_PORT@ 后安装
+[Unit]
+Description=flixd (RelayDesk daemon)
+Documentation=https://github.com/XinwangTao/flix-cli
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=@DIR@
+ExecStart=@DIR@/.venv/bin/flixd --web-port @WEB_PORT@ --alias %H
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+# 每次启动检查 GitHub release；设为 1 时自动装源码包并重启，0 只报告
+Environment=FLIX_AUTO_UPDATE=1
+# 板子无 GUI 剪贴板时加 --no-clip-sync 可省掉一轮空轮询
+MemoryMax=256M
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target

@@ -38,16 +38,78 @@ announce 同时以**局域网广播兜底**（子网定向 + 255.255.255.255，�
 这类网络上唯一能出卡的 announce；flixcli 间发现不受影响，官方客户端是否接受广播未证实。
 flixd 启动突发后还会每 30s 重发一次（2 包），让晚启动的节点也能发现本机。
 
+同一台机器可能同时跑默认 daemon（8891）和 `RelayDesk.exe serve --device-port 18991`：两者
+指纹相同、各自每 30s announce。旧逻辑「最后一次 announce 胜出」会让对端每 30s 在 8891 与
+18991 之间改写 `port`，消息/剪贴板/文件确认随机落到先到的进程，日志和 `devicesChanged` 也
+跟着刷。现在按指纹记录 90s 内出现过的 `(ip, port)`，同一 IP 优先选**最小端口**（即协议默认
+8891）；只有已选端口整整 90s 不再 announce，才切到仍在广播的备选端口。端口变化本身不再算
+设备变化。
+
 ## 设备在线判定与诊断
 
 在线状态（RelayDesk 侧边栏绿点）= 设备有 IP 且 `seenAt` 在 **90s** 内。官方客户端只在启动时
 announce，因此 flixd 每 60s 对库内设备做一次 `/ping_v2` 探活并刷新 `seenAt`；探活失败不改写
 时间戳，设备自然显示离线，重启后不会再把历史设备画成绿点。
 
+**announce 本身也算心跳**：收到与上次相同的 announce（突发副本、30s 重发、广播兜底）也会
+刷新 `seenAt`，按 15s 节流，不放大成每包一次写库，也不触发 `devicesChanged`/日志。这样
+对端防火墙挡住入站 8891（`/ping_v2` 永远连不上）但仍在每 30s 广播的设备不会被 90s TTL
+误判离线——它能听见我们、也能主动发消息过来，界面上必须还是绿的。e2e 用一条指向无人
+监听端口的注入 announce 验证“探活不可达仍在线”（板端测试结束即删除该行）。
+
 `flix netcheck [--json]` 是只读诊断：选中网卡、组播 join（临时端口，不抢占运行中的 8891）、
 8891 占用、防火墙配置、库内设备端口可达性。对端设备通道不通时，把
 `scripts/fix_firewall.ps1` 交给**对端**管理员，在其机器上以管理员 PowerShell 执行
 （默认放行 `dist\flixd.exe`，`-Remove` 撤销）；flixd/RelayDesk 不会自动执行它，也不会改动远端。
+
+## 跨平台剪贴板
+
+`flixd` 的自动同步在 Windows 上全程走 user32 的 `CF_UNICODETEXT`（读写都不再经过
+`clip.exe`：子进程会按控制台代码页重编码 stdin，实测把中文变成 `????`，而发送端仍收到
+success）；Linux 桌面在 Wayland 下用
+`wl-clipboard`，X11 下用 `xclip`/`xsel`；macOS 用 `pbpaste`/`pbcopy`。**无 GUI 的 Linux 板子**
+（QCM6490 在 systemd/tty 下运行，没有 X/Wayland）拿不到剪贴板，收到远端剪贴板后不再静默丢弃，
+而是原子写入 `~/flixcli/clipboard.txt`（0600，UTF-8），journal 打印
+`[clip-sync] no GUI clipboard; stored N chars in …`，本机脚本/agent 可直接 `cat` 取用。
+该文件只写不读：否则守护进程重启后会把上次收到的文本当成"新剪贴板"重新广播。
+`/healthz` 的 `clipboard` 字段给出实际落地方式（`win32` / `wl-clipboard` / `xclip` /
+`xsel` / `pbcopy` / `file` / `none`），多端排障时先看这一项。
+
+`flix clipboard <ip> -`、`flix send-text <ip> -`、`flix group send <group> -` 都从 stdin
+读正文，且**按 UTF-8 解**（BOM 去掉、CRLF 折成 LF；真不是 UTF-8 时才退回本机代码页）。
+Windows 上重定向的 stdin 默认按控制台代码页解码，管道里的 UTF-8 中文会变成孤立代理字符，
+`json.dumps` 当场抛 `UnicodeEncodeError`，对端什么都收不到——这也是"剪贴板发了但板上是空的"
+的常见原因之一，先看发送端有没有 traceback。长正文请走 `-`：Windows 命令行只有 32767 字符。
+
+## 跨平台文件名
+
+接收端按**本机**的规则清洗对端文件名，对端库里/气泡里的名字保持原样，
+`fileReceived.savedAs` 报实际落盘名。板子（Linux）里 `linux:colon?.txt`、`a*b`、
+`CON`、结尾带点的名字都合法，直接往 Windows 上写会出事——而且 `:` 比"拒绝"更糟：
+NTFS 把它当**数据流**分隔符，占位文件建成了另一个名字（`~/Downloads/linux`），
+正文全部收完才在 `os.replace` 处以 WinError 123 失败，发送端看到 400 `upload-failed`，
+`Downloads` 里还多一个空文件。现在 Windows 上把 `<>:"/\|?*` 和控制字符换成 `_`、
+去掉结尾的点/空格、给 `CON/NUL/COM1…` 这类设备名加 `_` 前缀；POSIX 只去掉 NUL，
+所以板上仍能收到带 `:` 的原名。端到端回归见 `scripts/e2e_two_nodes.py` 的
+"板→PC 文件（Windows 非法名）" 三项。
+
+**反斜杠不是对端文件名的路径分隔符**：Linux 允许 `back\slash.txt` 是一个普通文件。
+旧实现先按 `\` 和 `/` 一起切 basename，板上发这种名字时 PC 落成 `slash.txt`——前缀
+悄悄消失，`a\x.txt` 与 `b\x.txt` 还会互相撞名变成 `x (1).txt`。现在只按 `/` 切路径，
+Windows 再把 `\` 和其他非法字符一样换成 `_`（`back_slash.txt`），POSIX 原样保留。
+`/file` 的 `file_name` 校验也改用同一套清洗结果比较，所以板↔板、板→PC 都不再误判
+400 `bad file name`。回归：e2e "板→PC 文件名含反斜杠" 与
+`tests/test_transfer_security.py::test_backslash_in_peer_name_is_not_a_path_separator`。
+
+名字合法还不够——**长度**也得按接收端算。ext4 的 `NAME_MAX` 是 255 **字节**，
+NTFS 是 255 个 UTF-16 单元（没开长路径时整条路径还得 <260 字符）。PC 上一个
+`长文件名×30.txt`（364 字节）在 Windows 上完全合法，往板上发时接收端 `O_EXCL` 占位直接
+`ENAMETOOLONG`，旧代码把它吞成 409 `destination exists`（其实一个字节都没写），发送端只看到
+`upload-failed`。现在接收端先按 `os.pathconf(..., PC_NAME_MAX)`（Windows 按组件 255 +
+长路径开关）**收窄**：保留扩展名、在 UTF-8/UTF-16 字符边界上截断主体、留出 8 字节给
+`" (n)"` 同名后缀，`fileReceived.savedAs` 报收窄后的名字，气泡/库里仍是原名。占位失败也改报
+真实原因（`cannot reserve destination: File name too long`），不再一律甩 409。
+两端回归见 e2e 的 "PC→板 超长文件名送达 / 板端按 NAME_MAX 收窄且内容一致"。
 
 ## 功能矩阵
 
@@ -63,7 +125,7 @@ announce，因此 flixd 每 60s 对库内设备做一次 `/ping_v2` 探活并刷
 | 剪贴板投递（TransIntent clipboard） | `flix clipboard` | flix_send_clipboard | ✅ |
 | 文件传输（bubble + POST /file，share_id=bubbleId，.flixdownload 原子写） | `flix send` | flix_send_files | ✅ 配对后官方自动收 |
 | 剪贴板自动同步（官方 sendClipboard 语义） | flixd 内置（`--no-clip-sync` 关） | — | ✅ 官方实测到达 |
-| 群组（本地群表 + bubble+groupId 逐发） | `flix group create/add/join/leave/list/send/history` | flix_group_* | ✅ 官方可收 |
+| 群组（本地群表 + rdGroupSync 快照 + bubble+groupId 逐发） | `flix group create/add/join/leave/list/send/history` | flix_group_* | ✅ 官方可收 |
 | 配对二维码 | `flix qrcode [--decode]`（flix2:// payload） | — | flixcli 间 |
 | 自动应答（轮询收件 → `--cmd` → 回发，带防自激护栏） | `flix agent --cmd "…"` | — | — |
 | 远程执行（rdShell，exec-only，配对即可执行） | `flix shell <设备> -- <命令>` | flix_shell | flixcli 间 |
@@ -73,6 +135,24 @@ announce，因此 flixd 每 60s 对库内设备做一次 `/ping_v2` 探活并刷
 | Windows 桌面控制台 | `flix gui`（PySide6 Essentials） | — | 自有 GUI |
 | Android ADB 设备/报告 | `flix adb devices|report` | flix_adb_devices / flix_adb_report | 本机 USB/无线 ADB |
 | ADB 文件往返 | `flix adb push|pull` | flix_adb_push / flix_adb_pull | 本机授权设备 |
+
+## 跨端群组状态
+
+群组不是"官方服务端下发"的对象：每个节点各存一份群表，消息仍是 `bubble + groupId`
+逐成员发送。所以**建群/加人必须主动把快照推给成员**（`rdGroupSync`，`rev` 取毫秒时间戳，
+严格新者胜）。桌面 GUI 一直这样推，CLI 的 `flix group create --member` / `flix group add`
+原先只写本机库：PC 上建好群、消息也 `delivered`，板子上 `flix group list` 却是空的、
+`flix group history <gid>` 报 `no-group`——气泡其实按 `groupId` 落库了，只是没有对应的群行，
+等于"收到但看不见"（实测板端积压了多个这样的孤儿群）。现在两个 CLI 入口与 GUI 一致，
+建群/加人后立即推送并逐个报告 `delivered/total/results`。
+
+接收端还有兜底：只收到带 `groupId` 的气泡、却从没收到过快照时（旧版对端、或对方直接
+`group send`），按**已配对发送方**补登记一个最小群组（本机 + 发送方，`rev=0`），让
+`flix group list/history` 立刻能查到这条线程；之后任何真实快照（`rev`>0）都会覆盖占位名与
+成员表。未配对发送方的气泡仍不建群（与 `/intent` 的信任边界一致）。板子上
+`flix group history <gid> --json` 是排查"群里发了消息但对方说没看到"的第一站：先确认群行
+在不在，再看 `bubble_entities.group_id`。e2e 的“CLI 建群把快照推给板子 / 板子按群查得到
+跨端群消息 / 板子自动登记只收到气泡的陌生群组”三项覆盖整条链路。
 
 ## AI 接入（MCP）
 
@@ -181,6 +261,11 @@ flix outbox --drop <id>        # 丢弃
 
 - **4xx 不重试**：未配对、参数错误属于永久失败，直接标 `failed`。
 - **只有幂等动作排队**：`flix shell`、`flix upgrade` 这类执行类动作重复跑有副作用，仍然只发一次。
+- **按 IP 排队的消息也会落地**：`flix send-text 192.168.1.9 …` 在对端还没 announce 过时，
+  队列行只能把地址当对端标识。重投时按 `resolve_target` 把 `ip[:port]` 映射回库里该地址
+  最新的设备指纹，并回写队列行与气泡的 `to`（协议字段应是指纹）；否则重投永远用
+  `device_ip(IP)` 精确匹配指纹查不到地址，消息每 30 秒被静默跳过，直到 7 天过期。
+  e2e 用一条直接注入的 IP-peer 队列行验证“对端出现后自动送达并回写指纹”。
 - 文件与剪贴板暂不排队（二期沿用同一张表）。
 
 流程真源：`docs/archify/flix_outbox_workflow.html`（旁路 `.json`）。
@@ -346,3 +431,21 @@ Issue 与 PR 由仓库内的 GH Bot 处理：新 issue 自动首轮分诊，新 
 安全问题的报告方式见 [SECURITY.md](SECURITY.md)。
 
 Issues / PR 欢迎；提交前请先在本机跑一遍 `pytest tests -q --ignore=tests/e2e.py`。
+
+## 部署到 ARM 板子（移远 QCM6490 / Qualcomm Linux）
+
+板子是 aarch64 + Python 3.10，项目要求 3.11+，所以用 uv 自带解释器，不动系统 Python。
+
+```bash
+scripts/deploy_board.sh root@quecpi-alpha          # 打包 → 传输 → uv 装 3.12 → systemd 起服务
+```
+
+- 安装位置 `/opt/flixcli`，服务 `flixd.service`（`Restart=always`、`MemoryMax=256M`、别名取主机名）。
+- 网页版：`http://<板子IP>:8892`（PIN 在 `journalctl -u flixd` 里）。
+- 设备通道 8891 对外，桌面 API 8898 仍只绑 127.0.0.1。
+- 换网自愈：announce 循环每 30s 核对出口网卡，网线拔插或热点回退后会重新加入组播，
+  否则 TCP 通、对端却再也发现不了这台机器。
+- 板载 QCA1023 Wi-Fi 的驱动不声明 802.11w(PMF)，只能连不强制 PMF 的 AP；
+  强制 PMF 的企业 AP 会握手成功后几秒内以 reason=148 踢掉。
+
+细节（healthz 自检、无头配对、Wi-Fi 限制）见 `docs/deploy-board.md`。

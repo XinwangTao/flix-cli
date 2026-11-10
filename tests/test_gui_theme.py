@@ -204,6 +204,55 @@ class StylesheetTests(unittest.TestCase):
                 self.assertNotIn("$", sheet, "an unfilled template token leaked")
                 self.assertGreater(len(sheet), 4000)
 
+    def test_button_outlines_clear_nontext_contrast(self):
+        """An outlined button must not melt into the page behind it.
+
+        Buttons now carry a full accent outline instead of a translucent
+        hairline; WCAG 2.1 asks 3:1 for non-text UI boundaries, so pin the
+        token pair and the QSS rule that uses it.
+        """
+        for theme, tokens in gui_module.PALETTES.items():
+            for surface in ("bg", "bg_side", "surface"):
+                with self.subTest(theme=theme, surface=surface):
+                    self.assertGreaterEqual(
+                        contrast(tokens["accent"], tokens[surface]), 3.0,
+                        f"accent outline on {surface} is too faint")
+            sheet = gui_module.styles_for(theme)
+            start = sheet.index("QPushButton {")
+            rule = sheet[start:start + 180]
+            self.assertIn(f"border: 1px solid {tokens['accent']}", rule)
+            self.assertIn(f"background: {tokens['surface']}", rule)
+            primary = sheet[sheet.index("QPushButton#sendButton"):]
+            primary = primary[:primary.index("}")]
+            self.assertIn("qlineargradient", primary)
+
+    def test_native_backdrop_follows_window_activation(self):
+        """An inactive window must keep the blurred still, not DWM's solid.
+
+        Windows drops Acrylic when the window loses focus; leaving the client
+        area to DWM then made the background flash between glass and a flat
+        fill. The fallback widget paints only when ``_native`` is false.
+        """
+        try:
+            from PySide6.QtWidgets import QApplication
+        except ImportError:  # pragma: no cover
+            self.skipTest("PySide6 widgets unavailable")
+        app = QApplication.instance() or QApplication([])  # noqa: F841
+        window = gui_module.MainWindow()
+        window._native_glass = True
+        window.glass = True
+        window._glass_visible = lambda: True
+        window._apply_system_backdrop = lambda: True
+        root = window.glass_root
+
+        window.isActiveWindow = lambda: True
+        window._sync_native_backdrop()
+        self.assertTrue(root._native)
+
+        window.isActiveWindow = lambda: False
+        window._sync_native_backdrop()
+        self.assertFalse(root._native)
+
     def test_sheets_differ_per_theme(self):
         dark = gui_module.styles_for("dark")
         light = gui_module.styles_for("light")

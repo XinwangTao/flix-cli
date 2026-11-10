@@ -1,6 +1,6 @@
 [project]
 name = "flixcli"
-version = "2.4.0"
+version = "2.5.2"
 description = "flixd + flix CLI: interoperable reimplementation of the Flix LAN transport protocol"
 readme = "README.md"
 license = { file = "LICENSE" }

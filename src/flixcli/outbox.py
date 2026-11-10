@@ -60,16 +60,29 @@ async def flush(store, limit: int = 20) -> dict:
     store.outbox_expire()
     sent = failed = skipped = 0
     for row in store.outbox_pending(limit):
-        ip, port = store.device_ip(row["peer"])
-        if not ip:
-            skipped += 1
-            continue
         try:
             bubble = json.loads(row["payload"])
         except ValueError:
             store.mark_outbox(row["id"], "failed", "bad-payload")
             failed += 1
             continue
+        # Resolve through the shared resolver instead of device_ip(peer): when
+        # a message is queued while the peer is known only by its address, the
+        # row's peer IS that address. device_ip() matches fingerprints only, so
+        # the row answered "no address" on every pass and sat queued until the
+        # 7-day TTL -- even after the peer came back and announced itself.
+        # resolve_target() maps ip[:port] to the stored row (freshest announce
+        # wins) and returns that row's fingerprint.
+        ip, port, fp = resolve_target(store, row["peer"])
+        if not ip:
+            skipped += 1
+            continue
+        if isinstance(bubble, dict) and fp and fp != row["peer"]:
+            # Bind the row to the identity we just learned: later passes look
+            # it up by fingerprint, and the receiver gets a fingerprint in the
+            # protocol's `to` field instead of our transport address.
+            bubble["to"] = fp
+            store.rebind_outbox(row["id"], fp)
         result = await _attempt(store, bubble, ip, port or DEVICE_PORT)
         if result.get("state") == "delivered":
             sent += 1

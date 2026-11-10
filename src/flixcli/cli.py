@@ -27,6 +27,40 @@ from .model import clipboard_intent, shell_intent, text_bubble
 from .routing import resolve_target
 
 
+def _read_stdin_text() -> str:
+    """Read a whole stdin payload as UTF-8, not the console code page.
+
+    ``sys.stdin.read()`` decodes *redirected* stdin with the locale codec —
+    cp936 on a Simplified-Chinese Windows. Piping a UTF-8 payload in (the
+    normal case: git, ssh, an editor, an AI agent) then produced lone
+    surrogates, so ``flix clipboard <ip> -`` died inside json.dumps with
+    ``UnicodeEncodeError: 'utf-8' codec can't encode character '\\udcad'``
+    and the peer received nothing at all. Windows console input is UTF-8
+    (Python's ``_WindowsConsoleIO``), so trying UTF-8 first is right on all
+    platforms; the locale codec stays as a fallback for genuinely legacy
+    pipelines (``type notes.txt | flix ...``). A UTF-8/UTF-16 BOM is
+    honoured and dropped, and CRLF is folded to LF exactly like the old
+    text-mode read did.
+    """
+    buffer = getattr(sys.stdin, "buffer", None)
+    if buffer is None:  # already text (tests, StringIO, embedded callers)
+        return sys.stdin.read()
+    data = buffer.read()
+    for bom, codec in ((b"\xef\xbb\xbf", "utf-8"),
+                       (b"\xff\xfe", "utf-16-le"),
+                       (b"\xfe\xff", "utf-16-be")):
+        if data.startswith(bom):
+            text = data[len(bom):].decode(codec, "replace")
+            break
+    else:
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            import locale
+            text = data.decode(locale.getpreferredencoding(False), "replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _join_remote_command(parts: list[str]) -> str:
     """Rebuild one command line without losing the caller's argument quoting.
 
@@ -129,8 +163,13 @@ async def cmd_send_text(args) -> int:
     from .outbox import send_text as durable_send
     store = Store()
     try:
+        # '-' reads stdin, like `clipboard` and `group send`: a message that
+        # comes from a pipe (git log, a file, an agent turn) must not be
+        # re-typed into argv -- and on Windows a long payload cannot be
+        # passed there at all (WinError 206, 32767-char command line).
+        text = _read_stdin_text() if args.text == "-" else args.text
         result = await durable_send(store, load_or_create_identity(store),
-                                    args.to, args.text, args.port)
+                                    args.to, text, args.port)
     finally:
         store.close()
     emit(result, args.json)
@@ -341,7 +380,7 @@ async def _pty_client(ip: str, port: int, my_fp: str, shell_name: str) -> int:
 async def cmd_clipboard(args) -> int:
     store = Store()
     try:
-        text = sys.stdin.read() if args.text == "-" else args.text
+        text = _read_stdin_text() if args.text == "-" else args.text
         return await _send(store, load_or_create_identity(store), args.to,
                            "clipboard", text, args.port)
     finally:
@@ -770,10 +809,13 @@ async def cmd_group_create(args) -> int:
     try:
         ident = load_or_create_identity(store)
         g = new_group(store, args.name, args.member or [])
-        # Creating a group must tell its members, otherwise the peer keeps
-        # receiving bubbles with a groupId it has no row for.
+        # The GUI path pushes the snapshot after creating a group; the CLI must
+        # do the same or the peer only ever sees bubbles for an unknown groupId.
         res = await update_group(store, ident, g["id"])
-        emit({**g, "delivered": res.get("delivered", 0),
+        emit({**g, "name": res.get("name") or g.get("name", ""),
+              "members": store.group_members(g["id"]),
+              "rev": res.get("rev"),
+              "delivered": res.get("delivered", 0),
               "total": res.get("total", 0),
               "results": res.get("results", [])}, args.json)
         return 0
@@ -792,7 +834,7 @@ async def cmd_group_add(args) -> int:
             emit(res, args.json)
             return 2
         emit({"ok": True, "group": res["group"], "name": res.get("name", ""),
-              "members": res.get("members", []),
+              "members": res.get("members", []), "rev": res.get("rev"),
               "delivered": res.get("delivered", 0),
               "total": res.get("total", 0),
               "results": res.get("results", [])}, args.json)
@@ -849,7 +891,7 @@ async def cmd_group_send(args) -> int:
     store = Store()
     try:
         ident = load_or_create_identity(store)
-        text = sys.stdin.read() if args.text == "-" else args.text
+        text = _read_stdin_text() if args.text == "-" else args.text
         result = await send_group_text(store, ident, args.group, text)
         emit(result, args.json)
         return 0 if result.get("ok") else 3
@@ -1053,7 +1095,7 @@ def main(argv: list[str] | None = None) -> int:
     p = add("send-text", "send a text bubble to a device (ip[:port] or fingerprint)",
             cmd_send_text)
     p.add_argument("to")
-    p.add_argument("text")
+    p.add_argument("text", help="text to send; '-' reads stdin as UTF-8")
     p.add_argument("--port", type=int, default=DEVICE_PORT)
 
     p = add("shell", "run one command on a paired device (exec only, no PTY)",

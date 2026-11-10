@@ -27,6 +27,7 @@ from typing import Callable
 from aiohttp import web
 
 from . import DEVICE_PORT, model
+from .groupchat import adopt_group as _adopt_group
 from .media_session import SessionError
 from . import ptyshell
 from .remoteshell import DEFAULT_TIMEOUT_S, run_command
@@ -69,6 +70,149 @@ def _max_file_bytes(store) -> int:
     return min(declared, DEFAULT_MAX_FILE_BYTES)
 
 
+def _sanitize_file_name(name: str, *, windows: bool | None = None) -> str:
+    """Return a peer-supplied basename that this OS can actually create.
+
+    Peers run Linux, where `linux:colon?.txt`, `a*b`, `CON` and trailing dots
+    are all legal, so a board happily sends them. Windows rejects those names —
+    and ":" is worse than a plain rejection: NTFS reads `linux:colon?.txt` as
+    the alternate data stream `colon?.txt` of a file called `linux`, so the
+    O_EXCL reservation *succeeds* on a different path ("~/Downloads/linux"),
+    the whole payload is received, and the final os.replace dies with
+    WinError 123. The sender sees a 400 upload-failed after a full transfer and
+    a stray empty file is left behind.
+
+    Only names are rewritten; the declared name in the DB/bubble stays as the
+    sender wrote it, and `fileReceived.savedAs` reports the on-disk name.
+    POSIX only has to drop NUL and path separators (already peeled off by the
+    caller), so a board keeps `linux:colon?.txt` untouched.
+
+    A backslash is *not* a path separator for a peer-supplied basename: Linux
+    names it as data (`back\\slash.txt` is one file), and stripping everything
+    before the last backslash silently renamed it to `slash.txt` on Windows.
+    Two such files (`a\\x.txt`, `b\\x.txt`) then collided and the second landed
+    as `x (1).txt`. On Windows the backslash is rewritten to `_` like the
+    other illegal characters; on POSIX it is kept verbatim. Flattening still
+    prevents traversal: a name like `..\\evil.txt` becomes the single
+    component `.._evil.txt` on Windows and stays a literal name on POSIX, and
+    the resolved destination is checked against the save root.
+    """
+    # Split path separators by hand instead of os.path.basename: on Windows
+    # ntpath treats the part before ":" as a drive letter, so a board's
+    # `a:notes.txt` came back as `notes.txt` (the `a` prefix vanished from
+    # savedAs) while `linux:colon?.txt` only worked by luck (a drive must be
+    # one character).
+    clean = name.rsplit("/", 1)[-1]
+    if windows is None:
+        windows = os.name == "nt"
+    if not windows:
+        return clean.replace("\x00", "")
+    clean = clean.strip()
+    clean = "".join("_" if ch in '<>:"/\\|?*' or ord(ch) < 32 else ch for ch in clean)
+    # Windows silently strips trailing dots/spaces, so "a." and "a" collide.
+    clean = clean.rstrip(" .")
+    # Device names (CON, NUL, COM1…) are reserved with or without extension.
+    if clean.split(".")[0].upper() in _WINDOWS_DEVICE_NAMES:
+        clean = "_" + clean
+    return clean or "file"
+
+
+_WINDOWS_DEVICE_NAMES = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+})
+
+# Room kept free for the " (999)" collision suffix so a fitted name can still
+# be de-duplicated without pushing the file system over its own limit.
+_SUFFIX_RESERVE = 8
+
+
+def _windows_long_paths_enabled() -> bool:
+    """True when this Windows host created files past MAX_PATH for us."""
+    if os.name != "nt":
+        return True
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SYSTEM\CurrentControlSet\Control\FileSystem") as key:
+            return bool(winreg.QueryValueEx(key, "LongPathsEnabled")[0])
+    except (ImportError, OSError, ValueError, AttributeError):
+        return False
+
+
+def _name_capacity(root: str) -> int:
+    """How big one on-disk name under `root` may be (bytes / UTF-16 units)."""
+    if os.name == "nt":
+        # NTFS caps a component at 255 UTF-16 units. Without the long-path
+        # opt-in the *whole path* also has to stay under MAX_PATH (260), so a
+        # 255-byte POSIX name dropped into a deep Downloads folder used to die
+        # with WinError 206 after the payload had already arrived.
+        capacity = 255
+        if not _windows_long_paths_enabled():
+            capacity = min(capacity, 259 - len(os.path.abspath(root)) - 1)
+        return max(capacity, 32)
+    try:
+        return int(os.pathconf(root, "PC_NAME_MAX")) or 255
+    except (OSError, ValueError, AttributeError):
+        return 255
+
+
+def _encoded_len(text: str) -> int:
+    if os.name == "nt":
+        return len(text.encode("utf-16-le")) // 2
+    return len(text.encode("utf-8"))
+
+
+def _truncate_to(text: str, limit: int) -> str:
+    """Cut `text` to `limit` on-disk units without splitting a character."""
+    if limit <= 0:
+        return ""
+    if _encoded_len(text) <= limit:
+        return text
+    if os.name == "nt":
+        # Astral characters are two UTF-16 units, so walk code points.
+        out, used = [], 0
+        for ch in text:
+            n = len(ch.encode("utf-16-le")) // 2
+            if used + n > limit:
+                break
+            out.append(ch)
+            used += n
+        return "".join(out)
+    return text.encode("utf-8")[:limit].decode("utf-8", "ignore")
+
+
+def _fit_file_name(name: str, root: str) -> str:
+    """Shorten a peer name until this file system can actually create it.
+
+    A board sends `长文件名…×30.txt`: 364 UTF-8 bytes, legal on ext4 only up
+    to NAME_MAX (255). The receiver used to hand that straight to
+    os.open(O_EXCL), swallow ENAMETOOLONG and answer 409 "destination
+    exists" — the sender saw "upload-failed" for a name that was merely too
+    long, and nothing was ever written. Fit the name instead: keep the
+    extension, cut the stem on a character boundary, leave room for the
+    " (n)" suffix. The declared name in the DB stays as the sender wrote it
+    and `fileReceived.savedAs` reports the fitted one.
+    """
+    budget = _name_capacity(root) - _SUFFIX_RESERVE
+    if _encoded_len(name) <= budget:
+        return name
+    stem, ext = os.path.splitext(name)
+    # Only treat it as an extension if it plausibly is one.
+    if not ext or _encoded_len(ext) > 32 or ext in (".", ".."):
+        stem, ext = name, ""
+    room = budget - _encoded_len(ext)
+    if room <= 0:  # ".averyveryvery…" — extension alone blows the budget
+        stem, ext, room = name, "", budget
+    fitted = _truncate_to(stem, room).rstrip(" .") + ext
+    if not fitted or fitted in (".", ".."):
+        fitted = "file" + ext
+    return fitted
+
+
 def _device_ip(store, fingerprint: str) -> str:
     row = store.con.execute(
         "SELECT COALESCE(ip,'') FROM persistence_devices WHERE fingerprint=?",
@@ -108,18 +252,64 @@ def _trusted_sender(store, sender, remote) -> bool:
     return bool(expected) and bool(remote) and expected == remote
 
 
-def _safe_destination(store, name: str) -> tuple[str, str] | None:
-    clean = os.path.basename(name.replace("\\", "/"))
+def _safe_destination(store, name: str) -> tuple[str, str, str] | None:
+    """Resolve a peer name to (root, destination, on-disk basename)."""
+    clean = _sanitize_file_name(name)
     if not clean or clean in (".", ".."):
         return None
     root = os.path.realpath(_save_dir(store))
+    clean = _fit_file_name(clean, root)
     dest = os.path.realpath(os.path.join(root, clean))
     try:
         if os.path.commonpath((root, dest)) != root:
             return None
     except ValueError:
         return None
-    return root, dest
+    return root, dest, clean
+
+
+def _reserve_destination(root: str, wanted: str) -> tuple[str | None, str]:
+    """Reserve a free path under `root`, auto-suffixing on name collisions.
+
+    A repeated send of the same file name must not fail the transfer: the
+    official clients are used by people who resend "photo.jpg" all the time,
+    and a second PC→board e2e run used to die on 409 "destination exists".
+    Existing files are still never overwritten — the newcomer lands as
+    "photo (1).jpg". O_EXCL makes the pick atomic, so concurrent transfers
+    cannot both claim the same name.
+
+    Returns (path, "") on success and (None, reason) otherwise, so the caller
+    can answer with the real problem instead of blaming a name clash for what
+    is really ENAMETOOLONG or a full disk.
+    """
+    base = os.path.basename(wanted)
+    stem, ext = os.path.splitext(base)
+    if not ext or _encoded_len(ext) > 32 or ext in (".", ".."):
+        stem, ext = base, ""
+    budget = _name_capacity(root) - _SUFFIX_RESERVE
+    for n in range(1000):
+        suffix = "" if n == 0 else f" ({n})"
+        # Reserve room for the collision suffix while fitting the stem; fitting
+        # the already-suffixed name would cut the suffix off the end instead.
+        room = budget - _encoded_len(ext) - _encoded_len(suffix)
+        cur_stem, cur_ext, cur_room = stem, ext, room
+        if cur_room <= 0:
+            cur_stem, cur_ext = stem + ext, ""
+            cur_room = budget - _encoded_len(suffix)
+        fitted_stem = _truncate_to(cur_stem, max(cur_room, 0)).rstrip(" .")
+        name = (fitted_stem or "file") + suffix + cur_ext
+        candidate = os.path.join(root, name)
+        try:
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            continue
+        except OSError as error:
+            # e.g. ENAMETOOLONG or a name the file system still rejects: no
+            # suffix will make it creatable, so stop instead of looping.
+            return None, error.strerror or str(error)
+        os.close(fd)
+        return candidate, ""
+    return None, "too many files with that name"
 
 
 def make_app(store, ident: dict, publish: Callable[[str, dict], None],
@@ -162,6 +352,8 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
         if btype == model.BUBBLE_TEXT and isinstance(content, str):
             store.add_text_bubble(bubble["id"], bubble["from"],
                                   str(bubble.get("to") or ""), content, ts, gid)
+            if gid and _adopt_group(store, ident, gid, bubble["from"]):
+                publish("groupsChanged", {"groupId": gid})
             publish("bubbleChanged", {"bubbleId": bubble["id"], "type": "text",
                                       "groupId": gid})
         elif btype == model.BUBBLE_FILE and isinstance(content, dict):
@@ -186,6 +378,8 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
                 " type, time, group_id) VALUES (?,?,?,3,?,?)",
                 (bubble["id"], bubble["from"], str(bubble.get("to") or ""), ts, gid))
             store.con.commit()
+            if gid and _adopt_group(store, ident, gid, bubble["from"]):
+                publish("groupsChanged", {"groupId": gid})
             publish("bubbleChanged", {"bubbleId": bubble["id"], "type": "file",
                                       "groupId": gid})
             # Only a paired sender may auto-arm the raw /file phase. Unpaired
@@ -522,17 +716,30 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
         if existing_path or not waiting:
             return web.Response(status=409, text="transfer already committed")
         safe = _safe_destination(store, expected_name)
-        if safe is None or os.path.basename(supplied_name.replace("\\", "/")) != os.path.basename(expected_name):
+        # Compare the names the way they will be materialised here: a peer
+        # basename may contain characters this OS rewrites (":" on Windows, a
+        # backslash on both sides), and os.path.basename() splits on the local
+        # separator only. Using the sanitizer keeps `file_name` and the bubble
+        # name in agreement without ever treating a peer's backslash as a path
+        # separator ("back\\slash.txt" used to be reduced to "slash.txt").
+        if safe is None or (_sanitize_file_name(supplied_name)
+                            != _sanitize_file_name(expected_name)):
             return web.Response(status=400, text="bad file name")
-        root, dest = safe
-        if os.path.exists(dest):
-            return web.Response(status=409, text="destination exists")
+        root, dest, _fitted = safe
         declared = _to_int(declared, -1)
         maximum = _max_file_bytes(store)
         if declared < 0 or declared > maximum:
             return web.Response(status=413, text="file too large")
+        # Never overwrite, but don't reject a resend either: reserve a unique
+        # name ("report.pdf" -> "report (1).pdf") before streaming.
         temp_dir = os.path.join(root, ".flix-incoming")
         os.makedirs(temp_dir, exist_ok=True)
+        dest, why = _reserve_destination(root, dest)
+        if dest is None:
+            # Real reason (ENAMETOOLONG, ENOSPC, …) — "destination exists"
+            # made operators chase a name clash that was never there.
+            return web.Response(status=400, text=f"cannot reserve destination: {why}")
+        saved_name = os.path.basename(dest)
         dest_tmp = os.path.join(temp_dir, f"{uuid.uuid4().hex}.part")
         got = 0
         try:
@@ -546,23 +753,26 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
                 os.fsync(f.fileno())
             if got != declared:
                 raise ValueError(f"size mismatch: {got} != {declared}")
-            if os.path.exists(dest):
-                raise FileExistsError(dest)
             os.replace(dest_tmp, dest)
         except (ConnectionResetError, asyncio.CancelledError):
             with contextlib.suppress(OSError):
                 os.unlink(dest_tmp)
+            with contextlib.suppress(OSError):
+                os.unlink(dest)
             return web.Response(status=400, text="transfer aborted")
         except (OSError, ValueError) as error:
             with contextlib.suppress(OSError):
                 os.unlink(dest_tmp)
+            with contextlib.suppress(OSError):
+                os.unlink(dest)
             return web.Response(status=400, text=str(error))
         store.con.execute(
             "UPDATE file_contents SET path=?, progress=1.0, waiting_for_accept=0 WHERE resource_id=?",
             (dest, rid))
         store.con.commit()
         publish("fileReceived", {"resourceId": rid, "name": expected_name,
-                                 "size": declared, "received": got, "path": dest})
+                                 "savedAs": saved_name, "size": declared,
+                                 "received": got, "path": dest})
         return web.Response(text="ok")
 
     async def group_command_post(request: web.Request) -> web.Response:

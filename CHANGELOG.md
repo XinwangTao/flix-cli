@@ -3,6 +3,142 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号与 GitHub Release 标签一致。
 可执行产物见 [Releases](https://github.com/XinwangTao/flix-cli/releases)。
 
+## [未发布]
+
+### 新增
+
+## [2.5.2] - 2026-11-10
+
+### 修复
+- 修正 Linux 上超长文件名测试对单独 `.` 后缀的断言（运行时行为不变：
+  `_fit_file_name` 一直把 `.`/`..` 视为非扩展名）。
+
+## [2.5.1] - 2026-11-10
+
+### 修复
+- 源码 tarball 的绝对路径成员在所有 Python 版本上都会被显式拒绝（3.11.18 的
+  `data_filter` 会静默规整路径而不是报错）。
+- Linux 接收端同名文件第二次落盘时，碰撞后缀不再把已拟合的文件名重新推过
+  `NAME_MAX` 预留预算。
+- 发现报文的属性测试只对已规范化（无首尾空白、非空）的指纹做往返断言。
+
+## [2.5.0] - 2026-11-10
+
+### 新增
+- Android 液态玻璃界面：全屏玉青/蓝紫氛围光，玻璃头部/标签/卡片/输入栏，渐变头像与沉浸系统栏。
+
+### 变更
+- 桌面端按钮改为高对比：主按钮使用玉青渐变填充，次要/普通按钮用实色 accent 描边，
+  hover/focus 填充 `accent_soft`；按钮边界与页面背景达到 WCAG 非文本 3:1。
+
+### 修复
+- 桌面端毛玻璃在失焦时来回切换：默认改回应用自己的模糊快照（随窗口位置裁剪），
+  不再让 Windows 在失焦时停用或替换 Acrylic；设 `RELAYDESK_NATIVE_GLASS=1` 可恢复
+  实时 Acrylic。数据未变的 2.5s 轮询也不再重建侧栏、页脚和设置文本，避免整窗重绘。
+- `/healthz` 在版本检查或剪贴板探测抛异常时仍返回 200，分别回退为
+  `update-info-failed` / `unknown`，部署探针不再误判服务下线。
+- Web 上传按 `max_receive_bytes` 逐文件限流：超限返回 JSON 413 `too-large` 且不落盘，
+  临时文件在失败或异常时删除。
+- 发现报文只接受非空字符串指纹（≤128 字符），把端口归一化到 1–65535，
+  alias/deviceModel/os 截断到 128/64/32；本机 announce 也先截断再发送，畸形对端
+  不再污染设备表与路由。
+- Web 发送页 `/send` 失败时保留输入并显示服务端 `error/detail`；服务端发送异常返回 JSON 502
+  而不是 500。
+- Web 发送页设备下拉每 10s 刷新并保留选择；上传结果显示实际落盘名、转发结果与错误；
+  群列表用文本节点渲染并显示加载失败，群会话显示刷新/发送失败。
+- 版本检查每页取 100 条；镜像返回 200 错误体时校验结构并继续下一个，直连 404 也回退镜像；
+  守护进程启动检查读取 `GITHUB_TOKEN`/`FLIX_GITHUB_TOKEN`。
+- 源码更新在安装前校验 tarball 的 `[project] version` 与 release tag 一致，避免打 tag 未 bump
+  导致重启更新循环。
+- 自动更新按最高版本选 release，而不是 GitHub API 顺序；乱序 backport 与预发布平票都有测试。
+- 自动更新解包拒绝越界成员：release zip / 源码 tarball 中的 `../`、绝对路径、越界链接不再落盘；
+  源码更新改用每次新建的私有临时目录，避免固定 `/tmp` 路径被预建。
+- Android：消息长按现在整行响应；文字消息菜单可复制正文，文件消息可复制路径/文件名。
+- Android：前台服务改为 `connectedDevice` 类型，并持 partial wake lock + HIGH_PERF Wi-Fi 锁；
+  关屏 45s 后 PC→平板文本/文件仍可送达（`relaydesk-bg-file.txt` 32B 落盘）。
+- Android：文件接收在 `MediaStore.openOutputStream()` 返回 null（Android 17/HyperOS）时改用
+  `openFileDescriptor`；前台服务每 30s 自检通道，accept 卡死时重建并重新 announce。
+- 群组状态只在一端生效：GUI 建群会推 `rdGroupSync`，CLI 的 `flix group create --member` /
+  `group add` 只写本机库，于是 PC 上建好群、`group send` 也 `delivered`，板子上
+  `flix group list` 却是空的、`flix group history <gid>` 回 `no-group`——气泡其实已经
+  按 `groupId` 落库，只是没有群行（实测板端积压了多个这样的孤儿群，消息"收到但看不见"）。
+  现在两个 CLI 入口与 GUI 一致：本地写完立即把快照推给成员并报告
+  `delivered/total/results`。接收端再补一层兜底：只收到带 `groupId` 的气泡、从未收到快照时
+  按**已配对发送方**登记最小群组（本机 + 发送方，`rev=0`），线程立刻可查，后续真实快照
+  覆盖占位名与成员表；未配对发送方不建群（同 `/intent` 信任边界）。单测
+  `tests/test_groupchat.py`（`AdoptGroupTests`/`CliGroupPushTests`），e2e 新增
+  “CLI 建群把快照推给板子 / 板子按群查得到跨端群消息 / 板子自动登记只收到气泡的陌生群组”。
+- 对端文件名里的反斜杠被当成路径分隔符：Linux 允许 `back\slash.txt` 是一个普通文件，
+  板上发送后 PC 却落成 `slash.txt`（前缀消失），`a\x.txt` 与 `b\x.txt` 还会撞名成
+  `x (1).txt`；同一套 `os.path.basename(supplied.replace("\\","/"))` 比较也让 POSIX
+  接收端把合法的反斜杠文件名判成 400 `bad file name`。现在只按 `/` 切路径，Windows
+  把 `\` 与其他非法字符一样消毒成 `_`（`back_slash.txt`，前缀保留），POSIX 原样保留；
+  `/file` 的 `file_name` 校验改为比较同一套清洗结果，发送端/气泡里的原名不变。
+  单测 `tests/test_transfer_security.py`，e2e 新增“板→PC 文件名含反斜杠”。
+- 管道输入的正文按控制台代码页解码，中文剪贴板/文本直接发不出去：`flix clipboard <ip> -`
+  用 `sys.stdin.read()`，Windows 上重定向的 stdin 按 cp936 解码，管道里的 UTF-8 中文变成
+  孤立代理字符，随后在 `json.dumps(...).encode("utf-8")` 处抛
+  `UnicodeEncodeError: … '\udcad'` 退出，对端一个字符都收不到（板上 `clipboard.txt`
+  仍是上一次的内容）；`flix send-text` 更连 `-` 都不认，`echo hi | flix send-text <ip> -`
+  把字面量 `-` 发了出去，而且 Windows 命令行 32767 字符上限让长正文根本无法走 argv。
+  现在 CLI 统一用 `_read_stdin_text()`：先按 UTF-8 解码（Windows 控制台本身就是 UTF-8），
+  失败再退回 locale 编码，识别并去掉 UTF-8/UTF-16 BOM，CRLF 折叠成 LF（与旧文本模式一致）；
+  `send-text`、`clipboard`、`group send` 三个入口共用。单测见 `tests/test_cli_stdin.py`，
+  e2e 新增“PC→板 管道文本按 UTF-8 送达（send-text -）”与“PC→板 剪贴板无损（管道输入）”。
+- 以 IP 为 peer 排队的文本永远不重投：`flix send-text 192.168.137.162 …` 在板子还没
+  announce 过时，队列行的 `peer` 就是地址；`outbox.flush` 用 `device_ip(peer)` 只按指纹
+  精确匹配，IP 键每 30 秒都查不到地址、被静默 skip，消息一直 `queued` 到 7 天 TTL 过期
+  （对端其实早已恢复广播）。现在 flush 走 `resolve_target`，把 `ip[:port]` 映射回该地址
+  最新的设备指纹（同 IP 多行取 `seenAt` 最新），并回写队列行与气泡 `to`，接收端拿到的
+  收件人是指纹而不是 IP。实测：PC 上一条 peer=板子 IP 的 queued 行，在板子恢复 announce
+  且 PC 换上新代码后由下一轮 flush 自动送达，`outbox` 显示 `delivered … 364220a6`。
+  单测见 `tests/test_outbox.py`，e2e 新增“以 IP 为 peer 的排队消息在对端出现后送达”。
+- 同机多 flixd 实例（默认 8891 + RelayDesk 的 18991）共用同一指纹时，双方的 30s announce
+  会把对端库里的 `port` 每半分钟改写一次：板子的日志与 `devicesChanged` 反复刷新，消息、
+  剪贴板、outbox 和文件确认在两个端口之间随机落点，停止其中一个实例后要到下一次 announce
+  才能恢复。现在按指纹在 90s 窗口内记录所有 `(ip, port)`，同一 IP 优先选最小端口（协议默认
+  8891），只有已选端口沉默满 90s 才切换；端口变化按心跳处理，不再触发设备更新。
+  `tests/test_presence_announce.py` 覆盖稳定选择与 TTL 切换。
+- 对端文件名只有一个字符的前缀时会被当成 Windows 盘符丢掉：板子发来
+  `a:notes.txt`，接收端 `ntpath.basename` 认为 `a:` 是盘符，落盘名变成 `notes.txt`
+  （多字符前缀如 `linux:colon?.txt` 反而正常，容易误判成“已修好”）。现在按最后一个
+  `/` 手工切分再消毒，`a:notes.txt` → `a_notes.txt`。单测补在
+  `tests/test_transfer_security.py`，e2e 新增“板→PC 单字符前缀文件送达 / 前缀未被当作盘符吞掉”。
+- 按 IP 寻址时把地址当成了对端指纹：`flix shell 192.168.137.162` 明明两端已配对却回
+  `not-paired`，`send-text`/`send`/剪贴板气泡的 `to`（deviceId）也写成 IP，接收端与官方
+  客户端拿不到应有的指纹。`resolve_target` 现在用库内设备表把 `ip`/`ip:port` 映射回指纹
+  （同 IP 多行按 `seenAt` 取最新，显式端口优先），未知地址仍按原样直连。e2e 新增
+  “PC→板 远程执行（按 IP 寻址，需已配对）”，单测见 `tests/test_routing.py`。
+- 仍在广播的设备被 90s TTL 误判离线：`seenAt` 原先只由 `/ping_v2` 探活刷新，收到与上次
+  相同的 announce（突发副本、30s 重发、广播兜底）直接 return，不落库。对端防火墙挡住
+  入站 8891 时探活永远失败，而设备仍在每 30s 广播——它听得见我们、也能主动发消息过来，
+  RelayDesk 却把它画成离线。现在相同 announce 也刷新 `seenAt`（`Store.touch_device`，
+  15s 节流，避免多播+两条广播的突发放大成每包一次写库），`devicesChanged` 与日志仍只在
+  设备新增/模态变化时触发。e2e 新增“重复 announce 续期在线状态（探活不可达仍在线）”，
+  单测见 `tests/test_presence_announce.py`。
+- 长文件名跨端整次传输作废：PC 上的 `长文件名×30.txt`（364 字节）合法，板子 ext4 的
+  `NAME_MAX` 只有 255 字节，接收端 `O_EXCL` 占位抛 `ENAMETOOLONG` 后被吞成
+  409 `destination exists`（正文一个字节都没落盘），发送端只看到 `upload-failed`。
+  现接收端按本机 `PC_NAME_MAX`（Windows 为组件 255，且未开长路径时整条路径 <260）收窄：
+  保留扩展名、在字符边界截断主体、留 8 字节给 `" (n)"` 同名后缀，`fileReceived.savedAs`
+  报实际落盘名；占位失败改报真实原因（`cannot reserve destination: …`）而不是一律 409。
+  e2e 新增 “PC→板 超长文件名送达 / 板端按 NAME_MAX 收窄且内容一致” 两项
+  （`tests/test_transfer_security.py::FileNameLengthTests`）。
+- 板子（Linux）发来 Windows 非法文件名时整次传输作废：`linux:colon?.txt` 里的 `:` 被 NTFS
+  当成数据流分隔符，占位文件建成了 `~/Downloads/linux`，正文收完后 `os.replace` 报
+  WinError 123、接收端回 400 `upload-failed`，发送方以为文件没发出去，磁盘上还留一个空文件。
+  现接收端按本机规则清洗文件名（`<>:"/\|?*`、控制字符、结尾点/空格、`CON/NUL/COM1…` 设备名），
+  气泡与库里的原名不变，`fileReceived.savedAs` 报实际落盘名；POSIX 端不受影响
+  （`tests/test_transfer_security.py`，e2e 新增板→PC 非法名三项）。
+- `scripts/e2e_two_nodes.py` 在简体中文 Windows 控制台上跑到剪贴板项就 traceback
+  （`UnicodeEncodeError: 'gbk' codec can't encode '✓'`），后面 4 项根本没执行却仍以非 0 退出，
+  分不清"没测"和"测挂了"；现脚本统一 UTF-8 输出。同时补了板→PC 文件（含落盘内容与
+  NTFS 空壳检查），端到端从 10 项扩到 14 项。
+- 无头 Linux（QCM6490 板子）收到剪贴板时静默丢弃：`set_clipboard_text()` 在非 Windows 上直接
+  返回，发送方却收到 `{0: success}`。现在 Linux 桌面用 `wl-clipboard`/`xclip`/`xsel`，
+  macOS 用 `pbcopy`，无 GUI 时原子写入 `~/flixcli/clipboard.txt`（0600）并记日志；
+  `/healthz` 新增 `clipboard` 字段报告实际落地方式（`tests/test_clipboard.py`）。
+
 ## [v2.4.0] - 2026-11-09
 
 ### 新增
@@ -115,6 +251,9 @@
 - Android 平板端：页头与分段控件重排、卡片式列表与空状态、会话页视觉统一。
 - 配对后自动补推群快照；修复测试污染真实配置导致收文件静默失败。
 
+[v2.5.2]: https://github.com/XinwangTao/flix-cli/compare/v2.5.1...v2.5.2
+[v2.5.1]: https://github.com/XinwangTao/flix-cli/compare/v2.5.0...v2.5.1
+[v2.5.0]: https://github.com/XinwangTao/flix-cli/compare/v2.4.0...v2.5.0
 [v2.3.0]: https://github.com/XinwangTao/flix-cli/compare/v2.2.1...v2.3.0
 [v2.2.1]: https://github.com/XinwangTao/flix-cli/compare/v2.2.0...v2.2.1
 [v2.2.0]: https://github.com/XinwangTao/flix-cli/compare/v2.1.0...v2.2.0

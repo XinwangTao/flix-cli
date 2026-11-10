@@ -107,6 +107,48 @@ class SendTextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["state"], "queued")
         self.assertEqual(row["attempts"], 1)
 
+    async def test_flush_resolves_ip_keyed_row_to_announced_peer(self):
+        """A message queued towards a bare IP must land once that peer announces.
+
+        Regression: `send-text <ip>` to a peer that was not yet in the device
+        table stored the address as the outbox peer. flush() looked it up with
+        device_ip(peer), which only matches fingerprints, so the row was
+        "skipped" every 30 s until the 7-day TTL -- even though the peer had
+        been announcing the whole time. It also left `to` as an IP, where the
+        protocol expects a fingerprint.
+        """
+        address = "192.168.137.162"
+        self.store.add_outbox(
+            "q3", address, "text",
+            json.dumps({"id": "q3", "from": ME, "to": address, "type": 0,
+                        "content": "later", "time": 1, "groupId": ""}))
+        # The peer announces after the message was queued, on a non-default port.
+        self.store.upsert_device(PEER, alias="peer", ip=address, port=18991)
+        posted = mock.AsyncMock(return_value="received bubble")
+        with mock.patch.object(outbox, "post_bubble", new=posted):
+            result = await outbox.flush(self.store)
+        self.assertEqual(result["sent"], 1)
+        self.assertEqual(result["skipped"], 0)
+        row = self.store.outbox_get("q3")
+        self.assertEqual(row["state"], "delivered")
+        self.assertEqual(row["peer"], PEER)
+        bubble = posted.await_args.args[1]
+        self.assertEqual(bubble["to"], PEER)
+        self.assertEqual(posted.await_args.kwargs["port"], 18991)
+
+    async def test_flush_skips_row_that_is_not_an_address_or_peer(self):
+        """Neither a known peer nor an address: keep the message, never guess."""
+        self.store.add_outbox(
+            "q4", "not-a-peer", "text",
+            json.dumps({"id": "q4", "from": ME, "to": "not-a-peer", "type": 0,
+                        "content": "later", "time": 1, "groupId": ""}))
+        posted = mock.AsyncMock(return_value="received bubble")
+        with mock.patch.object(outbox, "post_bubble", new=posted):
+            result = await outbox.flush(self.store)
+        self.assertEqual(result["skipped"], 1)
+        posted.assert_not_awaited()
+        self.assertEqual(self.store.outbox_get("q4")["state"], "queued")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -46,6 +46,7 @@ reverse/tmp/
 /bigfile2.txt
 /sendtest.txt
 flixd.log
+pc_flixd_*.log
 build_new_rd/
 build_new_flix/
 build_new_flixd/
@@ -58,3 +59,7 @@ dist-macos/
 
 # 工具/调试产物
 .lancer/
+Library/
+
+# e2e artifacts
+/e2e_file.txt

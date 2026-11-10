@@ -26,6 +26,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import urllib.error
@@ -134,7 +135,11 @@ class Asset:
     def from_api(cls, raw: dict) -> "Asset":
         digest = str(raw.get("digest") or "")
         sha = digest.split(":", 1)[1].lower() if digest.startswith("sha256:") else ""
-        return cls(name=str(raw.get("name") or ""), size=int(raw.get("size") or 0),
+        try:
+            size = int(raw.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        return cls(name=str(raw.get("name") or ""), size=size,
                    url=str(raw.get("browser_download_url") or ""), sha256=sha)
 
 
@@ -154,13 +159,17 @@ class Release:
 
     @classmethod
     def from_api(cls, raw: dict) -> "Release":
+        raw_assets = raw.get("assets")
+        if not isinstance(raw_assets, list):
+            raw_assets = []
         return cls(tag=str(raw.get("tag_name") or ""),
                    name=str(raw.get("name") or ""),
                    prerelease=bool(raw.get("prerelease")),
                    draft=bool(raw.get("draft")),
                    url=str(raw.get("html_url") or ""),
                    body=str(raw.get("body") or "")[:2000],
-                   assets=[Asset.from_api(a) for a in raw.get("assets") or []])
+                   assets=[Asset.from_api(a) for a in raw_assets
+                           if isinstance(a, dict)])
 
 
 class UpdateError(RuntimeError):
@@ -183,20 +192,38 @@ def _open(url: str, *, token: str | None = None, timeout: float = 20.0):
 
 
 def fetch_releases(repo: str = REPO_DEFAULT, *, api_base: str = API_DEFAULT,
-                   token: str | None = None, per_page: int = 10,
+                   token: str | None = None, per_page: int = 100,
                    mirrors: tuple[str, ...] = MIRRORS) -> list[Release]:
-    """Newest-first releases, or UpdateError('network') with the reason kept."""
+    """Newest-first releases, or UpdateError('network') with the reason kept.
+
+    GitHub caps a page at 100. Asking for only 10 could hide the latest stable
+    release behind ten newer prereleases or drafts, so the updater would never
+    offer it.
+    """
+    per_page = max(1, min(int(per_page), 100))
     url = f"{api_base.rstrip('/')}/repos/{repo}/releases?per_page={per_page}"
     attempts = [url] + [f"{m.rstrip('/')}/{url}" for m in mirrors]
     errors: list[str] = []
+    not_found = 0
     for candidate in attempts:
         try:
             with _open(candidate, token=token) as response:
                 payload = json.loads(response.read().decode("utf-8"))
+            # A mirror can return a 200 with a rate-limit/error object. Without
+            # this check the list comprehension dies with AttributeError and
+            # the remaining mirrors are never tried.
+            if not isinstance(payload, list) or not all(
+                    isinstance(item, dict) for item in payload):
+                raise ValueError(
+                    f"unexpected releases payload ({type(payload).__name__})")
             return [Release.from_api(item) for item in payload]
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
-                raise UpdateError("no-releases", f"{repo} 没有 release", EXIT_NETWORK) from exc
+                # A middlebox/proxy can 404 the direct API; the next mirror may
+                # still work. Only report no-releases when every attempt 404s.
+                not_found += 1
+                errors.append(f"{candidate} -> HTTP 404")
+                continue
             hint = ""
             if exc.code in (403, 429):
                 reset = exc.headers.get("X-RateLimit-Reset") if exc.headers else None
@@ -206,17 +233,24 @@ def fetch_releases(repo: str = REPO_DEFAULT, *, api_base: str = API_DEFAULT,
             errors.append(f"{candidate} -> HTTP {exc.code} {hint}")
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
             errors.append(f"{candidate} -> {exc}")
+    if errors and not_found == len(attempts):
+        raise UpdateError("no-releases", f"{repo} 没有 release", EXIT_NETWORK)
     raise UpdateError("network", "; ".join(errors) or "所有镜像均不可用", EXIT_NETWORK)
 
 
 def pick_release(releases: list[Release], *, include_prerelease: bool = False) -> Release:
-    for release in releases:
-        if release.draft:
-            continue
-        if release.prerelease and not include_prerelease:
-            continue
-        return release
-    raise UpdateError("no-releases", "没有可用的正式 release", EXIT_NETWORK)
+    """Highest published version, not merely the most recently created one.
+
+    The GitHub API returns ``created_at`` order. A backport published after a
+    newer line (e.g. 2.3.1 then a 2.3.0 rebuild) therefore appears first, and
+    taking that entry would hide the higher version forever. Version ties go to
+    the stable tag so ``--prerelease`` still prefers 2.3.0 over 2.3.0-rc1.
+    """
+    eligible = [r for r in releases
+                if not r.draft and (include_prerelease or not r.prerelease)]
+    if not eligible:
+        raise UpdateError("no-releases", "没有可用的正式 release", EXIT_NETWORK)
+    return max(eligible, key=lambda r: (r.version, not r.prerelease))
 
 
 def pick_asset(release: Release, *, pattern: str | None = None) -> Asset:
@@ -303,6 +337,81 @@ class Payload:
     path: Path         # exe file, or the extracted tree root
 
 
+def _inside(root: Path, path: Path) -> bool:
+    """True when ``path`` is ``root`` or one of its descendants."""
+    return path == root or root in path.parents
+
+
+def _safe_extract_zip(archive: Path, workdir: Path) -> list[str]:
+    """Extract a release zip, refusing members that escape ``workdir``.
+
+    The zip comes from the network and auto-update runs as root on a board, so
+    a member named ``../x`` (zip-slip) must never be written outside the
+    disposable staging directory. Returns the file members for layout detection.
+    """
+    workdir = workdir.resolve()
+    try:
+        with zipfile.ZipFile(archive) as zf:
+            bad = zf.testzip()
+            if bad:
+                raise UpdateError("bad-archive", f"zip 损坏: {bad}", EXIT_INSTALL)
+            for info in zf.infolist():
+                target = (workdir / info.filename).resolve()
+                if not _inside(workdir, target):
+                    raise UpdateError("bad-archive",
+                                      f"zip 成员越界: {info.filename}", EXIT_INSTALL)
+            names = [info.filename for info in zf.infolist() if not info.is_dir()]
+            zf.extractall(workdir)
+            return names
+    except UpdateError:
+        raise
+    except (zipfile.BadZipFile, OSError, ValueError) as exc:
+        raise UpdateError("bad-archive", f"zip 无法解包: {exc}", EXIT_INSTALL) from exc
+
+
+def _check_tar_members(tar: tarfile.TarFile, workdir: Path) -> None:
+    """Fallback containment checks for interpreters without ``data_filter``."""
+    for member in tar.getmembers():
+        target = (workdir / member.name).resolve()
+        if not _inside(workdir, target):
+            raise UpdateError("bad-archive",
+                              f"tar 成员越界: {member.name}", EXIT_INSTALL)
+        if member.isdev():
+            raise UpdateError("bad-archive",
+                              f"tar 含设备节点: {member.name}", EXIT_INSTALL)
+        if member.issym() or member.islnk():
+            link = (target.parent / member.linkname).resolve()
+            if not _inside(workdir, link):
+                raise UpdateError(
+                    "bad-archive",
+                    f"tar 链接越界: {member.name} -> {member.linkname}",
+                    EXIT_INSTALL)
+
+
+def _safe_extract_tar(archive: Path, workdir: Path) -> None:
+    """Extract a source tarball with the same containment guarantee as zips.
+
+    Python 3.11.4+/3.12 (what the board runs) has ``filter="data"``: reject
+    absolute paths, ``..``, device nodes and links that leave the destination.
+    Older interpreters get the same checks by hand.
+    """
+    workdir = workdir.resolve()
+    try:
+        with tarfile.open(archive, "r:gz") as tar:
+            # Check first even when data_filter exists: newer CPython versions
+            # normalize an absolute member instead of raising, so the explicit
+            # containment gate is the behaviour every interpreter shares.
+            _check_tar_members(tar, workdir)
+            if hasattr(tarfile, "data_filter"):
+                tar.extractall(workdir, filter="data")
+            else:
+                tar.extractall(workdir)
+    except UpdateError:
+        raise
+    except (tarfile.TarError, OSError, ValueError) as exc:
+        raise UpdateError("bad-archive", f"tar 无法解包: {exc}", EXIT_INSTALL) from exc
+
+
 def extract_payload(archive: str | Path, workdir: str | Path, *,
                     exe_name: str = EXE_NAME) -> Payload:
     """Unpack and decide whether the zip is one exe or a directory tree.
@@ -312,12 +421,7 @@ def extract_payload(archive: str | Path, workdir: str | Path, *,
     """
     archive, workdir = Path(archive), Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(archive) as zf:
-        bad = zf.testzip()
-        if bad:
-            raise UpdateError("bad-archive", f"zip 损坏: {bad}", EXIT_INSTALL)
-        names = [info.filename for info in zf.infolist() if not info.is_dir()]
-        zf.extractall(workdir)
+    names = _safe_extract_zip(archive, workdir)
     target = exe_name.lower()
     matches = [n for n in names if Path(n).name.lower() == target]
     if not matches:
@@ -869,3 +973,129 @@ def _probe_version(exe: Path) -> str | None:
     text = (completed.stdout or "") + (completed.stderr or "")
     version = parse_version(text)
     return ".".join(str(p) for p in version) if version else None
+
+# ---------------------------------------------------------------- startup check
+
+def check_update(repo: str = REPO_DEFAULT, current: str | None = None,
+                 *, token: str | None = None) -> dict:
+    """Latest release vs installed version; never raises.
+
+    flixd calls this at every start so a stale daemon on a board says so in its
+    own log and in /healthz instead of silently running last month's build.
+    A token avoids GitHub's 60 requests/hour per-IP limit; an explicit value
+    wins, otherwise GITHUB_TOKEN / FLIX_GITHUB_TOKEN is read.
+    """
+    from . import __version__ as installed
+
+    token = (token or os.environ.get("GITHUB_TOKEN")
+             or os.environ.get("FLIX_GITHUB_TOKEN") or None)
+    cur = current or installed
+    try:
+        release = pick_release(fetch_releases(repo, token=token))
+    except UpdateError as exc:
+        return {"ok": False, "error": exc.kind, "detail": exc.detail, "current": cur}
+    return {
+        "ok": True,
+        "current": cur,
+        "latest": release.tag.lstrip("vV"),
+        "tag": release.tag,
+        "available": compare_versions(release.tag, cur) > 0,
+        "url": release.url,
+    }
+
+
+def _source_version(root: Path) -> str | None:
+    """Static ``[project] version`` from an extracted source tree, if any."""
+    try:
+        import tomllib
+        data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    except (ImportError, OSError, ValueError):
+        return None
+    project = data.get("project") if isinstance(data, dict) else None
+    version = project.get("version") if isinstance(project, dict) else None
+    return str(version) if version else None
+
+
+def install_from_source(tag: str, repo: str = REPO_DEFAULT,
+                        workdir: str | Path | None = None) -> str:
+    """Download the GitHub source tarball for `tag` and install it in place.
+
+    Used on Linux boxes that run from source (board deployments): the published
+    binaries are x86_64/Windows only, so the source tarball is the update.
+    Returns the installed version string.
+
+    Each run gets a fresh private directory; ``workdir`` is only its parent.
+    A fixed, world-writable staging path (the old ``/tmp/flixcli-update``) could
+    be pre-created as a symlink and have its target wiped before extraction.
+    """
+    parent = Path(workdir).expanduser() if workdir else None
+    if parent is not None:
+        parent.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix="flixcli-update-",
+                                 dir=str(parent) if parent else None))
+    try:
+        url = f"https://api.github.com/repos/{repo}/tarball/{tag}"
+        archive = work / "source.tar.gz"
+        with _open(url) as resp, open(archive, "wb") as fh:
+            while True:
+                chunk = resp.read(1 << 16)
+                if not chunk:
+                    break
+                fh.write(chunk)
+        _safe_extract_tar(archive, work)
+        roots = [p for p in work.iterdir() if p.is_dir()]
+        packages = [p for p in roots if (p / "pyproject.toml").is_file()]
+        roots = packages or roots
+        if not roots:
+            raise UpdateError("bad-archive", "源码包里没有目录", EXIT_INSTALL)
+        src = roots[0]
+
+        # A tag without a matching version bump would install code that still
+        # reports the old version, so the daemon restarts, sees the update
+        # again and loops forever. Fail before pip touches the venv.
+        declared = _source_version(src)
+        expected = ".".join(str(part) for part in parse_version(tag))
+        if declared and expected and compare_versions(declared, expected) != 0:
+            raise UpdateError(
+                "version-mismatch",
+                f"tag {tag} 的源码包版本是 {declared}，拒绝安装（会导致更新循环）",
+                EXIT_INSTALL)
+
+        uv = _find_uv()
+        if uv:
+            cmd = [uv, "pip", "install", "--python", sys.executable,
+                   "--reinstall", str(src)]
+        else:
+            # uv 建的 venv 默认没有 pip：先补一个再说
+            # uv/pip spew UTF-8 (paths may contain non-ASCII: 用户目录、中文路径);
+            # text=True 会按 Windows 本地代码页解码并在更新自检里抛 UnicodeDecodeError。
+            subprocess.run([sys.executable, "-m", "ensurepip", "--upgrade"],
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=300)
+            cmd = [sys.executable, "-m", "pip", "install", "--force-reinstall",
+                   "--no-input", str(src)]
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=600)
+        if proc.returncode != 0:
+            raise UpdateError("install-failed", (proc.stderr or proc.stdout)[-400:])
+        return tag.lstrip("vV")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def shutil_which(name: str) -> str | None:
+    import shutil
+    return shutil.which(name)
+
+
+def _find_uv() -> str | None:
+    """systemd 服务的 PATH 很短，uv 常在用户目录里，得自己找。"""
+    import shutil
+    found = shutil.which("uv")
+    if found:
+        return found
+    for candidate in ("/root/.local/bin/uv", "/usr/local/bin/uv",
+                      str(Path.home() / ".local/bin/uv")):
+        if Path(candidate).exists():
+            return candidate
+    return None

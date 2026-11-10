@@ -8,69 +8,23 @@ import subprocess
 import sys
 from pathlib import Path
 
-# The daemon runs inside the windowed exe (no console). Windows gives every
-# console child (clip.exe) a brand-new visible terminal unless suppressed;
-# 0 on non-Windows keeps Popen happy there.
-NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
 from . import DEVICE_PORT, is_port_text, local_ip, model
+from . import clipboard
+
+# 启动时检查 GitHub 最新 release 的结果，/healthz 直接读它
+UPDATE_STATE: dict = {}
 from .adb import AdbClient
 from .media_session import SessionManager
 from .media_transport import MediaRuntime
 from .channel import PeerError, ping_v2, post_bubble, post_intent
 from .desktop_api import serve_desktop_api
-from .discovery import Discovery
+from .discovery import Discovery, EndpointTracker
 from .server import serve_channel
 
-
-async def set_clipboard_text(text: str) -> None:
-    """Best-effort clipboard write; clip.exe understands UTF-16LE with BOM."""
-    if not sys.platform.startswith("win"):
-        return
-    proc = await asyncio.create_subprocess_exec(
-        "clip", stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-        creationflags=NO_WINDOW)
-    data = text.encode("utf-16-le")
-    try:
-        await asyncio.wait_for(proc.communicate(b"\xff\xfe" + data), timeout=3)
-    except (asyncio.TimeoutError, Exception):
-        with contextlib.suppress(Exception):
-            proc.kill()
-
-
-def read_clipboard() -> str | None:
-    """Local clipboard text via user32 (CF_UNICODETEXT); None if empty/error."""
-    if not sys.platform.startswith("win"):
-        return None
-    import ctypes
-    from ctypes import wintypes
-    u32 = ctypes.windll.user32
-    k32 = ctypes.windll.kernel32
-    CF_UNICODETEXT = 13
-    # Handles/pointers come back as 64-bit values; without explicit restypes
-    # ctypes truncates them to 32-bit c_int and reads garbage -- observed as
-    # random access violations in wstring_at (0x7F591B90-style addresses).
-    u32.GetClipboardData.argtypes = [wintypes.UINT]
-    u32.GetClipboardData.restype = wintypes.HANDLE
-    k32.GlobalLock.argtypes = [wintypes.HGLOBAL]
-    k32.GlobalLock.restype = wintypes.LPVOID
-    k32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
-    if not u32.OpenClipboard(0):
-        return None
-    try:
-        h = u32.GetClipboardData(CF_UNICODETEXT)
-        if not h:
-            return None
-        p = k32.GlobalLock(h)
-        if not p:
-            return None
-        try:
-            return ctypes.wstring_at(p)
-        finally:
-            k32.GlobalUnlock(h)
-    finally:
-        u32.CloseClipboard()
+# Kept as thin aliases: the clipboard backends moved to flixcli.clipboard so
+# the web health probe can report them without importing this runtime.
+read_clipboard = clipboard.read_text
+set_clipboard_text = clipboard.write_text
 
 
 async def clip_sync_loop(store, ident: dict, state: dict,
@@ -110,14 +64,76 @@ async def clip_sync_loop(store, ident: dict, state: dict,
                   file=sys.stderr, flush=True)
 
 
+def record_announce(store, ident: dict, devices: dict[str, dict],
+                    dev: dict, endpoints=None, now_ms: int | None = None) -> bool:
+    """Fold one discovery datagram into the device table.
+
+    Returns True only when the device is new or its modal changed; callers use
+    that to publish devicesChanged and log the sighting. An identical announce
+    is still a heartbeat: bursts and the 30s re-announce arrive over multicast
+    plus the broadcast fallback, so the row would otherwise be touched many
+    times per minute. ``touch_device`` throttles that to one write per 15s and
+    keeps seenAt fresh even when the peer's inbound TCP 8891 is firewalled and
+    our /ping_v2 probe can never reach it (presence must not read offline for
+    a host that keeps announcing every 30s).
+
+    ``endpoints`` (an EndpointTracker) keeps one TCP port per fingerprint when
+    the same identity announces from several local daemons, e.g. 8891 and
+    RelayDesk's coexisting 18991. Without it the row's port follows whichever
+    instance announced last, twice a minute.
+    """
+    fp = dev.get("fingerprint")
+    if not fp or fp == ident["fingerprint"]:
+        return False
+    if endpoints is not None:
+        ip = str(dev.get("ip") or dev.get("source") or "")
+        try:
+            port = int(dev.get("port") or 0)
+        except (TypeError, ValueError):
+            port = 0
+        endpoints.remember(fp, ip, port, now_ms)
+        selected = endpoints.select(fp, ip, now_ms)
+        if selected and (selected[0], selected[1]) != (ip, port):
+            # Keep the announce's alias/model/version but route to the stable
+            # port. The next datagram from the other instance then normalizes
+            # to the same dict and is treated as an ordinary heartbeat.
+            dev = dict(dev, ip=selected[0], port=selected[1])
+    if devices.get(fp) == dev:
+        store.touch_device(fp)
+        return False
+    devices[fp] = dev
+    store.upsert_device(fp, alias=dev.get("alias", ""),
+                        device_model=dev.get("deviceModel", ""),
+                        port=dev.get("port"), version=dev.get("version"),
+                        ip=dev.get("ip", ""), os_name=dev.get("os", ""))
+    return True
+
+
 async def run_daemon(store, ident, device_port: int, api_port: int,
                      announce: bool = True, clip_sync: bool = True,
                      web_port: int = 0, multicast_if: str | None = None) -> int:
     devices: dict[str, dict] = {}
+    endpoints = EndpointTracker()
     verify_pending: set[str] = set()
 
+    def _ingest(dev: dict) -> None:
+        """Fold one announce in; also refreshes presence for identical ones."""
+        fp = dev.get("fingerprint")
+        try:
+            changed = record_announce(store, ident, devices, dev, endpoints)
+        except Exception as e:  # noqa: BLE001 - 一个坏行的写失败不该杀掉收包路径
+            print(f"[store] {e}", file=sys.stderr, flush=True)
+            return
+        if not changed:
+            return
+        if api_publish:
+            api_publish({"type": "devicesChanged",
+                         "payload": list(devices.values())})
+        print(f"[discover] {dev.get('alias')} ({fp[:8]}) at "
+              f"{dev.get('ip')}:{dev.get('port')}", file=sys.stderr, flush=True)
+
     async def _verify_moved_device(dev: dict) -> None:
-        """An announce may not move an already-known peer on its own.
+        """An announce may not move an already-known paired peer on its own.
 
         Announce datagrams are unsigned: anyone can claim a paired
         fingerprint and redirect routing (and outbox retries) to themselves.
@@ -138,11 +154,7 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
             print(f"[discover] ignored IP move for {fp[:8]}: identity mismatch",
                   file=sys.stderr, flush=True)
             return
-        devices[fp] = dev
-        store.upsert_device(fp, alias=dev.get("alias", ""),
-                            device_model=dev.get("deviceModel", ""),
-                            port=dev.get("port"), version=dev.get("version"),
-                            ip=ip, os_name=dev.get("os", ""))
+        _ingest(dev)
         print(f"[discover] {dev.get('alias')} ({fp[:8]}) moved to "
               f"{ip}:{port}", file=sys.stderr, flush=True)
 
@@ -150,9 +162,9 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
         fp = dev.get("fingerprint")
         if not fp or fp == ident["fingerprint"]:
             return
-        if devices.get(fp) == dev:
-            return
-        old_ip = store.device_ip(fp)[0]
+        # Only a paired identity needs the move challenge; unpaired peers can
+        # legitimately alternate between interfaces (Wi-Fi + Ethernet).
+        old_ip = store.device_ip(fp)[0] if store.is_paired(fp) else ""
         new_ip = dev.get("ip", "")
         if old_ip and new_ip and old_ip != new_ip:
             if fp not in verify_pending:
@@ -162,22 +174,9 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
                         _verify_moved_device(dev))
                 except RuntimeError:  # callback outside the loop
                     verify_pending.discard(fp)
-                    devices[fp] = dev
+                    _ingest(dev)
             return
-        devices[fp] = dev
-        try:
-            store.upsert_device(fp, alias=dev.get("alias", ""),
-                                device_model=dev.get("deviceModel", ""),
-                                port=dev.get("port"), version=dev.get("version"),
-                                ip=dev.get("ip", ""), os_name=dev.get("os", ""))
-        except Exception as e:
-            print(f"[store] {e}", file=sys.stderr, flush=True)
-            return
-        if api_publish:
-            api_publish({"type": "devicesChanged",
-                         "payload": list(devices.values())})
-        print(f"[discover] {dev.get('alias')} ({fp[:8]}) at "
-              f"{dev.get('ip')}:{dev.get('port')}", file=sys.stderr, flush=True)
+        _ingest(dev)
 
     def resolve(to: str) -> tuple[str | None, int, str]:
         """fingerprint (exact/prefix) or ip[:port] -> (ip, port, fingerprint)."""
@@ -216,10 +215,19 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
         return result
 
     clip_state = {"last_set": None}
+    # Headless Linux (board) has no clipboard; the shared backend spools the
+    # text here so a remote clipboard send is no longer a silent no-op.
+    clip_spool = Path(store.path).parent / "clipboard.txt"
 
     async def _set_clipboard(text: str) -> None:
-        await set_clipboard_text(text)
+        sink = await clipboard.awrite_text(text, clip_spool)
         clip_state["last_set"] = text   # suppress our own echo in clip_sync
+        if sink.startswith("file:"):
+            print(f"[clip-sync] no GUI clipboard; stored {len(text)} chars in "
+                  f"{sink[5:]}", file=sys.stderr, flush=True)
+        elif not sink:
+            print("[clip-sync] clipboard write failed on this host",
+                  file=sys.stderr, flush=True)
 
     from .webrtc import SignalHub, make_signal_app
     hub = SignalHub()
@@ -275,7 +283,8 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
 
         wapp, _push = make_web_app(store, ident, _on_web_text, _save_dir,
                                    channel_port=device_port,
-                                   send_text_fn=send_text)
+                                   send_text_fn=send_text,
+                                   update_info=lambda: UPDATE_STATE)
         wr = _web.AppRunner(wapp)
         await wr.setup()
         await _web.TCPSite(wr, "0.0.0.0", web_port).start()
@@ -308,11 +317,54 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
         try:
             while True:
                 await asyncio.sleep(30)
+                try:
+                    # 板子换网（网线拔插/热点回退）后组播成员关系会失效，
+                    # TCP 还通但对端再也收不到 announce —— 每轮先核对出口网卡。
+                    await disc.refresh_iface()
+                except Exception as e:  # noqa: BLE001 - 探测失败不该拖垮守护进程
+                    print(f"[discovery] interface refresh failed: {e}",
+                          file=sys.stderr, flush=True)
                 await asyncio.to_thread(disc.announce, ident, 2, device_port)
         except asyncio.CancelledError:
             pass
 
     tasks.append(asyncio.create_task(announce_loop()))
+
+    async def update_check_task() -> None:
+        """每次启动查一次 GitHub release；FLIX_AUTO_UPDATE=1 时自动装源码包并重启。"""
+        import os
+        from .autoupdate import check_update
+        try:
+            info = await asyncio.to_thread(check_update)
+        except Exception as exc:  # noqa: BLE001 - 检查失败不影响主服务
+            info = {"ok": False, "error": str(exc)}
+        UPDATE_STATE.update(info)
+        print("[flixd] 版本检查: 当前 %s 最新 %s%s" % (
+            info.get("current"), info.get("latest") or "未知",
+            "（有新版本）" if info.get("available") else "（已是最新）"),
+            file=sys.stderr, flush=True)
+        if info.get("available") and os.environ.get("FLIX_AUTO_UPDATE") == "1":
+            await asyncio.to_thread(_apply_update, info.get("tag") or "")
+
+    def _apply_update(tag: str) -> None:
+        import os
+        from .autoupdate import install_from_source
+        try:
+            version = install_from_source(tag)
+        except Exception as exc:  # noqa: BLE001
+            print("[flixd] 自动更新失败: %s" % exc, file=sys.stderr, flush=True)
+            UPDATE_STATE["error"] = str(exc)
+            return
+        print("[flixd] 已更新到 %s，重启服务" % version, file=sys.stderr, flush=True)
+        if subprocess.run(["systemctl", "is-active", "flixd"],
+                          capture_output=True).returncode == 0:
+            subprocess.Popen(["systemctl", "restart", "flixd"])
+        else:
+            os.execv(sys.executable, [sys.executable, *sys.argv])
+
+    tasks.append(asyncio.create_task(update_check_task()))
+    print("[flixd] 启动时检查更新", file=sys.stderr, flush=True)
+
     print("[flixd] periodic announce every 30s", file=sys.stderr, flush=True)
 
     async def agent_outbox_loop() -> None:

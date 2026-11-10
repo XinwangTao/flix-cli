@@ -24,6 +24,10 @@ SANE = settings(max_examples=40, deadline=None,
 
 TEXT = st.text(max_size=64)
 BINARY = st.binary(max_size=256)
+# The receiver trims fingerprints and rejects whitespace-only ones, so a
+# roundtrip only makes sense for values that are already normalized.
+FINGERPRINT = st.text(min_size=1, max_size=16).filter(
+    lambda value: value == value.strip())
 
 
 class FakeStore:
@@ -43,7 +47,7 @@ def test_parse_datagram_never_raises(data: bytes) -> None:
 
 
 @given(st.text(max_size=64), st.integers(min_value=1, max_value=65535),
-       st.text(min_size=1, max_size=16))
+       FINGERPRINT)
 @SANE
 def test_announce_roundtrip(alias: str, port: int, fp: str) -> None:
     ident = {"alias": alias, "fingerprint": fp, "os": "windows"}

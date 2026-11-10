@@ -298,7 +298,24 @@ class ChannelServer(
             onProgress(JSONObject().put("from", sender).put("rid", rid)
                 .put("name", cleanName).put("got", 0L)
                 .put("total", declared).put("done", false))
-            resolver.openOutputStream(uri)?.use { out ->
+            // HyperOS/Android 17 can return null from openOutputStream() for a
+            // freshly inserted Downloads row (no all-files access). Ask for a
+            // file descriptor explicitly before giving up.
+            val output: java.io.OutputStream = resolver.openOutputStream(uri)
+                ?: run {
+                    val pfd = resolver.openFileDescriptor(uri, "w")
+                        ?: throw IllegalStateException("no output stream")
+                    object : java.io.FileOutputStream(pfd.fileDescriptor) {
+                        override fun close() {
+                            try {
+                                super.close()
+                            } finally {
+                                pfd.close()
+                            }
+                        }
+                    }
+                }
+            output.use { out ->
                 val local = localCopy?.let { java.io.FileOutputStream(it) }
                 // NO .use on the session stream: closing it closes the whole
                 // socket before NanoHTTPD can deliver the response.
@@ -334,7 +351,7 @@ class ChannelServer(
                 out.flush()
                 local?.flush()
                 local?.close()
-            } ?: throw IllegalStateException("no output stream")
+            }
             if (got != declared) {
                 throw IllegalStateException("size mismatch: $got != $declared")
             }

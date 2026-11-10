@@ -183,6 +183,10 @@ capfull2.pcapng verbatim（官方客户端 → 对端（Peer-A），剪贴板同
   meta.resourceId 为空、share_id=<bubbleId> 完成传输 [RT 2026-05-15]）。
 - **接收端原子写**：传输中写 `<name>.flixdownload`，完成后呈现最终名
   [RT 2026-05-15]；flix-cli server.py /file 已对齐（os.replace）。
+- **同名文件不覆盖**：接收目录已有 `<name>` 时 flix-cli 在流式写之前用
+  `O_CREAT|O_EXCL` 预留 `name (1).ext`、`name (2).ext`… 再落盘，旧文件字节不变，
+  发送方仍得到 200。官方 409 语义未观测到；flix-cli 旧实现直接 409 会让
+  「重发同名文件」失败（PC→板 e2e 第二次运行即复现）。
 - FileTransfer toString 新版含 `hash: null` 字段（content 可带 hash，非必需）。
 - 官方 add-device 日志 verbatim：`_receivePingV2 from "{...}"`（body 双重编码）
   + `add device success DeviceModal(alias:..., deviceType: DeviceType.desktop,...)`。
