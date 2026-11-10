@@ -398,11 +398,14 @@ def _safe_extract_tar(archive: Path, workdir: Path) -> None:
     workdir = workdir.resolve()
     try:
         with tarfile.open(archive, "r:gz") as tar:
+            # Check first even when data_filter exists: newer CPython versions
+            # normalize an absolute member instead of raising, so the explicit
+            # containment gate is the behaviour every interpreter shares.
+            _check_tar_members(tar, workdir)
             if hasattr(tarfile, "data_filter"):
                 tar.extractall(workdir, filter="data")
-                return
-            _check_tar_members(tar, workdir)
-            tar.extractall(workdir)
+            else:
+                tar.extractall(workdir)
     except UpdateError:
         raise
     except (tarfile.TarError, OSError, ValueError) as exc:

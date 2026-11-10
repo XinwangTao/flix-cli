@@ -284,8 +284,21 @@ def _reserve_destination(root: str, wanted: str) -> tuple[str | None, str]:
     """
     base = os.path.basename(wanted)
     stem, ext = os.path.splitext(base)
+    if not ext or _encoded_len(ext) > 32 or ext in (".", ".."):
+        stem, ext = base, ""
+    budget = _name_capacity(root) - _SUFFIX_RESERVE
     for n in range(1000):
-        candidate = os.path.join(root, base if n == 0 else f"{stem} ({n}){ext}")
+        suffix = "" if n == 0 else f" ({n})"
+        # Reserve room for the collision suffix while fitting the stem; fitting
+        # the already-suffixed name would cut the suffix off the end instead.
+        room = budget - _encoded_len(ext) - _encoded_len(suffix)
+        cur_stem, cur_ext, cur_room = stem, ext, room
+        if cur_room <= 0:
+            cur_stem, cur_ext = stem + ext, ""
+            cur_room = budget - _encoded_len(suffix)
+        fitted_stem = _truncate_to(cur_stem, max(cur_room, 0)).rstrip(" .")
+        name = (fitted_stem or "file") + suffix + cur_ext
+        candidate = os.path.join(root, name)
         try:
             fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:

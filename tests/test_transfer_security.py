@@ -14,7 +14,8 @@ from aiohttp import ClientSession, web
 from flixcli.config import Store
 from flixcli.model import BUBBLE_FILE
 from flixcli.server import (_SUFFIX_RESERVE, _encoded_len, _fit_file_name,
-                            _name_capacity, _sanitize_file_name, make_app)
+                            _name_capacity, _reserve_destination,
+                            _sanitize_file_name, make_app)
 
 
 class FileNameSanitizeTests(unittest.TestCase):
@@ -78,6 +79,23 @@ class FileNameLengthTests(unittest.TestCase):
     @staticmethod
     def _budget(root) -> int:
         return _name_capacity(root) - _SUFFIX_RESERVE
+
+    def test_collision_suffix_stays_inside_the_name_budget(self):
+        """A second send must not push the fitted name past the reserve.
+
+        The first fit leaves 8 bytes for " (n)"; appending the suffix to an
+        already-maxed name produced a 251-byte component on Linux (budget
+        247) and failed the receiver's own guarantee.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.realpath(tmp)
+            budget = _name_capacity(root) - _SUFFIX_RESERVE
+            name = _fit_file_name("x" * 400 + ".txt", root)
+            (Path(root) / name).write_bytes(b"first")
+            path, reason = _reserve_destination(root, name)
+            self.assertTrue(path, reason)
+            self.assertLessEqual(
+                _encoded_len(os.path.basename(path)), budget)
 
     def test_long_name_is_fitted_not_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
