@@ -7,6 +7,12 @@
 
 ### 新增
 
+## [2.5.2] - 2026-11-10
+
+### 修复
+- 修正 Linux 上超长文件名测试对单独 `.` 后缀的断言（运行时行为不变：
+  `_fit_file_name` 一直把 `.`/`..` 视为非扩展名）。
+
 ## [2.5.1] - 2026-11-10
 
 ### 修复
@@ -245,6 +251,7 @@
 - Android 平板端：页头与分段控件重排、卡片式列表与空状态、会话页视觉统一。
 - 配对后自动补推群快照；修复测试污染真实配置导致收文件静默失败。
 
+[v2.5.2]: https://github.com/XinwangTao/flix-cli/compare/v2.5.1...v2.5.2
 [v2.5.1]: https://github.com/XinwangTao/flix-cli/compare/v2.5.0...v2.5.1
 [v2.5.0]: https://github.com/XinwangTao/flix-cli/compare/v2.4.0...v2.5.0
 [v2.3.0]: https://github.com/XinwangTao/flix-cli/compare/v2.2.1...v2.3.0
