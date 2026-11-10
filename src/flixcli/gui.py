@@ -923,6 +923,12 @@ class MainWindow(QMainWindow):
         """
         if sys.platform != "win32":
             return False
+        if os.environ.get("RELAYDESK_NATIVE_GLASS", "").strip().lower() not in (
+                "1", "true", "yes"):
+            # Windows disables Acrylic for an inactive window, so the material
+            # visibly flips whenever focus moves. The app's own blurred still
+            # stays constant; opt into the live DWM surface explicitly.
+            return False
         try:
             hwnd = int(self.winId())
             dwm = ctypes.windll.dwmapi
