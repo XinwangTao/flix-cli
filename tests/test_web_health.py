@@ -1,9 +1,17 @@
 """Health probe payload used by deploy checks and monitoring."""
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
-from flixcli.webapp import health_payload
+from aiohttp.test_utils import TestClient, TestServer
+
+from flixcli.config import Store
+from flixcli.webapp import health_payload, make_web_app
+
+ME = {"fingerprint": "self-fp", "alias": "me", "deviceModel": "Windows"}
 
 
 class HealthPayloadTests(unittest.TestCase):
@@ -29,6 +37,45 @@ class HealthPayloadTests(unittest.TestCase):
                            channel_port=1)
         self.assertEqual(p["alias"], "")
         self.assertEqual(p["fingerprint"], "")
+
+
+class HealthRouteTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name) / "case"
+        self.root.mkdir()
+        self.store = Store(self.root / "db.sqlite")
+        self.store.set_pref("saveDir", str(self.root / "downloads"))
+
+        def bad_update():
+            raise RuntimeError("boom")
+
+        app, _push = make_web_app(
+            self.store, ME, lambda *_: None,
+            lambda: str(self.root / "downloads"), 8891,
+            update_info=bad_update)
+        self.client = TestClient(TestServer(app))
+        await self.client.start_server()
+
+    async def asyncTearDown(self):
+        await self.client.close()
+        self.store.close()
+        self._tmp.cleanup()
+
+    async def test_update_info_exception_keeps_the_probe_200(self):
+        r = await self.client.get("/healthz")
+        self.assertEqual(r.status, 200)
+        body = await r.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["update"],
+                         {"ok": False, "error": "update-info-failed"})
+
+    async def test_clipboard_describe_exception_keeps_the_probe_200(self):
+        with mock.patch("flixcli.webapp.clipboard_mod.describe",
+                        side_effect=RuntimeError("boom")):
+            r = await self.client.get("/healthz")
+        self.assertEqual(r.status, 200)
+        self.assertEqual((await r.json())["clipboard"], "unknown")
 
 
 if __name__ == "__main__":

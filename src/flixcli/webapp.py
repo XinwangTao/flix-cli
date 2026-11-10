@@ -578,10 +578,18 @@ def make_web_app(store, ident: dict, on_web_text: Callable[[str], None],
         except Exception:
             count = -1
         spool = Path(store.path).parent / "clipboard.txt" if store.path else None
+        try:
+            update = update_info() if update_info else None
+        except Exception:
+            # A broken update check must not turn the deploy probe into a 500.
+            update = {"ok": False, "error": "update-info-failed"}
+        try:
+            clipboard = clipboard_mod.describe(spool)
+        except Exception:
+            clipboard = "unknown"
         return web.json_response(
             health_payload(ident, started_at, time.time(), count, channel_port,
-                           update_info() if update_info else None,
-                           clipboard_mod.describe(spool)))
+                           update, clipboard))
 
     app.router.add_get("/", index)
     app.router.add_get("/healthz", healthz)
