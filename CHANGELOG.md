@@ -6,6 +6,10 @@
 ## [未发布]
 
 ### 新增
+
+## [2.5.0] - 2026-11-10
+
+### 新增
 - Android 液态玻璃界面：全屏玉青/蓝紫氛围光，玻璃头部/标签/卡片/输入栏，渐变头像与沉浸系统栏。
 
 ### 变更
@@ -232,6 +236,7 @@
 - Android 平板端：页头与分段控件重排、卡片式列表与空状态、会话页视觉统一。
 - 配对后自动补推群快照；修复测试污染真实配置导致收文件静默失败。
 
+[v2.5.0]: https://github.com/XinwangTao/flix-cli/compare/v2.4.0...v2.5.0
 [v2.3.0]: https://github.com/XinwangTao/flix-cli/compare/v2.2.1...v2.3.0
 [v2.2.1]: https://github.com/XinwangTao/flix-cli/compare/v2.2.0...v2.2.1
 [v2.2.0]: https://github.com/XinwangTao/flix-cli/compare/v2.1.0...v2.2.0

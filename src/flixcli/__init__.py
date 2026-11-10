@@ -11,7 +11,7 @@ try:  # single source of truth: the installed package metadata
     try:
         __version__ = _dist_version("flixcli")
     except PackageNotFoundError:  # running from a source tree without install
-        __version__ = "0.0.0+source"
+        __version__ = "2.5.0"
 except ImportError:  # pragma: no cover - Python < 3.8
     __version__ = "0.0.0+source"
 
