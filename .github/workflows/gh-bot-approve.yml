@@ -85,7 +85,7 @@ jobs:
               return;
             }
             if (policy.auto_block_label) AUTO_LABEL = policy.auto_block_label;
-            if (!policy.enabled) { core.notice('auto_approve.enabled=false，跳过'); return; }
+            if (policy.enabled !== true) { core.notice('auto_approve.enabled 不是布尔 true，跳过'); return; }
             // 类型校验：字符串 "false" 是 truthy，必须挡掉
             if (![true, false].includes(policy.auto_merge)) {
               core.setFailed(`policy.auto_merge 必须是布尔值，当前是 ${JSON.stringify(policy.auto_merge)}`);
@@ -172,8 +172,9 @@ jobs:
             if (pr.additions > policy.max_additions) {
               reasons.push(`新增 ${pr.additions} 行，超过上限 ${policy.max_additions}`);
             }
-            if (policy.max_deletions != null && pr.deletions > policy.max_deletions) {
-              reasons.push(`删除 ${pr.deletions} 行，超过上限 ${policy.max_deletions}`);
+            const maxDel = policy.max_deletions != null ? policy.max_deletions : 300;
+            if (pr.deletions > maxDel) {
+              reasons.push(`删除 ${pr.deletions} 行，超过上限 ${maxDel}`);
             }
 
             const files = await github.paginate(github.rest.pulls.listFiles, {
@@ -375,6 +376,10 @@ jobs:
             const { data: pre } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
             if (pre.head.sha !== pr.head.sha) {
               core.notice('合并前 head 又变了，本次放弃');
+              return;
+            }
+            if (pre.base.ref !== defaultBranch) {
+              core.notice(`合并前目标分支被改成 ${pre.base.ref}，本次放弃`);
               return;
             }
 
