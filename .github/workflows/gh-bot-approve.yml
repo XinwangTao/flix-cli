@@ -86,6 +86,16 @@ jobs:
             }
             if (policy.auto_block_label) AUTO_LABEL = policy.auto_block_label;
             if (!policy.enabled) { core.notice('auto_approve.enabled=false，跳过'); return; }
+            // 类型校验：字符串 "false" 是 truthy，必须挡掉
+            if (![true, false].includes(policy.auto_merge)) {
+              core.setFailed(`policy.auto_merge 必须是布尔值，当前是 ${JSON.stringify(policy.auto_merge)}`);
+              return;
+            }
+            const METHODS = ['merge', 'squash', 'rebase'];
+            if (policy.auto_merge && policy.merge_method && !METHODS.includes(policy.merge_method)) {
+              core.setFailed(`policy.merge_method 必须是 ${METHODS.join('/')} 之一`);
+              return;
+            }
 
             // ── 1. 定位 PR ────────────────────────────────
             let prNumber = 0;
@@ -361,6 +371,8 @@ jobs:
                   body: JSON.stringify({
                     merge_method: policy.merge_method || 'squash',
                     commit_title: `${pr.title} (#${prNumber})`,
+                    // 实测（2026-11-10，PR #34）：GitHub 合并 API 的 sha 参数并不校验 head，
+                    // 传错误 sha 仍会合并。所以只用前面的 pulls.get 复检，不要指望这一层。
                   }),
                 });
               const m = mr.ok ? await mr.json() : null;
