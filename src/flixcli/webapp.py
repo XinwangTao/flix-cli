@@ -419,6 +419,8 @@ def make_web_app(store, ident: dict, on_web_text: Callable[[str], None],
         if not authorized(request):
             return web.Response(status=401, text="unauthorized")
         reader = await request.multipart()
+        from .server import _max_file_bytes
+        maximum = _max_file_bytes(store)
         saved = []
         target = ""
         while part := await reader.next():
@@ -443,11 +445,20 @@ def make_web_app(store, ident: dict, on_web_text: Callable[[str], None],
                      "detail": part.filename}, status=400)
             tmp = dest.with_name(dest.name + ".flixdownload")
             size = 0
-            with open(tmp, "wb") as f:
-                while chunk := await part.read_chunk(256 * 1024):
-                    f.write(chunk)
-                    size += len(chunk)
-            os.replace(tmp, dest)
+            try:
+                with open(tmp, "wb") as f:
+                    while chunk := await part.read_chunk(256 * 1024):
+                        size += len(chunk)
+                        if size > maximum:
+                            break
+                        f.write(chunk)
+                if size > maximum:
+                    return web.json_response(
+                        {"ok": False, "error": "too-large", "limit": maximum},
+                        status=413)
+                os.replace(tmp, dest)
+            finally:
+                tmp.unlink(missing_ok=True)
             entry = {"name": clean, "size": size, "path": str(dest)}
             if target:
                 from .files import send_file
