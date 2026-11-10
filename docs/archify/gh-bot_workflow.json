@@ -1,0 +1,219 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "GitHub 自动化 Bot：回复 + 低风险放行",
+    "locale": "zh-CN",
+    "output": "docs/archify/gh-bot_workflow.html",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    {
+      "id": "events",
+      "label": "GitHub 事件"
+    },
+    {
+      "id": "brain",
+      "label": "智能回复层"
+    },
+    {
+      "id": "gate",
+      "label": "放行闸门"
+    },
+    {
+      "id": "human",
+      "label": "失败与人工兜底",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "trigger",
+      "label": "触发",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "respond",
+      "label": "理解与回复",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "release",
+      "label": "放行判定",
+      "fromCol": 4,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "event",
+    "route",
+    "claude",
+    "post",
+    "policy",
+    "approve"
+  ],
+  "nodes": [
+    {
+      "id": "event",
+      "lane": "events",
+      "col": 0,
+      "type": "messagebus",
+      "label": "issue / PR 创建",
+      "sublabel": "issues · pull_request",
+      "width": 124
+    },
+    {
+      "id": "route",
+      "lane": "events",
+      "col": 1,
+      "type": "backend",
+      "label": "事件分流",
+      "sublabel": "issue 还是 PR"
+    },
+    {
+      "id": "claude",
+      "lane": "brain",
+      "col": 2,
+      "type": "cloud",
+      "label": "Claude Code CLI",
+      "sublabel": "能力跟着信任走",
+      "width": 124
+    },
+    {
+      "id": "post",
+      "lane": "brain",
+      "col": 3,
+      "type": "frontend",
+      "label": "发布结论",
+      "sublabel": "单条评论 + 标签"
+    },
+    {
+      "id": "policy",
+      "lane": "gate",
+      "col": 4,
+      "type": "security",
+      "label": "白名单闸门",
+      "sublabel": "路径·作者·CI 全绿"
+    },
+    {
+      "id": "approve",
+      "lane": "gate",
+      "col": 5,
+      "type": "cloud",
+      "label": "自动合并",
+      "sublabel": "squash + 说明",
+      "tag": "机器人身份"
+    },
+    {
+      "id": "manual",
+      "lane": "human",
+      "col": 4,
+      "type": "security",
+      "label": "转人工",
+      "sublabel": "needs-human 标签"
+    },
+    {
+      "id": "fail",
+      "lane": "human",
+      "col": 3,
+      "type": "external",
+      "label": "执行失败",
+      "sublabel": "限额 · 超时 · fork PR"
+    },
+    {
+      "id": "degrade",
+      "lane": "human",
+      "col": 5,
+      "type": "frontend",
+      "label": "未合并告警",
+      "sublabel": "无权限/冲突",
+      "tag": "评论留痕"
+    }
+  ],
+  "edges": [
+    {
+      "from": "event",
+      "to": "route",
+      "label": "webhook",
+      "variant": "emphasis"
+    },
+    {
+      "from": "route",
+      "to": "claude",
+      "label": "带上下文",
+      "variant": "emphasis"
+    },
+    {
+      "from": "claude",
+      "to": "post",
+      "label": "评审意见 / 答疑",
+      "variant": "emphasis"
+    },
+    {
+      "from": "post",
+      "to": "policy",
+      "label": "PR 且非 draft",
+      "variant": "emphasis"
+    },
+    {
+      "from": "policy",
+      "to": "manual",
+      "label": "越界 / CI 未过",
+      "role": "error",
+      "variant": "security"
+    },
+    {
+      "from": "claude",
+      "to": "fail",
+      "label": "异常",
+      "role": "error",
+      "variant": "dashed"
+    },
+    {
+      "from": "policy",
+      "to": "approve",
+      "label": "全部命中",
+      "variant": "emphasis"
+    },
+    {
+      "from": "approve",
+      "to": "degrade",
+      "label": "token 无批准权",
+      "role": "error",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "两条线必须分开",
+      "items": [
+        "Claude Code CLI 只做评论，不参与批准判定",
+        "合并由确定性规则触发，模型不参与",
+        "模型出错最坏丢一条评论，不会放错代码"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "自动批准的三道门槛",
+      "items": [
+        "改动文件全部命中白名单路径（文档 / 测试 / 依赖锁文件）",
+        "作者在白名单（dependabot 或你自己）",
+        "CI 必需检查全绿，且 PR 不是草稿"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "兜底不留死角",
+      "items": [
+        "任何一条不满足：打 needs-human 标签并说明原因",
+        "失败路径必须留痕，不能静默跳过",
+        "fork PR 与限额异常统一转人工"
+      ]
+    }
+  ]
+}
