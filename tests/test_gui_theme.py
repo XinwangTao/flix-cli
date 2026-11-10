@@ -204,6 +204,28 @@ class StylesheetTests(unittest.TestCase):
                 self.assertNotIn("$", sheet, "an unfilled template token leaked")
                 self.assertGreater(len(sheet), 4000)
 
+    def test_button_outlines_clear_nontext_contrast(self):
+        """An outlined button must not melt into the page behind it.
+
+        Buttons now carry a full accent outline instead of a translucent
+        hairline; WCAG 2.1 asks 3:1 for non-text UI boundaries, so pin the
+        token pair and the QSS rule that uses it.
+        """
+        for theme, tokens in gui_module.PALETTES.items():
+            for surface in ("bg", "bg_side", "surface"):
+                with self.subTest(theme=theme, surface=surface):
+                    self.assertGreaterEqual(
+                        contrast(tokens["accent"], tokens[surface]), 3.0,
+                        f"accent outline on {surface} is too faint")
+            sheet = gui_module.styles_for(theme)
+            start = sheet.index("QPushButton {")
+            rule = sheet[start:start + 180]
+            self.assertIn(f"border: 1px solid {tokens['accent']}", rule)
+            self.assertIn(f"background: {tokens['surface']}", rule)
+            primary = sheet[sheet.index("QPushButton#sendButton"):]
+            primary = primary[:primary.index("}")]
+            self.assertIn("qlineargradient", primary)
+
     def test_sheets_differ_per_theme(self):
         dark = gui_module.styles_for("dark")
         light = gui_module.styles_for("light")

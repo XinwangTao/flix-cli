@@ -31,13 +31,14 @@ Android 改动必须跑 `F:/projects/_agent-runs/android-deploy.sh <apk> com.rel
 ## 第 20 轮状态
 
 - 本地 `main` 领先 `origin/main`，本地迭代均未推送。
-- 测试：382 passed + 125 subtests（e2e 与缺 hypothesis 的 fuzz 除外）。
+- 测试：383 passed + 131 subtests（e2e 与缺 hypothesis 的 fuzz 除外）。
 - 手机：PKJ110 运行 2.4.6 (9)；截图 `device-shot-copy-menu.png`、`device-shot-copy-pasted.png`、
   `device-shot-final.png`（均在 `F:/projects/_agent-runs/`）。第 16–20 轮无 Android 改动，无需重装。
 - 已完成：液态玻璃 UI、长按复制、文件 `openFileDescriptor` fallback、8891 通道自愈、关屏保活、
   自动更新解包防穿越/最高版本/per_page 100/404 回退/token/源码版本校验、Web 设备刷新/上传详情/
   群页面错误、`/send` 失败保留输入与 JSON 502、群聊网页同毫秒消息按 id 去重、发现报文
-  指纹/端口/显示字段边界校验、Web 上传按接收上限限流、`/healthz` 探测容错。
+  指纹/端口/显示字段边界校验、Web 上传按接收上限限流、`/healthz` 探测容错、
+  桌面端按钮高对比（实色 accent 描边 + 主按钮渐变，边界达非文本 3:1）。
 
 ### hardening 已核对等价（无需再移植）
 
