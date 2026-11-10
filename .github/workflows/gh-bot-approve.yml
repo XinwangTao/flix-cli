@@ -54,6 +54,13 @@ jobs:
         with:
           github-token: ${{ steps.bot.outputs.token || secrets.GH_BOT_TOKEN || github.token }}
           script: |
+            // workflow 自带 token 走原生 fetch（github-script 里 require('@actions/github') 解析不到）
+            const ghHeaders = () => ({
+              authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
+              accept: 'application/vnd.github+json',
+              'content-type': 'application/json',
+              'user-agent': 'gh-bot',
+            });
             const { owner, repo } = context.repo;
             const defaultBranch = context.payload.repository?.default_branch || 'main';
             let AUTO_LABEL = 'gh-bot-needs-human';
@@ -97,10 +104,11 @@ jobs:
             if (context.eventName === 'workflow_dispatch') {
               const ciName = policy.ci_workflow_name || 'CI';
               // 查运行记录用 workflow token：App/PAT 只有 contents/issues/pull_requests
-              const act = require('@actions/github').getOctokit(process.env.GITHUB_TOKEN);
-              const runs = await act.paginate(act.rest.actions.listWorkflowRunsForRepo, {
-                owner, repo, head_sha: pr.head.sha, per_page: 100,
-              });
+              const rr = await fetch(
+                `https://api.github.com/repos/${owner}/${repo}/actions/runs?head_sha=${pr.head.sha}&per_page=100`,
+                { headers: ghHeaders() });
+              if (!rr.ok) throw new Error(`查运行记录失败 ${rr.status}`);
+              const runs = (await rr.json()).workflow_runs || [];
               const hit = runs.find(r => r.name === ciName && r.status === 'completed');
               if (hit) { ciConclusion = hit.conclusion; ciSha = hit.head_sha; }
             } else {
@@ -344,13 +352,19 @@ jobs:
             }
 
             // 用 workflow 自带 token 合并：它不像 App 那样被禁止合并，且所需检查已在该 SHA 上通过
-            const merger = require('@actions/github').getOctokit(process.env.GITHUB_TOKEN);
             try {
-              const { data: m } = await merger.rest.pulls.merge({
-                owner, repo, pull_number: prNumber,
-                merge_method: policy.merge_method || 'squash',
-                commit_title: `${pr.title} (#${prNumber})`,
-              });
+              const mr = await fetch(
+                `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/merge`,
+                {
+                  method: 'PUT',
+                  headers: ghHeaders(),
+                  body: JSON.stringify({
+                    merge_method: policy.merge_method || 'squash',
+                    commit_title: `${pr.title} (#${prNumber})`,
+                  }),
+                });
+              const m = mr.ok ? await mr.json() : null;
+              if (!mr.ok) throw new Error(`${mr.status} ${(m && m.message) || ''}`);
               core.notice(`已自动合并 ${m.sha ? m.sha.slice(0, 7) : ''}`);
               try {
                 await github.rest.issues.removeLabel({
