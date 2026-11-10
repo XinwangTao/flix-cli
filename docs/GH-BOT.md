@@ -226,6 +226,12 @@ checkout 一律 `persist-credentials: false`，避免 job token 落进 `.git/con
 - **CI 恒为必需**（没有开关）；手动触发会按 `head_sha` 反查 CI 结论（用 workflow 自带 token，App/PAT 无 `actions: read`）。
 - 转人工标签不存在时 workflow 会自动创建，不会静默丢掉信号。
 - 批准提交带 `commit_id`，且提交前重新确认 head 未变（防判定后被推送）。
+- 合并前再确认一次 head 与 base 分支。
+- **合并 API 的 `sha` 参数不校验 head**（实测 2026-11-10：传 base sha 仍合并成功），
+  所以原子性只能靠合并前那次 `pulls.get` 复检，窗口是一次 API 往返。
+- **bot 合并不触发 main 上的流水线**（GITHUB_TOKEN 的已知行为，已用运行记录核对）：
+  合并后 main 顶端没有新的 CI 运行。所以合并前的 CI 必须是同一个 SHA 上的结果。
+
 - 自动拦截标签是 `gh-bot-needs-human`，与人工阻断标签 `needs-human` 分开，避免自动打标导致永久自锁。
 
 残留风险：协作者账号被接管时仍可利用其权限；如需更强隔离，应给 runner 单独低权限账号
