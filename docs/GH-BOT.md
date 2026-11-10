@@ -9,7 +9,7 @@
 |---|---|
 | 新 issue 自动分诊回复 | 不修改代码、不执行命令 |
 | 新 PR 自动评审（只评论） | 不参与批准判断 |
-| 白名单内的低风险 PR 自动 APPROVE | 不处理 fork PR、不处理草稿 |
+| 白名单内的低风险 PR **自动合并** | 不处理 fork PR、不处理草稿、不动安全/流程文件 |
 | 判定不通过时打 `gh-bot-needs-human` 并评论说明原因 | 预期跳过（无关联 PR、PR 已关）不评论 |
 
 批准**只**由 `.github/gh-bot-policy.json` 的规则决定，模型的输出不参与。
@@ -177,6 +177,15 @@ JSON
 - 放宽路径：往 `paths` 加 glob，例如 `"src/utils/**"`
 - 收紧：把目录加进 `blocked_paths`（优先级高于 `paths`）
 - 换作者白名单：改 `authors`
+- 放开更多路径：往 `paths` 加 glob（默认只有 `README.md`、`CHANGELOG.md`、`docs/*.md`、`reverse/*.md`）
+
+> **为什么白名单这么窄**：自动合并等于「没有人再读这份 diff」。
+> `SECURITY.md`（漏洞上报渠道）、`AGENTS.md`/`CLAUDE.md`（会污染其他 AI 的上下文）、
+> `docs/product/**`（Archify 规格源）都必须留在人工手里，所以它们在 `blocked_paths` 里。
+> 新增目录的 md 默认转人工——这是刻意的，新路径本就不在任何人预期内。
+>
+> 另有两道兜底：路径段以 `.`/空格/`~` 结尾直接拒（防 Windows 检出归一化绕过目录黑名单）；
+> 单文件超过 `max_file_bytes`（默认 200KB）不批（`max_additions` 只数行，不数字节）。
 - 临时关掉自动批准：`"enabled": false`
 
 ## 安全边界（2026-11-09 对抗性审查后重做）

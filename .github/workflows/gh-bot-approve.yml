@@ -185,12 +185,16 @@ jobs:
 
             // 文件模式：符号链接/子模块能把工作区文件带进构建产物，一律不放行
             const modeByPath = new Map();
+            const sizeByPath = new Map();
             try {
               const { data: tree } = await github.rest.git.getTree({
                 owner, repo, tree_sha: pr.head.sha, recursive: 'true',
               });
               if (tree.truncated) reasons.push('文件树被截断，无法确认符号链接/子模块');
-              for (const e of tree.tree || []) modeByPath.set(e.path, e.mode);
+              for (const e of tree.tree || []) {
+                modeByPath.set(e.path, e.mode);
+                if (typeof e.size === 'number') sizeByPath.set(e.path, e.size);
+              }
             } catch (e) {
               reasons.push(`取文件树失败，无法确认符号链接/子模块: ${e.message}`);
             }
@@ -216,6 +220,19 @@ jobs:
               // 控制字符（含换行）会让路径类判定与人类审阅同时失真
               if (/[\u0000-\u001f\u007f]/.test(f.filename)) {
                 reasons.push(`文件名含控制字符: ${JSON.stringify(f.filename)}`);
+                continue;
+              }
+              // Windows 检出会把 ".github." / "docs " 这类段归一成 ".github" / "docs"，
+              // 目录级黑名单会被绕过，所以这类段直接拒
+              const badSeg = f.filename.split('/').find(seg => /[. ~]$/.test(seg));
+              if (badSeg) {
+                reasons.push(`路径段疑似归一化绕过: ${JSON.stringify(badSeg)}`);
+                continue;
+              }
+              const maxBytes = policy.max_file_bytes || 200000;
+              const fsize = sizeByPath.get(f.filename);
+              if (fsize != null && fsize > maxBytes) {
+                reasons.push(`${f.filename} 体积 ${fsize} 字节，超过上限 ${maxBytes}`);
                 continue;
               }
               const mode = modeByPath.get(f.filename);

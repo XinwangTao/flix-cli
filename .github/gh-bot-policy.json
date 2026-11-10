@@ -8,23 +8,27 @@
       "XinwangTao"
     ],
     "paths": [
-      "**/*.md",
-      "requirements*.txt",
-      "poetry.lock",
-      "uv.lock",
-      "package-lock.json",
-      "yarn.lock"
+      "README.md",
+      "CHANGELOG.md",
+      "docs/*.md",
+      "reverse/*.md"
     ],
     "blocked_paths": [
+      "SECURITY.md",
+      "AGENTS.md",
+      "CLAUDE.md",
+      "**/AGENTS.md",
+      "**/CLAUDE.md",
+      ".claude/**",
       "docs/archify/**",
+      "docs/product/**",
       "tests/**",
       ".github/**",
       "src/**",
       "scripts/**",
       "pyproject.toml",
       "**/*.spec",
-      "**/conftest.py",
-      "tests/e2e.py"
+      "**/conftest.py"
     ],
     "max_files": 25,
     "max_additions": 600,
@@ -35,7 +39,8 @@
     "auto_block_label": "gh-bot-needs-human",
     "ci_workflow_name": "CI",
     "auto_merge": true,
-    "merge_method": "squash"
+    "merge_method": "squash",
+    "max_file_bytes": 200000
   },
   "reply": {
     "model": "ccs-claude-openai--deepseek-v4.1-flash",
