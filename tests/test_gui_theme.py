@@ -226,6 +226,33 @@ class StylesheetTests(unittest.TestCase):
             primary = primary[:primary.index("}")]
             self.assertIn("qlineargradient", primary)
 
+    def test_native_backdrop_follows_window_activation(self):
+        """An inactive window must keep the blurred still, not DWM's solid.
+
+        Windows drops Acrylic when the window loses focus; leaving the client
+        area to DWM then made the background flash between glass and a flat
+        fill. The fallback widget paints only when ``_native`` is false.
+        """
+        try:
+            from PySide6.QtWidgets import QApplication
+        except ImportError:  # pragma: no cover
+            self.skipTest("PySide6 widgets unavailable")
+        app = QApplication.instance() or QApplication([])  # noqa: F841
+        window = gui_module.MainWindow()
+        window._native_glass = True
+        window.glass = True
+        window._glass_visible = lambda: True
+        window._apply_system_backdrop = lambda: True
+        root = window.glass_root
+
+        window.isActiveWindow = lambda: True
+        window._sync_native_backdrop()
+        self.assertTrue(root._native)
+
+        window.isActiveWindow = lambda: False
+        window._sync_native_backdrop()
+        self.assertFalse(root._native)
+
     def test_sheets_differ_per_theme(self):
         dark = gui_module.styles_for("dark")
         light = gui_module.styles_for("light")
