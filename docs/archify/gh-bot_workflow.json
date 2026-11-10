@@ -104,8 +104,8 @@
       "lane": "gate",
       "col": 5,
       "type": "cloud",
-      "label": "自动 APPROVE",
-      "sublabel": "写明批准依据",
+      "label": "自动合并",
+      "sublabel": "squash + 说明",
       "tag": "机器人身份"
     },
     {
@@ -129,8 +129,8 @@
       "lane": "human",
       "col": 5,
       "type": "frontend",
-      "label": "降级确认",
-      "sublabel": "token 无批准权",
+      "label": "未合并告警",
+      "sublabel": "无权限/冲突",
       "tag": "评论留痕"
     }
   ],
@@ -193,7 +193,7 @@
       "title": "两条线必须分开",
       "items": [
         "Claude Code CLI 只做评论，不参与批准判定",
-        "批准由确定性规则执行，模型不参与签字",
+        "合并由确定性规则触发，模型不参与",
         "模型出错最坏丢一条评论，不会放错代码"
       ]
     },
