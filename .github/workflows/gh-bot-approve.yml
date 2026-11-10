@@ -135,9 +135,12 @@ jobs:
               });
               const last = commits[commits.length - 1];
               const lastLogin = last?.author?.login;   // 只认 GitHub 账号，不认 git 里可随意填的 author.name
-              if (!lastLogin) reasons.push('取不到最后提交的 GitHub 账号，无法确认推送者');
-              else if (!authors.includes(String(lastLogin).toLowerCase())) {
+              // 邮箱没和账号关联时 GitHub 返回 null（例如旧的 noreply 地址），这属于常见情况，
+              // 不能因此拦住维护者自己的提交；只有"确实取到账号且不在白名单"才拦。
+              if (lastLogin && !authors.includes(String(lastLogin).toLowerCase())) {
                 reasons.push(`最后提交作者 ${lastLogin} 不在白名单`);
+              } else if (!lastLogin) {
+                core.notice('最后提交没有关联 GitHub 账号，按 PR 发起者判定');
               }
             } catch (e) {
               reasons.push(`查提交失败，无法确认推送者: ${e.message}`);
