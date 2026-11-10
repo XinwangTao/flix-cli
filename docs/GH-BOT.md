@@ -9,7 +9,7 @@
 |---|---|
 | 新 issue 自动分诊回复 | 不修改代码、不执行命令 |
 | 新 PR 自动评审（只评论） | 不参与批准判断 |
-| 白名单内的低风险 PR 自动 APPROVE | 不处理 fork PR、不处理草稿 |
+| 白名单内的低风险 PR **自动合并** | 不处理 fork PR、不处理草稿、不动安全/流程文件 |
 | 判定不通过时打 `gh-bot-needs-human` 并评论说明原因 | 预期跳过（无关联 PR、PR 已关）不评论 |
 
 批准**只**由 `.github/gh-bot-policy.json` 的规则决定，模型的输出不参与。
@@ -177,6 +177,15 @@ JSON
 - 放宽路径：往 `paths` 加 glob，例如 `"src/utils/**"`
 - 收紧：把目录加进 `blocked_paths`（优先级高于 `paths`）
 - 换作者白名单：改 `authors`
+- 放开更多路径：往 `paths` 加 glob（默认只有 `README.md`、`CHANGELOG.md`、`docs/*.md`、`reverse/*.md`）
+
+> **为什么白名单这么窄**：自动合并等于「没有人再读这份 diff」。
+> `SECURITY.md`（漏洞上报渠道）、`AGENTS.md`/`CLAUDE.md`（会污染其他 AI 的上下文）、
+> `docs/product/**`（Archify 规格源）都必须留在人工手里，所以它们在 `blocked_paths` 里。
+> 新增目录的 md 默认转人工——这是刻意的，新路径本就不在任何人预期内。
+>
+> 另有两道兜底：路径段以 `.`/空格/`~` 结尾直接拒（防 Windows 检出归一化绕过目录黑名单）；
+> 单文件超过 `max_file_bytes`（默认 200KB）不批（`max_additions` 只数行，不数字节）。
 - 临时关掉自动批准：`"enabled": false`
 
 ## 安全边界（2026-11-09 对抗性审查后重做）
@@ -217,6 +226,12 @@ checkout 一律 `persist-credentials: false`，避免 job token 落进 `.git/con
 - **CI 恒为必需**（没有开关）；手动触发会按 `head_sha` 反查 CI 结论（用 workflow 自带 token，App/PAT 无 `actions: read`）。
 - 转人工标签不存在时 workflow 会自动创建，不会静默丢掉信号。
 - 批准提交带 `commit_id`，且提交前重新确认 head 未变（防判定后被推送）。
+- 合并前再确认一次 head 与 base 分支。
+- **合并 API 的 `sha` 参数不校验 head**（实测 2026-11-10：传 base sha 仍合并成功），
+  所以原子性只能靠合并前那次 `pulls.get` 复检，窗口是一次 API 往返。
+- **bot 合并不触发 main 上的流水线**（GITHUB_TOKEN 的已知行为，已用运行记录核对）：
+  合并后 main 顶端没有新的 CI 运行。所以合并前的 CI 必须是同一个 SHA 上的结果。
+
 - 自动拦截标签是 `gh-bot-needs-human`，与人工阻断标签 `needs-human` 分开，避免自动打标导致永久自锁。
 
 残留风险：协作者账号被接管时仍可利用其权限；如需更强隔离，应给 runner 单独低权限账号
