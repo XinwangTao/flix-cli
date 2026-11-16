@@ -1,0 +1,194 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RelayDesk 局域网模型共享网关",
+    "locale": "zh-CN",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    {
+      "id": "phone",
+      "label": "手机端"
+    },
+    {
+      "id": "gateway",
+      "label": "RelayDesk 模型网关"
+    },
+    {
+      "id": "upstream",
+      "label": "本机 cc-switch"
+    },
+    {
+      "id": "exceptions",
+      "label": "拒绝与故障出口",
+      "variant": "exception"
+    }
+  ],
+  "phases": [],
+  "groups": [],
+  "mainPath": [
+    "start",
+    "req",
+    "auth",
+    "fwd",
+    "upstream",
+    "back"
+  ],
+  "nodes": [
+    {
+      "id": "start",
+      "lane": "phone",
+      "col": 0,
+      "type": "frontend",
+      "label": "手机 App",
+      "sublabel": "填地址 + 令牌"
+    },
+    {
+      "id": "req",
+      "lane": "phone",
+      "col": 1,
+      "type": "messagebus",
+      "label": "POST /v1/messages",
+      "sublabel": "Anthropic 格式",
+      "width": 132
+    },
+    {
+      "id": "auth",
+      "lane": "gateway",
+      "col": 2,
+      "type": "security",
+      "label": "令牌校验",
+      "tag": "X-Api-Key"
+    },
+    {
+      "id": "fwd",
+      "lane": "gateway",
+      "col": 3,
+      "type": "backend",
+      "label": "反向代理",
+      "sublabel": "透传 body 与流"
+    },
+    {
+      "id": "upstream",
+      "lane": "upstream",
+      "col": 4,
+      "type": "cloud",
+      "label": "cc-switch 15721",
+      "sublabel": "模型映射 · 计费",
+      "width": 122
+    },
+    {
+      "id": "back",
+      "lane": "gateway",
+      "col": 5,
+      "type": "external",
+      "label": "SSE 回传",
+      "sublabel": "原文转发"
+    },
+    {
+      "id": "deny",
+      "lane": "exceptions",
+      "col": 2,
+      "type": "security",
+      "label": "401 拒绝",
+      "sublabel": "令牌不符"
+    },
+    {
+      "id": "fail",
+      "lane": "exceptions",
+      "col": 4,
+      "type": "messagebus",
+      "label": "502 上游不可达"
+    },
+    {
+      "id": "cfg",
+      "lane": "gateway",
+      "col": 0,
+      "type": "frontend",
+      "label": "开启共享",
+      "sublabel": "GUI 开关 / CLI"
+    }
+  ],
+  "edges": [
+    {
+      "from": "cfg",
+      "to": "start",
+      "label": "二维码带地址与令牌",
+      "variant": "dashed"
+    },
+    {
+      "from": "start",
+      "to": "req",
+      "label": "发消息",
+      "variant": "emphasis"
+    },
+    {
+      "from": "req",
+      "to": "auth",
+      "label": "进入网关",
+      "variant": "emphasis"
+    },
+    {
+      "from": "auth",
+      "to": "fwd",
+      "label": "通过",
+      "variant": "emphasis"
+    },
+    {
+      "from": "fwd",
+      "to": "upstream",
+      "label": "转发到本机 15721",
+      "variant": "emphasis"
+    },
+    {
+      "from": "upstream",
+      "to": "back",
+      "label": "响应",
+      "variant": "emphasis"
+    },
+    {
+      "from": "auth",
+      "to": "deny",
+      "label": "不匹配",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "from": "fwd",
+      "to": "fail",
+      "label": "连接失败",
+      "variant": "security",
+      "role": "error"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "一个出口",
+      "items": [
+        "手机只认 /v1/messages（Anthropic 协议）",
+        "OpenAI 兼容路径不开放，保持范围最小",
+        "响应与流式内容原样回传，不二次加工"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "不碰密钥",
+      "items": [
+        "网关只连本机 127.0.0.1:15721",
+        "模型映射、账号分流、计费全部沿用 cc-switch",
+        "RelayDesk 侧只保存一个访问令牌"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "失败可见",
+      "items": [
+        "令牌不符直接 401，不打到上游",
+        "上游不可达返回 502 并记日志",
+        "GUI 显示运行状态与当前连接数"
+      ]
+    }
+  ]
+}

@@ -112,7 +112,8 @@ async def clip_sync_loop(store, ident: dict, state: dict,
 
 async def run_daemon(store, ident, device_port: int, api_port: int,
                      announce: bool = True, clip_sync: bool = True,
-                     web_port: int = 0, multicast_if: str | None = None) -> int:
+                     web_port: int = 0, multicast_if: str | None = None,
+                     model_port: int = 0) -> int:
     devices: dict[str, dict] = {}
     verify_pending: set[str] = set()
 
@@ -283,6 +284,25 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
         pin = store.own_web_pin()
         print(f"[flixd] web send page on http://0.0.0.0:{web_port}  PIN: {pin}",
               file=sys.stderr)
+    model_runner = None
+    if not model_port:
+        # The GUI toggle persists "enabled", so a plain restart keeps sharing.
+        from .model_gateway import load_config as _load_model_gw
+        _gw = _load_model_gw(store)
+        if _gw.get("enabled"):
+            model_port = int(_gw["port"])
+    if model_port:
+        from aiohttp import web as _webgw
+        from .model_gateway import load_config as _load_model_cfg
+        from .model_gateway import make_model_app
+        mcfg = _load_model_cfg(store)
+        mcfg["port"] = model_port
+        mr = _webgw.AppRunner(make_model_app(store, mcfg))
+        await mr.setup()
+        await _webgw.TCPSite(mr, "0.0.0.0", model_port).start()
+        model_runner = mr
+        print(f"[flixd] model gateway on http://0.0.0.0:{model_port} -> "
+              f"{mcfg['upstream']}", file=sys.stderr, flush=True)
     disc = Discovery(on_device, multicast_if)
     bound = await disc.start()
     if bound:
@@ -425,6 +445,9 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
         if web_runner:
             with contextlib.suppress(Exception):
                 await web_runner.cleanup()
+        if model_runner:
+            with contextlib.suppress(Exception):
+                await model_runner.cleanup()
         with contextlib.suppress(Exception):
             await channel_runner.cleanup()
         with contextlib.suppress(Exception):

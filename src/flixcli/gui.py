@@ -1543,6 +1543,44 @@ class MainWindow(QMainWindow):
         self.auto_update_check.toggled.connect(
             lambda on: self._save_prefs(auto_update=bool(on)))
         card_box.addWidget(self.auto_update_check)
+
+        # Phone model sharing: one Anthropic endpoint on the LAN, forwarded to
+        # the local cc-switch proxy. The token is the only secret we hold.
+        card_box.addSpacing(10)
+        self.model_check = QCheckBox("模型共享：让手机用局域网地址访问本机模型")
+        self.model_check.setChecked(self._model_cfg().get("enabled") is True)
+        self.model_check.toggled.connect(self.toggle_model_gateway)
+        card_box.addWidget(self.model_check)
+        self.model_status = QLabel("")
+        self.model_status.setObjectName("muted")
+        self.model_status.setWordWrap(True)
+        # A long Chinese status line has no spaces to break on; without this
+        # the label's minimum width widens the whole stack and squeezes the
+        # transcript.
+        self.model_status.setSizePolicy(QSizePolicy.Ignored,
+                                        QSizePolicy.Preferred)
+        self.model_status.setMinimumWidth(0)
+        card_box.addWidget(self.model_status)
+        model_row = QHBoxLayout()
+        self.model_copy_button = QPushButton("复制手机配置")
+        self.model_copy_button.setObjectName("secondaryButton")
+        self.model_copy_button.setCursor(Qt.PointingHandCursor)
+        self.model_copy_button.clicked.connect(self.copy_model_config)
+        self.model_qr_button = QPushButton("显示二维码")
+        self.model_qr_button.setObjectName("secondaryButton")
+        self.model_qr_button.setCursor(Qt.PointingHandCursor)
+        self.model_qr_button.clicked.connect(self.show_model_qr)
+        self.model_token_button = QPushButton("重置令牌")
+        self.model_token_button.setObjectName("secondaryButton")
+        self.model_token_button.setCursor(Qt.PointingHandCursor)
+        self.model_token_button.clicked.connect(self.reset_model_token)
+        model_row.addWidget(self.model_copy_button)
+        model_row.addWidget(self.model_qr_button)
+        model_row.addWidget(self.model_token_button)
+        model_row.addStretch()
+        card_box.addLayout(model_row)
+        self._refresh_model_status(live=False)
+
         hint = QLabel("主题、材质和动效立即应用到整个窗口，下次启动沿用")
         hint.setObjectName("muted")
         card_box.addWidget(hint)
@@ -1578,7 +1616,148 @@ class MainWindow(QMainWindow):
         self._sync_theme_button()
         self._sync_glass_button()
         self._sync_animation_button()
-        return page
+        # The card list outgrew a small window; scroll it so the stack's
+        # minimum height stays driven by the chat page, not by settings.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setObjectName("settingsScroll")
+        scroll.setWidget(page)
+        return scroll
+
+    # -- model gateway (phone sharing) --------------------------------------
+    def _model_cfg(self) -> dict:
+        """Gateway preferences without touching the sqlite store."""
+        from .model_gateway import CONFIG_TEMPLATE
+        cfg = dict(CONFIG_TEMPLATE)
+        raw = self._load_prefs().get("modelGateway")
+        if isinstance(raw, dict):
+            cfg.update({k: v for k, v in raw.items() if k in cfg})
+        return cfg
+
+    def _model_prefs_store(self):
+        """Minimal Store-shaped shim over shared_preferences.json."""
+        cfg_owner = self
+
+        class _Shim:
+            def prefs(self):
+                return cfg_owner._load_prefs()
+
+            def set_pref(self, key, value):
+                cfg_owner._save_prefs(**{key: value})
+
+        return _Shim()
+
+    def _refresh_model_status(self, live: bool = True):
+        from .model_gateway import lan_urls, port_open
+        cfg = self._model_cfg()
+        token = cfg.get("token") or "（未生成，开启后生成）"
+        urls = " / ".join(lan_urls(cfg["port"]))
+        if live and port_open(cfg["port"]):
+            state = "运行中"
+        elif cfg.get("enabled"):
+            state = "已开启但未运行（重启本机服务或再点一次开关）" if live else "已开启"
+        else:
+            state = "未开启"
+        self.model_status.setText(f"{state}｜{urls}｜令牌 {token}")
+
+    def toggle_model_gateway(self, on: bool):
+        from .model_gateway import load_config, save_config
+        store = self._model_prefs_store()
+        cfg = save_config(store, enabled=bool(on))
+        cfg = load_config(store) if on else cfg
+        if on:
+            self._spawn_model_gateway()
+        else:
+            self._stop_model_gateway()
+        self._refresh_model_status()
+        QTimer.singleShot(1500, self._refresh_model_status)
+
+    def _spawn_model_gateway(self):
+        import subprocess
+        from .config import APP_DIR
+        from .model_gateway import port_open
+        cfg = self._model_cfg()
+        if port_open(cfg["port"]):
+            return  # already served by the daemon or a previous spawn
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        log_file = open(APP_DIR / "model-gateway.log", "ab")
+        kwargs = {"stdout": log_file, "stderr": log_file, "close_fds": True}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = (subprocess.DETACHED_PROCESS
+                                       | subprocess.CREATE_NO_WINDOW)
+        else:
+            kwargs["start_new_session"] = True
+        proc = subprocess.Popen(cli_command(["models", "start"]), **kwargs)
+        self._model_proc = proc
+        self._save_prefs(modelGatewayPid=proc.pid)
+
+    def _stop_model_gateway(self):
+        import subprocess
+        proc = getattr(self, "_model_proc", None)
+        pid = proc.pid if proc is not None and proc.poll() is None else None
+        if pid is None:
+            pid = self._load_prefs().get("modelGatewayPid")
+        if not pid:
+            return
+        try:
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/PID", str(int(pid)), "/T", "/F"],
+                               capture_output=True,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+            else:
+                os.kill(int(pid), 15)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+        self._save_prefs(modelGatewayPid=0)
+
+    def copy_model_config(self):
+        from .model_gateway import lan_urls, load_config
+        cfg = load_config(self._model_prefs_store())
+        url = lan_urls(cfg["port"])[0]
+        text = ("协议：Anthropic Messages\n"
+                f"Base URL：{url}\n"
+                f"API Key：{cfg['token']}\n"
+                "模型：claude-sonnet-4-5 / claude-opus-4-1 / "
+                "claude-haiku-4-5 / claude-fable-5")
+        QApplication.clipboard().setText(text)
+        self.model_status.setText("手机配置已复制到剪贴板")
+
+    def reset_model_token(self):
+        from .model_gateway import load_config, reset_token
+        store = self._model_prefs_store()
+        load_config(store)      # make sure a config exists before rotating
+        reset_token(store)
+        self._refresh_model_status()
+        self.model_status.setText("令牌已重置，手机端需要重新填写新令牌")
+
+    def show_model_qr(self):
+        from .model_gateway import lan_urls, load_config, pair_text, qr_png
+        cfg = load_config(self._model_prefs_store())
+        try:
+            png = qr_png(pair_text(cfg))
+        except Exception as exc:  # segno missing or encoder failure
+            self.model_status.setText(f"二维码生成失败：{exc}")
+            return
+        pixmap = QPixmap()
+        pixmap.loadFromData(png)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("手机扫码配置")
+        layout = QVBoxLayout(dialog)
+        image = QLabel()
+        image.setPixmap(pixmap)
+        image.setAlignment(Qt.AlignCenter)
+        layout.addWidget(image)
+        tip = QLabel(f"扫码后在手机浏览器里打开，即可看到地址与令牌\n"
+                     f"地址：{lan_urls(cfg['port'])[0]}\n令牌：{cfg['token']}")
+        tip.setWordWrap(True)
+        layout.addWidget(tip)
+        done = QPushButton("完成")
+        done.setObjectName("primaryBtn")
+        done.clicked.connect(dialog.accept)
+        layout.addWidget(done)
+        dialog.exec()
 
     def _load_prefs(self) -> dict:
         try:
@@ -1685,6 +1864,8 @@ class MainWindow(QMainWindow):
         stack = self.workspace_stack
         if stack.currentIndex() == index:
             return
+        if index == self.PAGE_INDEX.get("settings"):
+            self._refresh_model_status()
         if not animate or not self.animations or not self.isVisible():
             self._finish_page_fade()
             stack.setCurrentIndex(index)

@@ -3,6 +3,15 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号与 GitHub Release 标签一致。
 可执行产物见 [Releases](https://github.com/XinwangTao/flix-cli/releases)。
 
+## [未发布]
+
+### 新增
+- 局域网模型共享网关：`flix models start|status|token`，把手机（Anthropic Messages）
+  的请求反向代理到本机 cc-switch（默认 `127.0.0.1:15721`），带固定令牌鉴权、
+  SSE 流式透传与 401/502/504 明确失败码。
+- `flix serve` / `flixd` 新增 `--model-port`；GUI 设置页新增「模型共享」开关、
+  二维码与配置复制；令牌保存在本地 prefs，重启后按开关状态自动恢复。
+
 ## [v2.4.0] - 2026-11-09
 
 ### 新增

@@ -134,6 +134,19 @@ ADB shell 默认只返回 `approval_required`；只有本机操作者显式加 `
 GUI 通过 `127.0.0.1:8898` Desktop API 工作，CLI/MCP 与 GUI 读取同一状态。若缺少依赖，
 执行 `pip install -e ".[gui]"`。
 
+## 手机共享模型（局域网网关）
+
+把本机 cc-switch 的模型共享给同网段的手机：`flix models start` 起一个
+Anthropic Messages 端点（默认 `18993`），所有请求原样转发到本机
+`127.0.0.1:15721`，模型映射、账号分流和计费仍由 cc-switch 负责，RelayDesk 只保存
+一个访问令牌。
+
+- 手机端：协议选 Anthropic，Base URL 填 `http://<本机IP>:18993`，API Key 填设置页里的令牌。
+- 令牌：首次开启自动生成；`flix models token --reset` 或设置页「重置令牌」轮换。
+- 只开放 `POST /v1/messages` 与 `GET /v1/models`；OpenAI 兼容路径不提供。
+- GUI：设置页「模型共享」开关 + 扫码/复制配置；`serve --model-port 18993` 供无界面部署。
+- 状态：`flix models status`（含监听、地址、令牌）。
+
 ## 自动更新
 
 RelayDesk 窗口启动后会自己检查 GitHub Release（设置里可关闭）：发现新版本就在后台下载、

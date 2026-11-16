@@ -62,6 +62,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="disable automatic clipboard sync to paired devices")
     ap.add_argument("--web-port", type=int, default=0, metavar="PORT",
                     help="also serve the browser send page on this port")
+    ap.add_argument("--model-port", type=int, default=0, metavar="PORT",
+                    help="also serve the LAN model gateway on this port")
     args = ap.parse_args(argv)
 
     lock, held_pid = _acquire_singleton()
@@ -80,7 +82,8 @@ def main(argv: list[str] | None = None) -> int:
                                       announce=not args.no_announce,
                                       clip_sync=not args.no_clip_sync,
                                       web_port=args.web_port,
-                                      multicast_if=args.multicast_if))
+                                      multicast_if=args.multicast_if,
+                                      model_port=args.model_port))
     except OSError as e:
         print(f"flixd: environment error: {e}", file=sys.stderr)
         return 5
