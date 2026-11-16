@@ -504,16 +504,34 @@ def _listening_pids(port: int) -> list[int]:
     return sorted(set(pids))
 
 
+def _pid_command_line(pid: int) -> str:
+    """Best-effort command line for a PID (Windows only, empty elsewhere)."""
+    if not sys.platform.startswith("win"):
+        return ""
+    with contextlib.suppress(Exception):
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}')"
+             ".CommandLine"],
+            capture_output=True, text=True, encoding="utf-8", errors="ignore",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            timeout=15).stdout
+        return (out or "").strip()
+    return ""
+
+
 def stop_gateway(port: int) -> dict:
-    """Stop whatever listens on the gateway port, verifying it first.
+    """Stop a standalone gateway on `port`; never kill the shared daemon.
 
     PID files go stale (restart, reuse by an unrelated process), so the port
-    is the source of truth and the image name is the safety check.
+    is the source of truth. A gateway hosted by `flix serve`/`flixd` owns the
+    device channel too — killing it would take the LAN relay down, so that
+    case is reported as `daemon_hosted` and left alone.
     """
     pids = _listening_pids(port)
     if not pids:
         return {"ok": True, "stopped": [], "detail": "not listening"}
-    stopped, refused = [], []
+    stopped, refused, hosted = [], [], []
     for pid in pids:
         image = ""
         if sys.platform.startswith("win"):
@@ -529,6 +547,11 @@ def stop_gateway(port: int) -> dict:
                           image.startswith("python")):
             refused.append({"pid": pid, "image": image})
             continue
+        cmdline = _pid_command_line(pid)
+        if cmdline and "models" not in cmdline.lower():
+            # `serve` / `flixd` share the process with the device channel.
+            hosted.append(pid)
+            continue
         try:
             if sys.platform.startswith("win"):
                 subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
@@ -543,7 +566,8 @@ def stop_gateway(port: int) -> dict:
             stopped.append(pid)
         except (OSError, subprocess.SubprocessError):
             refused.append({"pid": pid, "image": image or "?"})
-    return {"ok": not refused, "stopped": stopped, "refused": refused}
+    return {"ok": not refused, "stopped": stopped, "refused": refused,
+            "daemon_hosted": hosted}
 
 
 def qr_png(text: str, scale: int = 6) -> bytes:

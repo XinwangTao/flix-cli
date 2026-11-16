@@ -1747,7 +1747,10 @@ class MainWindow(QMainWindow):
         from .model_gateway import stop_gateway
         cfg = self._model_cfg()
         result = stop_gateway(cfg["port"])
-        if result.get("refused"):
+        if result.get("daemon_hosted"):
+            self.model_status.setText(
+                "共享已关闭；网关由本机服务托管，重启本机服务（或开关一次）后停止监听")
+        elif result.get("refused"):
             self.model_status.setText(
                 f"端口 {cfg['port']} 被其他程序占用，未终止："
                 f"{result['refused']}")

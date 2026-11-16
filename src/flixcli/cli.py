@@ -1030,11 +1030,14 @@ def cmd_models(args) -> int:
         return _models_serve(store, cfg)  # coroutine: runs until interrupted
     try:
         if action == "stop":
-            from .model_gateway import stop_gateway
-            cfg = load_config(store)
+            from .model_gateway import save_config, stop_gateway
+            cfg = save_config(store, enabled=False)
             result = stop_gateway(cfg["port"])
-            emit({"ok": result.get("ok", False), **result,
-                  "port": cfg["port"]}, args.json)
+            payload = {"ok": result.get("ok", False), **result,
+                       "port": cfg["port"]}
+            if not args.json and result.get("daemon_hosted"):
+                print("共享已关闭；网关由本机服务托管，重启本机服务后停止监听")
+            emit(payload, args.json)
             return 0 if result.get("ok") else 5
         if action == "token":
             token = (reset_token(store) if args.reset
