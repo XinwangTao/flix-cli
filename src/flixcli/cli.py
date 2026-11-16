@@ -991,13 +991,89 @@ async def cmd_serve(args) -> int:
                                 announce=not args.no_announce,
                                 clip_sync=not args.no_clip_sync,
                                 web_port=args.web_port,
-                                multicast_if=args.multicast_if)
+                                multicast_if=args.multicast_if,
+                                model_port=args.model_port)
     except OSError as e:
         emit({"error": "env", "detail": f"{e}", "hint": "port in use? choose "
                                                         "--device-port/--api-port"}, False)
         return 5
     finally:
         store.close()
+
+
+def cmd_models(args) -> int:
+    """LAN model gateway: phones talk Anthropic Messages, cc-switch does the rest."""
+    from .model_gateway import (lan_urls, load_config, reset_token,
+                                run_gateway, save_config, status_payload)
+    action = getattr(args, "action", None) or "status"
+    store = Store()
+    if action == "start":
+        changes = {"enabled": True}
+        if args.port:
+            changes["port"] = args.port
+        if args.upstream:
+            changes["upstream"] = args.upstream
+        if getattr(args, "allow_remote_upstream", False):
+            changes["allow_remote_upstream"] = True
+        try:
+            cfg = save_config(store, **changes)
+        except ValueError as exc:
+            emit({"error": "upstream", "detail": str(exc)}, args.json)
+            store.close()
+            return 2
+        if args.json:
+            print(json.dumps({"ok": True, "port": cfg["port"],
+                              "upstream": cfg["upstream"],
+                              "token": cfg["token"],
+                              "urls": lan_urls(cfg["port"])},
+                             ensure_ascii=False, indent=1), flush=True)
+        return _models_serve(store, cfg)  # coroutine: runs until interrupted
+    try:
+        if action == "stop":
+            from .model_gateway import stop_gateway
+            cfg = load_config(store)
+            result = stop_gateway(cfg["port"])
+            emit({"ok": result.get("ok", False), **result,
+                  "port": cfg["port"]}, args.json)
+            return 0 if result.get("ok") else 5
+        if action == "token":
+            token = (reset_token(store) if args.reset
+                     else load_config(store)["token"])
+            emit({"ok": True, "token": token}, args.json)
+            return 0
+        payload = status_payload(store)
+        if not args.json:
+            state = "运行中" if payload["listening"] else "未运行"
+            print(f"状态: {state}（{'已开启' if payload['enabled'] else '未开启'}）")
+            print(f"端口: {payload['port']}  上游: {payload['upstream']}")
+            print(f"地址: {', '.join(payload['urls'])}")
+            print(f"令牌: {payload['token']}")
+            stats = payload.get("stats") or {}
+            if stats:
+                mins = int(stats.get("uptime", 0)) // 60
+                print(f"请求: {stats.get('requests', 0)}（成功 {stats.get('ok', 0)}，"
+                      f"失败 {stats.get('failed', 0)}，拒绝 {stats.get('rejected', 0)}）"
+                      f"  进行中 {stats.get('active', 0)}  已运行 {mins} 分钟")
+            if payload.get("detail") and not payload["listening"]:
+                print(f"提示: {payload['detail']}")
+            return 0
+        emit(payload, args.json)
+        return 0
+    finally:
+        store.close()
+
+
+async def _models_serve(store, cfg) -> int:
+    from .model_gateway import run_gateway
+    try:
+        await run_gateway(store, cfg["port"], cfg["upstream"])
+    except OSError as exc:
+        emit({"error": "port", "detail": f"{exc}",
+              "hint": f"端口 {cfg['port']} 被占用？用 --port 换一个"}, False)
+        return 5
+    finally:
+        store.close()
+    return 0
 
 
 def _normalize_shell_argv(argv: list[str]) -> list[str]:
@@ -1292,9 +1368,25 @@ def main(argv: list[str] | None = None) -> int:
                    help="disable auto clipboard sync to paired devices")
     p.add_argument("--web-port", type=int, default=0,
                    help="enable the web send page on this port (e.g. 18992)")
+    p.add_argument("--model-port", type=int, default=0,
+                   help="also serve the LAN model gateway on this port "
+                        "(e.g. 18993)")
     p.add_argument("--multicast-if", default=None, metavar="IP",
                    help="interface IP for discovery multicast (default: auto)")
     p.set_defaults(fn=cmd_serve)
+
+    p = add("models", "LAN model gateway for phones: Anthropic Messages "
+                      "proxied to the local cc-switch proxy", cmd_models)
+    p.add_argument("action", nargs="?", default="status",
+                   choices=["start", "stop", "status", "token"])
+    p.add_argument("--port", type=int, default=None,
+                   help="listen port (default 18993)")
+    p.add_argument("--upstream", default=None,
+                   help="local proxy to forward to (default http://127.0.0.1:15721)")
+    p.add_argument("--reset", action="store_true",
+                   help="token: mint a new token")
+    p.add_argument("--allow-remote-upstream", action="store_true",
+                   help="allow an upstream outside 127.0.0.1 (default: loopback only)")
 
     args = ap.parse_args(_normalize_shell_argv(
         list(sys.argv[1:] if argv is None else argv)))

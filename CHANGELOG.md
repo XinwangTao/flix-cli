@@ -3,6 +3,37 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号与 GitHub Release 标签一致。
 可执行产物见 [Releases](https://github.com/XinwangTao/flix-cli/releases)。
 
+## [未发布]
+
+### 新增
+- 局域网模型共享网关：`flix models start|status|token`，把手机（Anthropic Messages）
+  的请求反向代理到本机 cc-switch（默认 `127.0.0.1:15721`），带固定令牌鉴权、
+  SSE 流式透传与 401/502/504 明确失败码。
+- `flix serve` / `flixd` 新增 `--model-port`；GUI 设置页新增「模型共享」开关、
+  二维码与配置复制；令牌保存在本地 prefs，重启后按开关状态自动恢复。
+
+### 修复 / 优化（模型网关）
+- 请求体上限从 aiohttp 默认的 1 MiB 提到 32 MiB（`max_body_mb` 可调），超限返回
+  Anthropic 格式的 413，而不是 aiohttp 的纯文本错误页。
+- 透传上游的 `request-id`、`retry-after`、`anthropic-ratelimit-*` 响应头；4xx/5xx 计入
+  失败，流式中途客户端断开计入 aborted，不再抛栈。
+- `/health` 增加 uptime 与请求/成功/失败/拒绝/进行中计数，GUI 设置页与
+  `flix models status` 直接展示。
+- 设置页可改上游地址（仅 http/https，保存后自动重启网关）；`ipconfig` 结果缓存 60s。
+
+### 安全 / 正确性（对抗审查后修复）
+- **配置源统一**：GUI 设置页原先把 `modelGateway` 写进 `~/.relaydesk_gui.json`，而网关读
+  `%APPDATA%/flixcli/shared_preferences.json`，导致界面显示的令牌对运行中网关无效（手机 401）。
+  现在 GUI 直接使用 daemon 的 Store。
+- SSE 已发出响应头后，上游中途断开不再尝试写第二个响应（会破坏 chunked 流），改为关闭连接并计数。
+- 模型端口被占用不再拖垮整个 daemon（设备通道/桌面 API 继续运行），提示不再误导到 `--device-port`。
+- 停止网关改为「端口 → 进程名」校验后终止，删除持久化 PID（PID 复用可能杀掉无关进程）。
+- 查询串令牌仅对使用说明页有效，`/v1/messages` 必须用请求头；`/health` 无令牌只返回 `{"ok":true}`；
+  页面加 `no-store`/`no-referrer`，Base URL 不再信任 Host 头。
+- 上游地址默认仅允许回环（防 SSRF），拒绝带用户名密码的 URL；远端上游需显式
+  `--allow-remote-upstream` / `allow_remote_upstream`。
+- 日志不再打印完整令牌；请求体上限限制在 1–128 MiB；端口与配置解析容错。
+
 ## [v2.4.0] - 2026-11-09
 
 ### 新增

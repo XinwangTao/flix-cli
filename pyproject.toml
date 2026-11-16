@@ -15,6 +15,7 @@ classifiers = [
 dependencies = [
     "aiohttp>=3.9",
     "cryptography>=50,<51",
+    "segno>=1.6,<2",
 ]
 
 [project.urls]

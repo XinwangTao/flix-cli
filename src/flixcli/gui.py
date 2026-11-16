@@ -888,6 +888,7 @@ class MainWindow(QMainWindow):
         for worker in (self.worker, self.action_worker,
                        getattr(self, "_discovery_worker", None),
                        getattr(self, "_update_worker", None),
+                       getattr(self, "_model_stats_thread", None),
                        getattr(self, "_prefetch_worker", None)):
             if worker is not None:
                 try:
@@ -1543,6 +1544,57 @@ class MainWindow(QMainWindow):
         self.auto_update_check.toggled.connect(
             lambda on: self._save_prefs(auto_update=bool(on)))
         card_box.addWidget(self.auto_update_check)
+
+        # Phone model sharing: one Anthropic endpoint on the LAN, forwarded to
+        # the local cc-switch proxy. The token is the only secret we hold.
+        card_box.addSpacing(10)
+        self.model_check = QCheckBox("模型共享：让手机用局域网地址访问本机模型")
+        self.model_check.setChecked(self._model_cfg().get("enabled") is True)
+        self.model_check.toggled.connect(self.toggle_model_gateway)
+        card_box.addWidget(self.model_check)
+        self.model_status = QLabel("")
+        self.model_status.setObjectName("muted")
+        self.model_status.setWordWrap(True)
+        # A long Chinese status line has no spaces to break on; without this
+        # the label's minimum width widens the whole stack and squeezes the
+        # transcript.
+        self.model_status.setSizePolicy(QSizePolicy.Ignored,
+                                        QSizePolicy.Preferred)
+        self.model_status.setMinimumWidth(0)
+        card_box.addWidget(self.model_status)
+        upstream_row = QHBoxLayout()
+        upstream_label = QLabel("上游")
+        self.model_upstream = QLineEdit(self._model_cfg().get("upstream", ""))
+        self.model_upstream.setPlaceholderText("http://127.0.0.1:15721")
+        self.model_upstream.setClearButtonEnabled(True)
+        self.model_upstream_save = QPushButton("保存上游")
+        self.model_upstream_save.setObjectName("secondaryButton")
+        self.model_upstream_save.setCursor(Qt.PointingHandCursor)
+        self.model_upstream_save.clicked.connect(self.save_model_upstream)
+        upstream_row.addWidget(upstream_label)
+        upstream_row.addWidget(self.model_upstream, 1)
+        upstream_row.addWidget(self.model_upstream_save)
+        card_box.addLayout(upstream_row)
+        model_row = QHBoxLayout()
+        self.model_copy_button = QPushButton("复制手机配置")
+        self.model_copy_button.setObjectName("secondaryButton")
+        self.model_copy_button.setCursor(Qt.PointingHandCursor)
+        self.model_copy_button.clicked.connect(self.copy_model_config)
+        self.model_qr_button = QPushButton("显示二维码")
+        self.model_qr_button.setObjectName("secondaryButton")
+        self.model_qr_button.setCursor(Qt.PointingHandCursor)
+        self.model_qr_button.clicked.connect(self.show_model_qr)
+        self.model_token_button = QPushButton("重置令牌")
+        self.model_token_button.setObjectName("secondaryButton")
+        self.model_token_button.setCursor(Qt.PointingHandCursor)
+        self.model_token_button.clicked.connect(self.reset_model_token)
+        model_row.addWidget(self.model_copy_button)
+        model_row.addWidget(self.model_qr_button)
+        model_row.addWidget(self.model_token_button)
+        model_row.addStretch()
+        card_box.addLayout(model_row)
+        self._refresh_model_status(live=False)
+
         hint = QLabel("主题、材质和动效立即应用到整个窗口，下次启动沿用")
         hint.setObjectName("muted")
         card_box.addWidget(hint)
@@ -1578,7 +1630,180 @@ class MainWindow(QMainWindow):
         self._sync_theme_button()
         self._sync_glass_button()
         self._sync_animation_button()
-        return page
+        # The card list outgrew a small window; scroll it so the stack's
+        # minimum height stays driven by the chat page, not by settings.
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setObjectName("settingsScroll")
+        scroll.setWidget(page)
+        return scroll
+
+    # -- model gateway (phone sharing) --------------------------------------
+    def _model_store(self):
+        """The gateway's own Store: one source of truth for its config.
+
+        The GUI keeps window preferences in ~/.relaydesk_gui.json, but the
+        gateway runs as `flix models start` or inside the daemon and reads
+        `%APPDATA%/flixcli/shared_preferences.json`. Writing the gateway config
+        into the GUI file minted a second token that never reached the running
+        process, so the phone got 401 with a token the UI showed as valid.
+        """
+        from .config import Store
+        return Store()
+
+    def _model_cfg(self) -> dict:
+        from .model_gateway import load_config
+        with self._model_store() as store:
+            return load_config(store)
+
+    def _refresh_model_status(self, live: bool = True):
+        from .model_gateway import lan_urls, port_open
+        cfg = self._model_cfg()
+        token = cfg.get("token") or "（未生成，开启后生成）"
+        urls = " / ".join(lan_urls(cfg["port"]))
+        running = bool(live and port_open(cfg["port"]))
+        if running:
+            state = "运行中"
+        elif cfg.get("enabled"):
+            state = "已开启但未运行（重启本机服务或再点一次开关）" if live else "已开启"
+        else:
+            state = "未开启"
+        self.model_status.setText(f"{state}｜{urls}｜令牌 {token}")
+        if running:
+            self._fetch_model_stats(cfg["port"], cfg["token"])
+
+    def _fetch_model_stats(self, port: int, token: str):
+        """Pull /health off the GUI thread; the numbers land in the same label."""
+        from .model_gateway import probe
+
+        def done(live: dict) -> None:
+            stats = live.get("stats") or {}
+            if not stats:
+                return
+            mins = int(stats.get("uptime", 0)) // 60
+            no = "\n请求 "
+            self.model_status.setText(
+                self.model_status.text() + no +
+                f"{stats.get('requests', 0)}（成功 {stats.get('ok', 0)}，"
+                f"失败 {stats.get('failed', 0)}，拒绝 {stats.get('rejected', 0)}，"
+                f"超限 {stats.get('too_large', 0)}）"
+                f"｜进行中 {stats.get('active', 0)}｜已运行 {mins} 分钟")
+
+        thread = ApiThread(lambda: probe(port, token, timeout=2.0))
+        thread.result.connect(done)
+        thread.failed.connect(lambda _msg: None)
+        self._model_stats_thread = thread
+        thread.start()
+
+    def save_model_upstream(self):
+        from .model_gateway import save_config
+        raw = self.model_upstream.text().strip()
+        try:
+            with self._model_store() as store:
+                cfg = save_config(store, upstream=raw)
+        except ValueError as exc:
+            self.model_status.setText(str(exc))
+            return
+        self.model_upstream.setText(cfg["upstream"])
+        if cfg.get("enabled"):
+            # A live gateway keeps the old target until it is restarted.
+            self._stop_model_gateway()
+            self._spawn_model_gateway()
+        self._refresh_model_status()
+        QTimer.singleShot(1500, self._refresh_model_status)
+
+    def toggle_model_gateway(self, on: bool):
+        from .model_gateway import save_config
+        with self._model_store() as store:
+            save_config(store, enabled=bool(on))
+        if on:
+            self._spawn_model_gateway()
+        else:
+            self._stop_model_gateway()
+        self._refresh_model_status()
+        QTimer.singleShot(1500, self._refresh_model_status)
+
+    def _spawn_model_gateway(self):
+        import subprocess
+        from .config import APP_DIR
+        from .model_gateway import port_open
+        cfg = self._model_cfg()
+        if port_open(cfg["port"]):
+            return  # already served by the daemon or a previous spawn
+        APP_DIR.mkdir(parents=True, exist_ok=True)
+        log_file = open(APP_DIR / "model-gateway.log", "ab")
+        kwargs = {"stdout": log_file, "stderr": log_file, "close_fds": True}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = (subprocess.DETACHED_PROCESS
+                                       | subprocess.CREATE_NO_WINDOW)
+        else:
+            kwargs["start_new_session"] = True
+        subprocess.Popen(cli_command(["models", "start"]), **kwargs)
+
+    def _stop_model_gateway(self):
+        """Stop by port, not by remembered PID (PIDs get reused)."""
+        from .model_gateway import stop_gateway
+        cfg = self._model_cfg()
+        result = stop_gateway(cfg["port"])
+        if result.get("refused"):
+            self.model_status.setText(
+                f"端口 {cfg['port']} 被其他程序占用，未终止："
+                f"{result['refused']}")
+
+    def copy_model_config(self):
+        from .model_gateway import lan_urls
+        cfg = self._model_cfg()
+        url = lan_urls(cfg["port"])[0]
+        text = ("协议：Anthropic Messages\n"
+                f"Base URL：{url}\n"
+                f"API Key：{cfg['token']}\n"
+                "模型：claude-sonnet-4-5 / claude-opus-4-1 / "
+                "claude-haiku-4-5 / claude-fable-5")
+        QApplication.clipboard().setText(text)
+        self.model_status.setText("手机配置已复制到剪贴板")
+
+    def reset_model_token(self):
+        from .model_gateway import load_config, port_open, reset_token
+        with self._model_store() as store:
+            load_config(store)      # make sure a config exists before rotating
+            reset_token(store)
+        cfg = self._model_cfg()
+        if port_open(cfg["port"]):
+            # The running process keeps the old token in memory.
+            self._stop_model_gateway()
+            self._spawn_model_gateway()
+            QTimer.singleShot(1500, self._refresh_model_status)
+        self._refresh_model_status(live=False)
+        self.model_status.setText("令牌已重置并重启网关，手机端需重新填写新令牌")
+
+    def show_model_qr(self):
+        from .model_gateway import lan_urls, pair_text, qr_png
+        cfg = self._model_cfg()
+        try:
+            png = qr_png(pair_text(cfg))
+        except Exception as exc:  # segno missing or encoder failure
+            self.model_status.setText(f"二维码生成失败：{exc}")
+            return
+        pixmap = QPixmap()
+        pixmap.loadFromData(png)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("手机扫码配置")
+        layout = QVBoxLayout(dialog)
+        image = QLabel()
+        image.setPixmap(pixmap)
+        image.setAlignment(Qt.AlignCenter)
+        layout.addWidget(image)
+        tip = QLabel(f"扫码后在手机浏览器里打开，即可看到地址与令牌\n"
+                     f"地址：{lan_urls(cfg['port'])[0]}\n令牌：{cfg['token']}")
+        tip.setWordWrap(True)
+        layout.addWidget(tip)
+        done = QPushButton("完成")
+        done.setObjectName("primaryBtn")
+        done.clicked.connect(dialog.accept)
+        layout.addWidget(done)
+        dialog.exec()
 
     def _load_prefs(self) -> dict:
         try:
@@ -1685,6 +1910,8 @@ class MainWindow(QMainWindow):
         stack = self.workspace_stack
         if stack.currentIndex() == index:
             return
+        if index == self.PAGE_INDEX.get("settings"):
+            self._refresh_model_status()
         if not animate or not self.animations or not self.isVisible():
             self._finish_page_fade()
             stack.setCurrentIndex(index)
