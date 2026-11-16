@@ -207,7 +207,14 @@ def _run_dns(args: list[str], seconds: float, ready=None) -> str:
     try:
         while True:
             left = deadline - time.monotonic()
-            if left <= 0 or not select.select([fd], [], [], left)[0]:
+            if left <= 0:
+                break
+            try:
+                readable = select.select([fd], [], [], left)[0]
+            except OSError:
+                # Windows cannot select() on pipes; fall back to `adb mdns`.
+                break
+            if not readable:
                 break
             data = os.read(fd, 4096)
             if not data:
