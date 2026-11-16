@@ -216,15 +216,22 @@ class LocalApi:
         if env and is_port_text(env):
             candidates.insert(0, int(env))
         candidates += [p for p in cls.CANDIDATE_PORTS if p not in candidates]
+        fallback = None
         for port in candidates:
             api = cls(port)
             try:
                 data = api.get("/api/overview")
-                if isinstance(data, dict) and "self" in data and "devices" in data:
-                    return api
             except ApiError:
                 continue
-        return None
+            if isinstance(data, dict) and "self" in data and "devices" in data:
+                # A daemon from another build answers the same old endpoints
+                # but lacks the newer ones, so prefer an exact version match
+                # and only fall back to whatever is there.
+                if data.get("version") == APP_VERSION:
+                    return api
+                if fallback is None:
+                    fallback = api
+        return fallback
 
     def get(self, path: str):
         return self._request(path)
@@ -881,9 +888,47 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(980, 640)
         if self.width() < 980 or self.height() < 640:
             self.resize(1280, 840)
+        # macOS paints the backdrop itself; keep it fed from the live desktop.
+        if sys.platform == "darwin":
+            self._start_glass_refresh()
+
+    def _start_glass_refresh(self) -> None:
+        if getattr(self, "_glass_timer", None) is not None:
+            return
+        self._glass_timer = QTimer(self)
+        self._glass_timer.setInterval(300)
+        self._glass_timer.timeout.connect(self._refresh_glass_source)
+        self._glass_timer.start()
+
+    def _refresh_glass_source(self) -> None:
+        """Re-grab the desktop behind the window so the blur stays live.
+
+        QScreen.grabWindow would photograph this window too (white feedback),
+        so CoreGraphics lists only the windows below ours.
+        """
+        if not self.glass or system_contrast_enabled():
+            return
+        root = getattr(self, "glass_root", None)
+        if root is None or not root.isVisible():
+            return
+        # Only the real cocoa window has a CGWindow behind it; the offscreen
+        # platform used by tests has no window server to ask.
+        app = QApplication.instance()
+        if app is None or app.platformName() != "cocoa":
+            return
+        from . import desktop_capture
+        origin = root.mapToGlobal(QPoint(0, 0))
+        image = desktop_capture.grab_below(
+            int(self.winId()), origin.x(), origin.y(),
+            max(1, root.width()), max(1, root.height()))
+        if image is None or image.isNull():
+            return
+        root.set_snapshot((image, origin))
 
     def closeEvent(self, event):
         self.timer.stop()
+        if getattr(self, "_glass_timer", None) is not None:
+            self._glass_timer.stop()
         self.offline_mode = True  # stop the refresh/discovery churn
         for worker in (self.worker, self.action_worker,
                        getattr(self, "_discovery_worker", None),
@@ -901,12 +946,19 @@ class MainWindow(QMainWindow):
     # ---------- frameless plumbing ----------
 
     def _apply_system_backdrop(self) -> bool:
-        """Ask DWM for the real Mica/Acrylic surface (Windows 11 22H2+).
+        """Hand the surface to the OS compositor when it can blur for real.
 
-        Returns True when DWM accepted the request. The app then stops drawing
-        its launch-time desktop still: the blur follows whatever is actually
+        Windows 11 22H2+ paints Mica/Acrylic; macOS gets an NSVisualEffectView
+        inserted behind Qt's own view. Either way the app stops drawing its
+        launch-time desktop still: the blur follows whatever is actually
         behind the window instead of a frozen screenshot.
         """
+        if sys.platform == "darwin":
+            # AppKit will not composite a blur view behind Qt's layer-backed
+            # content view, and re-parenting the content view stops Qt from
+            # rendering at all. macOS therefore refreshes the painted backdrop
+            # from a live screen capture instead (see _refresh_glass_source).
+            return False
         if sys.platform != "win32":
             return False
         try:
@@ -1015,9 +1067,13 @@ class MainWindow(QMainWindow):
         self.apply_theme(self.theme)
         # Windows 11 paints Mica/Acrylic behind the window itself. When DWM
         # accepts it, the app stops compositing its own still; otherwise the
-        # snapshot fallback above stays active.
-        self._native_glass = self._apply_system_backdrop()
-        self.glass_root.set_native(self._native_glass)
+        # snapshot fallback above stays active. macOS re-parents Qt's content
+        # view, which is only safe once the window is on screen (showEvent).
+        self._native_glass = False
+        self.glass_root.set_native(False)
+        if sys.platform != "darwin":
+            self._native_glass = self._apply_system_backdrop()
+            self.glass_root.set_native(self._native_glass)
         if self._native_glass:
             # The first stylesheet ran before we knew DWM would own the
             # surface, so it still carried the heavy fallback alphas.
@@ -1861,16 +1917,21 @@ class MainWindow(QMainWindow):
         saved = self._load_prefs().get("glass")
         if isinstance(saved, bool):
             return saved
-        # Windows is the only platform where we can snapshot the desktop
-        # before the window maps. HIG accessibility: respect the system's
-        # "Reduce transparency" switch when the user has not chosen yet.
-        return (sys.platform == "win32" and system_transparency_enabled()
+        # Windows (DWM Mica/Acrylic) and macOS (NSVisualEffectView) can both
+        # blur for real; elsewhere the snapshot fallback is not worth showing
+        # by default. HIG accessibility: respect "Reduce transparency" when the
+        # user has not chosen yet.
+        return (sys.platform in ("win32", "darwin")
+                and system_transparency_enabled()
                 and not system_contrast_enabled())
 
     def _glass_visible(self) -> bool:
         root = getattr(self, "glass_root", None)
-        return bool(self.glass and not system_contrast_enabled()
-                    and root is not None and root.has_source())
+        if root is None or not self.glass or system_contrast_enabled():
+            return False
+        # The desktop still is only needed by the painted fallback. macOS draws
+        # a live NSVisualEffectView instead, so it needs no snapshot.
+        return root.has_source() or sys.platform in ("win32", "darwin")
 
     def set_glass(self, enabled: bool):
         self.glass = bool(enabled)
@@ -3726,7 +3787,8 @@ def main(argv: list[str] | None = None, *, api_port: int = 8898) -> int:
     app.setStyle("Fusion")
     app.setFont(QFont("Microsoft YaHei UI", 9))
     # Snapshot before the window maps, or the material would contain itself.
-    snapshot = desktop_snapshot() if sys.platform == "win32" else None
+    # macOS re-grabs it on a timer afterwards (see _refresh_glass_source).
+    snapshot = desktop_snapshot() if sys.platform in ("win32", "darwin") else None
     window = MainWindow(api_port, snapshot=snapshot)
     window.setWindowIcon(logo_icon())
     window.show()
@@ -3751,6 +3813,7 @@ def main(argv: list[str] | None = None, *, api_port: int = 8898) -> int:
                     fh.write(f"size={root.size().width()}x{root.size().height()}\n")
                     fh.write(f"cache={root._cache}\n")
                     fh.write(f"error={getattr(root, '_last_error', None)}\n")
+                    fh.write(f"native={getattr(window, '_native_glass', None)}\n")
             except OSError:
                 pass
         QTimer.singleShot(2500, _dump)

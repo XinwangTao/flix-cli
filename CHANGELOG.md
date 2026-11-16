@@ -5,6 +5,13 @@
 
 ## [未发布]
 
+### 新增（macOS 实时毛玻璃）
+- macOS 窗口默认启用毛玻璃材质：每 300ms 用 CoreGraphics 截取「本窗口之下」的屏幕内容
+  （`CGWindowListCreateImage` + below-window），再在 Qt 内模糊合成，窗口移动/背后内容变化
+  都会实时跟随；`QScreen.grabWindow` 会把窗口自己拍进去，所以不用它。
+- `GET /api/overview` 增加 `version`；GUI 优先选择版本一致的本机服务，避免复用旧版 daemon
+  导致新接口 404。
+
 ### 新增（扫码快连）
 - `flix qrcode --link` 输出 Android 端唯一能解析的 `relaydesk://pair?fp&ip&port&code`；
   `--with-model` 再把模型网关地址与令牌写进同一张码，一次扫码完成配对 + 模型共享配置
