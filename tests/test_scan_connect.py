@@ -176,6 +176,24 @@ class WirelessConnectTests(unittest.TestCase):
         self.assertEqual(ctx.exception.kind, "relay-python")
 
 
+class RelayLifecycleTests(unittest.TestCase):
+    def test_stop_relay_never_kills_a_stranger_and_keeps_the_pid_file(self):
+        import subprocess
+        from flixcli import adb_wireless
+
+        proc = subprocess.Popen(["sleep", "5"])
+        pid_file = adb_wireless._pid_file(49999)
+        try:
+            pid_file.write_text(str(proc.pid), encoding="utf-8")
+            self.assertFalse(adb_wireless.stop_relay(49999))
+            self.assertIsNone(proc.poll(), "不是本工具启动的进程，不能被它杀掉")
+            self.assertTrue(pid_file.exists(), "没杀成功就要保留 pidfile，否则进程失联")
+        finally:
+            proc.kill()
+            proc.wait()
+            pid_file.unlink(missing_ok=True)
+
+
 class RelaySourceTests(unittest.TestCase):
     def test_embedded_relay_source_compiles(self):
         from flixcli.adb_wireless import RELAY_SOURCE

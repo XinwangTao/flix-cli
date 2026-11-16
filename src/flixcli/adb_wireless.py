@@ -272,11 +272,21 @@ def _pid_file(port: int) -> Path:
     return _run_dir() / f"relay_{port}.pid"
 
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
 def stop_relay(port: int = DEFAULT_RELAY_PORT) -> bool:
     """Stop a relay we started earlier on this port, if any.
 
     The pid file can outlive a reboot, so the command line is re-checked before
-    signalling: a recycled pid must never be killed by accident.
+    signalling: a recycled pid must never be killed by accident. The pid file is
+    only removed once the process is really gone -- dropping it while the relay
+    still runs would orphan the process and keep the port busy forever.
     """
     pid_file = _pid_file(port)
     try:
@@ -288,11 +298,17 @@ def stop_relay(port: int = DEFAULT_RELAY_PORT) -> bool:
                                  capture_output=True, text=True, timeout=5).stdout
     except (OSError, subprocess.SubprocessError):
         command = ""
-    if "flix_adb_relay" in command:
+    if "adb_relay" in command:
         try:
             os.kill(pid, signal.SIGTERM)
         except OSError:
             pass
+        for _ in range(20):
+            if not _pid_alive(pid):
+                break
+            time.sleep(0.05)
+    if _pid_alive(pid):
+        return False
     try:
         pid_file.unlink()
     except OSError:
