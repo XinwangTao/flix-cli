@@ -13,14 +13,16 @@ from __future__ import annotations
 
 import os
 import re
+import select
 import shutil
 import signal
 import socket
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
+
+from .config import APP_DIR
 
 DEFAULT_RELAY_PORT = 40009
 BROWSE_SERVICE = "_adb-tls-connect._tcp"
@@ -153,44 +155,94 @@ def parse_adb_mdns(output: str) -> tuple[str, int, str] | None:
 # ---------- system helpers ----------
 
 def _system_python() -> str:
-    """Apple's python is exempt from the Local Network gate; prefer it."""
-    if sys.platform == "darwin" and os.path.exists(SYSTEM_PYTHON):
+    """Apple's python is exempt from the Local Network gate; prefer it.
+
+    In a frozen bundle sys.executable is the app binary, so running it as an
+    interpreter would just re-enter our own CLI. Refuse instead of spawning
+    something wrong.
+    """
+    if os.path.exists(SYSTEM_PYTHON):
         return SYSTEM_PYTHON
+    if getattr(sys, "frozen", False):
+        raise AdbWirelessError(
+            "relay-python", f"中继需要系统解释器 {SYSTEM_PYTHON}，冻结包内不可用")
     return sys.executable
 
 
-def _run_dns(args: list[str], seconds: float) -> str:
+def _run_dir() -> Path:
+    """Private (0700) spot for the relay script, pid file and log.
+
+    /tmp is world-writable; a predictable name there lets another local user
+    pre-create the path and race us. Persisting under APP_DIR avoids that.
+    """
+    path = APP_DIR / "run"
+    try:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+    return path
+
+
+def _run_dns(args: list[str], seconds: float, ready=None) -> str:
+    """Run dns-sd for at most `seconds`, stopping as soon as `ready` is true.
+
+    Fixed sleeps per lookup cost 3x the timeout on every connect; the parsers
+    already know what a complete answer looks like, so exit as soon as it lands.
+    """
     if shutil.which("dns-sd") is None:
         raise AdbWirelessError("no-dns-sd",
                                "dns-sd not found; wireless discovery needs macOS")
     try:
+        # Binary + os.read: a buffered TextIOWrapper would swallow later lines
+        # into user space, where select() can no longer see them and the
+        # early-exit below would wait out the whole timeout.
         proc = subprocess.Popen(["dns-sd", *args], stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True)
+                                stderr=subprocess.STDOUT)
     except OSError as exc:
         raise AdbWirelessError("discovery-failed", f"dns-sd 启动失败: {exc}") from exc
+    chunks: list[bytes] = []
+    deadline = time.monotonic() + seconds
+    fd = proc.stdout.fileno()
     try:
-        out, _ = proc.communicate(timeout=seconds)
-    except subprocess.TimeoutExpired:
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0 or not select.select([fd], [], [], left)[0]:
+                break
+            data = os.read(fd, 4096)
+            if not data:
+                break
+            chunks.append(data)
+            if ready and ready(b"".join(chunks).decode("utf-8", "replace")):
+                break
+    finally:
         proc.terminate()
         try:
-            out, _ = proc.communicate(timeout=2)
+            proc.communicate(timeout=2)
         except subprocess.TimeoutExpired:
             proc.kill()
-            out, _ = proc.communicate()
-    return out or ""
+            proc.communicate()
+    return b"".join(chunks).decode("utf-8", "replace")
 
 
 def discover(timeout: float = 3.0, adb_path: str | None = None) -> dict:
     """Find the phone's wireless debugging endpoint."""
     instance, host, port, ip = "", "", 0, ""
     if shutil.which("dns-sd"):
-        instance = parse_browse(_run_dns(["-B", BROWSE_SERVICE, "local"], timeout))
+        instance = parse_browse(
+            _run_dns(["-B", BROWSE_SERVICE, "local"], timeout,
+                     ready=lambda out: bool(parse_browse(out))))
         if instance:
-            resolved = parse_resolve(
-                _run_dns(["-L", instance, BROWSE_SERVICE, "local"], timeout))
+            resolved = None
+            output = _run_dns(
+                ["-L", instance, BROWSE_SERVICE, "local"], timeout,
+                ready=lambda out: parse_resolve(out) is not None)
+            resolved = parse_resolve(output)
             if resolved:
                 host, port = resolved
-                ip = parse_ipv4(_run_dns(["-G", "v4", host], timeout))
+                ip = parse_ipv4(_run_dns(
+                    ["-G", "v4", host], timeout,
+                    ready=lambda out: bool(parse_ipv4(out))))
     if not ip:
         # Linux/Windows: adb's own mDNS browser is the portable fallback.
         adb = adb_path or os.environ.get("ANDROID_ADB", "adb")
@@ -210,7 +262,7 @@ def discover(timeout: float = 3.0, adb_path: str | None = None) -> dict:
 
 
 def _pid_file(port: int) -> Path:
-    return Path(tempfile.gettempdir()) / f"flix_adb_relay_{port}.pid"
+    return _run_dir() / f"relay_{port}.pid"
 
 
 def stop_relay(port: int = DEFAULT_RELAY_PORT) -> bool:
@@ -250,8 +302,8 @@ def port_open(port: int, timeout: float = 0.2) -> bool:
 
 
 def _relay_script_path() -> Path:
-    """Materialise RELAY_SOURCE to a temp file (rewritten if it drifted)."""
-    path = Path(tempfile.gettempdir()) / "flix_adb_relay_script.py"
+    """Materialise RELAY_SOURCE to a private file (rewritten if it drifted)."""
+    path = _run_dir() / "adb_relay_script.py"
     try:
         if path.read_text(encoding="utf-8") == RELAY_SOURCE:
             return path
@@ -286,7 +338,7 @@ def start_relay(target_ip: str, target_port: int,
             f"{listen_port}-{listen_port + 9} 全被占用"
             + ("（含用户已有的中继）" if busy else "") + "，换一个 --relay-port")
     listen_port = chosen
-    log_path = Path(tempfile.gettempdir()) / f"flix_adb_relay_{listen_port}.log"
+    log_path = _run_dir() / f"relay_{listen_port}.log"
     log = open(log_path, "w", encoding="utf-8")  # noqa: SIM115 - lives with the child
     try:
         proc = subprocess.Popen(
@@ -330,6 +382,7 @@ def connect(adb_path: str | None = None, relay_port: int = DEFAULT_RELAY_PORT,
         out = subprocess.run([adb, "connect", serial], capture_output=True,
                              text=True, timeout=adb_timeout)
     except (OSError, subprocess.SubprocessError) as exc:
+        stop_relay(relay["listen"])
         raise AdbWirelessError("connect-failed", f"adb connect 失败: {exc}") from exc
     devices_out = ""
     try:
@@ -341,6 +394,9 @@ def connect(adb_path: str | None = None, relay_port: int = DEFAULT_RELAY_PORT,
     ok = any(line.split()[:1] == [serial] and "device" in line.split()[1:2]
              for line in devices_out.splitlines())
     if not ok:
+        # A relay nobody talks to is a leaked process: tear it down before
+        # reporting the failure, so a retry starts from a clean slate.
+        stop_relay(relay["listen"])
         raise AdbWirelessError(
             "connect-failed",
             (out.stdout or out.stderr or "adb connect 未返回成功").strip())

@@ -658,15 +658,22 @@ def cmd_qrcode(args) -> int:
             if args.with_model:
                 from .model_gateway import share_info
                 model = share_info(store)
-                out["note"] = ("扫码即配对并写入模型网关地址与令牌" if model
-                               else "模型共享未开启：二维码只含配对信息；"
-                                    "先运行 flix models start 再生成")
+                if model and model.get("listening"):
+                    out["note"] = "扫码即配对并写入模型网关地址与令牌"
+                elif model:
+                    out["note"] = ("模型共享已开启但未在监听：二维码仍带上地址与令牌，"
+                                   "请先在本机启动模型共享再让手机使用")
+                else:
+                    out["note"] = ("模型共享未开启：二维码只含配对信息；"
+                                   "先运行 flix models start 再生成")
             out["link"] = pair_uri(ident["fingerprint"], args.device_port, code,
                                    ips=ips,
                                    model_base=(model or {}).get("base", ""),
                                    model_token=(model or {}).get("token", ""))
             if model:
                 out["model"] = model
+                out["warning"] = ("二维码含模型令牌，等同密码：勿截图转发；"
+                                  "泄露后运行 flix models token --reset")
         emit(out, args.json)
         return 0
     finally:

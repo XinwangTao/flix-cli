@@ -3358,10 +3358,15 @@ class MainWindow(QMainWindow):
         image.setAlignment(Qt.AlignCenter)
         layout.addWidget(image)
         model = data.get("model") or None
-        tip = QLabel(
-            "手机打开 RelayDesk → 扫码添加设备\n"
-            + (f"同时下发模型网关：{model['base']}" if model else
-               "模型共享未开启：这次只配对；开启模型共享后重新扫码即可下发地址与令牌"))
+        if model and not model.get("listening"):
+            model_text = f"模型网关已开启但未监听：{model['base']}（先启动模型共享）"
+        elif model:
+            model_text = f"同时下发模型网关：{model['base']}"
+        else:
+            model_text = "模型共享未开启：这次只配对；开启模型共享后重新扫码即可下发地址与令牌"
+        tip = QLabel("手机打开 RelayDesk → 扫码添加设备\n" + model_text +
+                     ("\n⚠ 这张码含模型令牌，等同密码：勿拍照、勿转发；泄露后点「重置令牌」"
+                      if model else ""))
         tip.setWordWrap(True)
         layout.addWidget(tip)
         done = QPushButton("完成")

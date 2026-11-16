@@ -132,6 +132,50 @@ class PairLinkApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(query["model_token"], [body["model"]["token"]])
 
 
+class WirelessConnectTests(unittest.TestCase):
+    def test_connect_stops_the_relay_when_adb_never_sees_the_device(self):
+        from unittest import mock
+        from flixcli import adb_wireless
+
+        stopped = []
+
+        class FakeRun:
+            def __init__(self, stdout=""):
+                self.stdout = stdout
+                self.stderr = ""
+                self.returncode = 0
+
+        def fake_run(argv, **kwargs):
+            if argv[1] == "connect":
+                return FakeRun("connected to 127.0.0.1:40009\n")
+            return FakeRun("List of devices attached\n")  # device never appears
+
+        with mock.patch.object(adb_wireless, "discover",
+                               return_value={"ip": "10.0.0.9", "port": 41000,
+                                             "instance": "adb-test"}), \
+             mock.patch.object(adb_wireless, "start_relay",
+                               return_value={"listen": 40009, "pid": 1,
+                                             "log": ""}), \
+             mock.patch.object(adb_wireless, "stop_relay",
+                               side_effect=lambda port: stopped.append(port)), \
+             mock.patch.object(adb_wireless.shutil, "which",
+                               return_value="/usr/bin/adb"), \
+             mock.patch.object(adb_wireless.subprocess, "run", fake_run):
+            with self.assertRaises(adb_wireless.AdbWirelessError) as ctx:
+                adb_wireless.connect()
+        self.assertEqual(ctx.exception.kind, "connect-failed")
+        self.assertEqual(stopped, [40009], "失败的连接不该留下中继进程")
+
+    def test_frozen_bundle_refuses_to_be_used_as_an_interpreter(self):
+        from unittest import mock
+        from flixcli import adb_wireless
+        with mock.patch.object(adb_wireless.os.path, "exists", return_value=False), \
+             mock.patch.object(adb_wireless.sys, "frozen", True, create=True):
+            with self.assertRaises(adb_wireless.AdbWirelessError) as ctx:
+                adb_wireless._system_python()
+        self.assertEqual(ctx.exception.kind, "relay-python")
+
+
 class RelaySourceTests(unittest.TestCase):
     def test_embedded_relay_source_compiles(self):
         from flixcli.adb_wireless import RELAY_SOURCE

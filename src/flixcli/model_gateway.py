@@ -218,8 +218,16 @@ def share_info(store) -> dict | None:
     cfg = load_config(store)
     if not cfg.get("enabled"):
         return None
-    return {"base": lan_urls(cfg["port"])[0], "token": cfg["token"],
+    info = {"base": lan_urls(cfg["port"])[0], "token": cfg["token"],
             "port": cfg["port"]}
+    # Enabled but not listening is a real state (crashed or still starting);
+    # say so instead of handing out a dead endpoint.
+    try:
+        info["listening"] = bool(probe(cfg["port"], cfg["token"],
+                                       timeout=0.3).get("listening"))
+    except Exception:  # noqa: BLE001 - a probe failure must not block the QR
+        info["listening"] = False
+    return info
 
 
 def _token_from(request: web.Request, allow_query: bool = False) -> str:
