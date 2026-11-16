@@ -402,6 +402,10 @@ def connect(adb_path: str | None = None, relay_port: int = DEFAULT_RELAY_PORT,
     relay = start_relay(found["ip"], found["port"], relay_port, timeout=timeout)
     serial = f"127.0.0.1:{relay['listen']}"
     try:
+        # A transport registered by an earlier run can survive as "offline";
+        # adb connect would then answer "already connected" and verify fails.
+        subprocess.run([adb, "disconnect", serial], capture_output=True,
+                       text=True, timeout=adb_timeout)
         out = subprocess.run([adb, "connect", serial], capture_output=True,
                              text=True, timeout=adb_timeout)
     except (OSError, subprocess.SubprocessError) as exc:
