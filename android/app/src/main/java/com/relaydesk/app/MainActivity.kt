@@ -1644,7 +1644,8 @@ class MainActivity : Activity() {
                         (if (modelBase.isNotEmpty()) "模型网关：$modelBase\n" else "") +
                         "请与对方屏幕核对后确认。")
                     .setPositiveButton("配对") { _, _ ->
-                        pairScanned(realFp, ip, port, name, modal, modelBase, modelToken)
+                        pairScanned(realFp, ip, port, name, modal, code,
+                                    modelBase, modelToken)
                     }
                     .setNegativeButton("取消", null)
                     .show()
@@ -1653,9 +1654,13 @@ class MainActivity : Activity() {
     }
 
     private fun pairScanned(fp: String, ip: String, port: Int, name: String,
-                            modal: JSONObject?, modelBase: String = "",
-                            modelToken: String = "") {
+                            modal: JSONObject?, peerCode: String = "",
+                            modelBase: String = "", modelToken: String = "") {
         val myKey = store.ownPairKey(prefs)
+        // The peer verifies the 4-digit code *it* printed in its own QR, so the
+        // scanned code must be sent back; sending our own key was rejected
+        // with `302 verifyCode mismatch`.
+        val verifyCode = peerCode.ifEmpty { myKey }
         store.upsertDevice(fp, name,
             modal?.optString("deviceModel").orEmpty(), port,
             modal?.optInt("version") ?: 0, ip, modal?.optString("os").orEmpty())
@@ -1663,7 +1668,7 @@ class MainActivity : Activity() {
         Thread {
             try {
                 val (code, msg) = ChannelClient.postIntent(ip, port,
-                    Wire.pairIntent(fingerprint, fp, myKey))
+                    Wire.pairIntent(fingerprint, fp, verifyCode))
                 mainHandler.post {
                     if (code == 0) {
                         store.addPair(fp, myKey)
