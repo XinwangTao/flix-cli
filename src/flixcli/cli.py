@@ -636,16 +636,37 @@ async def cmd_netcheck(args) -> int:
 
 
 def cmd_qrcode(args) -> int:
-    """Print the pairing QR payload (flix2:// base64url) for this node."""
+    """Print the pairing QR payload for this node.
+
+    Two formats: `flix2://` (base64, CLI peers) and `--link`/`--with-model`
+    (`relaydesk://pair?...`, the only form the Android app parses). With
+    `--with-model` the same code also carries the LAN model-gateway base URL
+    and token, so one scan pairs *and* configures model sharing.
+    """
     store = Store()
     try:
         ident = load_or_create_identity(store)
-        from .qrcode import pair_payload, parse_payload, lan_ips
-        payload = pair_payload(ident["fingerprint"], args.device_port,
-                               store.own_pair_key(), ips=lan_ips())
+        from .qrcode import pair_payload, parse_payload, lan_ips, pair_uri
+        code = store.own_pair_key()
+        ips = lan_ips()
+        payload = pair_payload(ident["fingerprint"], args.device_port, code, ips=ips)
         out = {"payload": payload}
         if args.decode:
             out["decoded"] = parse_payload(payload)
+        if args.link or args.with_model:
+            model = None
+            if args.with_model:
+                from .model_gateway import share_info
+                model = share_info(store)
+                out["note"] = ("扫码即配对并写入模型网关地址与令牌" if model
+                               else "模型共享未开启：二维码只含配对信息；"
+                                    "先运行 flix models start 再生成")
+            out["link"] = pair_uri(ident["fingerprint"], args.device_port, code,
+                                   ips=ips,
+                                   model_base=(model or {}).get("base", ""),
+                                   model_token=(model or {}).get("token", ""))
+            if model:
+                out["model"] = model
         emit(out, args.json)
         return 0
     finally:
@@ -927,6 +948,22 @@ async def cmd_adb(args) -> int:
     try:
         if args.adb_cmd == "devices":
             emit({"ok": True, "devices": [d.as_dict() for d in await client.devices()]}, args.json)
+            return 0
+        if args.adb_cmd == "connect":
+            from .adb_wireless import (DEFAULT_RELAY_PORT, AdbWirelessError,
+                                       connect as wireless_connect, stop_relay)
+            relay_port = args.relay_port or DEFAULT_RELAY_PORT
+            if args.stop_relay:
+                emit({"ok": True, "stopped": stop_relay(relay_port)}, args.json)
+                return 0
+            try:
+                result = wireless_connect(
+                    adb_path=args.adb_path, relay_port=relay_port,
+                    timeout=args.discover_timeout, adb_timeout=args.timeout)
+            except AdbWirelessError as exc:
+                emit({"ok": False, "error": exc.kind, "detail": exc.detail}, args.json)
+                return 3
+            emit(result, args.json)
             return 0
         if args.adb_cmd == "report":
             emit(await client.report(args.serial), args.json)
@@ -1222,6 +1259,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--device-port", type=int, default=DEVICE_PORT)
     p.add_argument("--decode", action="store_true",
                    help="also print the decoded fields")
+    p.add_argument("--link", action="store_true",
+                   help="also print the relaydesk://pair URI the Android app scans")
+    p.add_argument("--with-model", action="store_true",
+                   help="put the LAN model-gateway address and token in that URI, "
+                        "so one scan also configures model sharing")
 
     p = add("ping", "manual-add handshake: POST /ping_v2 and report the "
                     "peer's identity", cmd_ping)
@@ -1320,6 +1362,15 @@ def main(argv: list[str] | None = None) -> int:
     adb_sub = p.add_subparsers(dest="adb_cmd", required=True)
     adb_sub.add_parser("devices", help="list connected devices")
     adb_sub.add_parser("report", help="show device authorization report")
+    p_conn = adb_sub.add_parser(
+        "connect", help="wireless debugging: discover the phone and connect "
+                        "through the loopback relay")
+    p_conn.add_argument("--relay-port", type=int, default=None,
+                        help="loopback relay port (default 40009)")
+    p_conn.add_argument("--discover-timeout", type=float, default=3.0,
+                        help="seconds to wait for each mDNS lookup")
+    p_conn.add_argument("--stop-relay", action="store_true",
+                        help="stop a relay started by an earlier connect")
     p_push = adb_sub.add_parser("push", help="copy a local file to Android")
     p_push.add_argument("source")
     p_push.add_argument("destination")

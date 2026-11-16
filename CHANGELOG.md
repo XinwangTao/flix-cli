@@ -5,6 +5,17 @@
 
 ## [未发布]
 
+### 新增（扫码快连）
+- `flix qrcode --link` 输出 Android 端唯一能解析的 `relaydesk://pair?fp&ip&port&code`；
+  `--with-model` 再把模型网关地址与令牌写进同一张码，一次扫码完成配对 + 模型共享配置
+  （网关未开启时只带配对信息并提示先 `flix models start`）。
+- 桌面 GUI「新建 / 添加设备」菜单新增「显示连接二维码…」，二维码由
+  `GET /api/pair-link` 生成，普通模式下也无需手输 IP 或令牌。
+- `flix adb connect`：mDNS（`_adb-tls-connect._tcp`）自动发现无线调试端口 → Apple
+  python loopback 中继绕开 macOS 15 本地网络限制 → `adb connect` 并以 `adb devices`
+  校验；端口被占用时自动顺延，`--stop-relay` 收尾。中继源码内嵌，冻结包同样可用。
+- Android：扫码解析 `model_base` / `model_token`，配对成功后写入偏好并提示已配置网关。
+
 ### 新增
 - 局域网模型共享网关：`flix models start|status|token`，把手机（Anthropic Messages）
   的请求反向代理到本机 cc-switch（默认 `127.0.0.1:15721`），带固定令牌鉴权、

@@ -15,6 +15,8 @@ import base64
 import json
 import socket
 
+from urllib.parse import urlencode
+
 from . import local_ip
 
 
@@ -25,6 +27,26 @@ def pair_payload(fingerprint: str, port: int, code: str,
            "fp": fingerprint, "v": 1}
     raw = json.dumps(doc, separators=(",", ":")).encode()
     return "flix2://" + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def pair_uri(fingerprint: str, port: int, code: str,
+             ips: list[str] | None = None, ip: str = "",
+             model_base: str = "", model_token: str = "") -> str:
+    """relaydesk://pair URI for the Android app's handleScannedCode.
+
+    The phone parses with Uri.getQueryParameter, so plain query encoding is
+    enough. ``model_base``/``model_token`` are optional: when present the same
+    scan also configures the LAN model gateway, so the phone never types a
+    base URL or token by hand.
+    """
+    ips = ips or [local_ip()]
+    params = [("fp", fingerprint), ("ip", ip or ips[0]),
+              ("port", str(int(port))), ("code", str(code))]
+    if model_base:
+        params.append(("model_base", model_base))
+        if model_token:
+            params.append(("model_token", model_token))
+    return "relaydesk://pair?" + urlencode(params)
 
 
 def parse_payload(text: str) -> dict | None:

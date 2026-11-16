@@ -297,6 +297,17 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
                          "theme": settings.get("theme", "system")},
         })
 
+    async def pair_link_get(request: web.Request) -> web.Response:
+        """One QR for the phone: pairing plus the model-gateway address/token."""
+        from .model_gateway import share_info
+        from .qrcode import pair_uri
+        model = share_info(store)
+        link = pair_uri(ident["fingerprint"], channel_port,
+                        store.own_pair_key(), ip=local_ip(),
+                        model_base=(model or {}).get("base", ""),
+                        model_token=(model or {}).get("token", ""))
+        return web.json_response({"ok": True, "link": link, "model": model})
+
     async def adb_devices_get(request: web.Request) -> web.Response:
         if adb_client is None:
             return web.json_response({"ok": False, "error": "adb-disabled"}, status=503)
@@ -544,6 +555,7 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
     app.router.add_post("/api/groups/update", group_update_post)
     app.router.add_post("/api/groups/create", group_create_post)
     app.router.add_get("/api/events", events_get)
+    app.router.add_get("/api/pair-link", pair_link_get)
     app.router.add_get("/api/adb/devices", adb_devices_get)
     app.router.add_post("/api/adb/transfer", adb_transfer_post)
     app.router.add_post("/api/send-text", send_text_post)

@@ -209,6 +209,19 @@ def lan_urls(port: int, fresh: bool = False) -> list[str]:
     return [f"http://{ip}:{port}" for ip in live] or [f"http://127.0.0.1:{port}"]
 
 
+def share_info(store) -> dict | None:
+    """LAN endpoint + token for a pairing QR; None while sharing is off.
+
+    A disabled gateway must not put a token on screen: the QR then carries
+    pairing fields only and the caller tells the user to turn sharing on.
+    """
+    cfg = load_config(store)
+    if not cfg.get("enabled"):
+        return None
+    return {"base": lan_urls(cfg["port"])[0], "token": cfg["token"],
+            "port": cfg["port"]}
+
+
 def _token_from(request: web.Request, allow_query: bool = False) -> str:
     raw = request.headers.get("x-api-key", "")
     if raw:

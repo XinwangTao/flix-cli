@@ -3328,7 +3328,47 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         menu.addAction("新建群组…", self.create_group_dialog)
         menu.addAction("手动添加设备…", self.manual_add_dialog)
+        menu.addAction("显示连接二维码…", self.show_connect_qr)
         menu.exec(self.cursor().pos())
+
+    def show_connect_qr(self):
+        """One scan: pair the phone and hand it the model-gateway endpoint."""
+        from .model_gateway import qr_png
+        try:
+            data = self.api.get("/api/pair-link") or {}
+        except ApiError as exc:
+            toast_hint(self, f"连接二维码生成失败：{exc}")
+            return
+        link = data.get("link") or ""
+        if not link:
+            toast_hint(self, "连接二维码生成失败：服务未返回 link")
+            return
+        try:
+            png = qr_png(link)
+        except Exception as exc:  # noqa: BLE001 - segno missing or encoder failure
+            toast_hint(self, f"二维码渲染失败：{exc}")
+            return
+        pixmap = QPixmap()
+        pixmap.loadFromData(png)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("扫码连接设备")
+        layout = QVBoxLayout(dialog)
+        image = QLabel()
+        image.setPixmap(pixmap)
+        image.setAlignment(Qt.AlignCenter)
+        layout.addWidget(image)
+        model = data.get("model") or None
+        tip = QLabel(
+            "手机打开 RelayDesk → 扫码添加设备\n"
+            + (f"同时下发模型网关：{model['base']}" if model else
+               "模型共享未开启：这次只配对；开启模型共享后重新扫码即可下发地址与令牌"))
+        tip.setWordWrap(True)
+        layout.addWidget(tip)
+        done = QPushButton("完成")
+        done.setObjectName("primaryBtn")
+        done.clicked.connect(dialog.accept)
+        layout.addWidget(done)
+        dialog.exec()
 
     def create_group_dialog(self):
         dialog = QDialog(self)

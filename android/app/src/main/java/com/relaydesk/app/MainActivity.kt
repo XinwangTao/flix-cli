@@ -1611,6 +1611,10 @@ class MainActivity : Activity() {
         val ip = uri.getQueryParameter("ip").orEmpty()
         val port = uri.getQueryParameter("port")?.toIntOrNull() ?: Wire.DEVICE_PORT
         val code = uri.getQueryParameter("code").orEmpty()
+        // Same code can carry the LAN model gateway, so one scan pairs and
+        // configures model sharing instead of typing a base URL and token.
+        val modelBase = uri.getQueryParameter("model_base").orEmpty()
+        val modelToken = uri.getQueryParameter("model_token").orEmpty()
         if (fp.isEmpty() || ip.isEmpty()) {
             toast("配对码不完整")
             return
@@ -1637,9 +1641,10 @@ class MainActivity : Activity() {
                 AlertDialog.Builder(this, dlgTheme())
                     .setTitle("发现设备")
                     .setMessage("「$name」（$ip:$port）\n配对码：${code.ifEmpty { "—" }}\n" +
+                        (if (modelBase.isNotEmpty()) "模型网关：$modelBase\n" else "") +
                         "请与对方屏幕核对后确认。")
                     .setPositiveButton("配对") { _, _ ->
-                        pairScanned(realFp, ip, port, name, modal)
+                        pairScanned(realFp, ip, port, name, modal, modelBase, modelToken)
                     }
                     .setNegativeButton("取消", null)
                     .show()
@@ -1648,7 +1653,8 @@ class MainActivity : Activity() {
     }
 
     private fun pairScanned(fp: String, ip: String, port: Int, name: String,
-                            modal: JSONObject?) {
+                            modal: JSONObject?, modelBase: String = "",
+                            modelToken: String = "") {
         val myKey = store.ownPairKey(prefs)
         store.upsertDevice(fp, name,
             modal?.optString("deviceModel").orEmpty(), port,
@@ -1661,7 +1667,14 @@ class MainActivity : Activity() {
                 mainHandler.post {
                     if (code == 0) {
                         store.addPair(fp, myKey)
-                        toast("已配对 $msg")
+                        if (modelBase.isNotEmpty()) {
+                            prefs.edit()
+                                .putString("model_base", modelBase)
+                                .putString("model_token", modelToken)
+                                .putString("model_peer", fp)
+                                .apply()
+                            toast("已配对并写入模型网关：$modelBase")
+                        } else toast("已配对 $msg")
                         refreshDevices()
                         resyncGroupsTo(fp)
                         store.devices().firstOrNull { it.optString("fingerprint") == fp }
