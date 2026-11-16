@@ -1641,44 +1641,40 @@ class MainWindow(QMainWindow):
         return scroll
 
     # -- model gateway (phone sharing) --------------------------------------
+    def _model_store(self):
+        """The gateway's own Store: one source of truth for its config.
+
+        The GUI keeps window preferences in ~/.relaydesk_gui.json, but the
+        gateway runs as `flix models start` or inside the daemon and reads
+        `%APPDATA%/flixcli/shared_preferences.json`. Writing the gateway config
+        into the GUI file minted a second token that never reached the running
+        process, so the phone got 401 with a token the UI showed as valid.
+        """
+        from .config import Store
+        return Store()
+
     def _model_cfg(self) -> dict:
-        """Gateway preferences without touching the sqlite store."""
-        from .model_gateway import CONFIG_TEMPLATE
-        cfg = dict(CONFIG_TEMPLATE)
-        raw = self._load_prefs().get("modelGateway")
-        if isinstance(raw, dict):
-            cfg.update({k: v for k, v in raw.items() if k in cfg})
-        return cfg
-
-    def _model_prefs_store(self):
-        """Minimal Store-shaped shim over shared_preferences.json."""
-        cfg_owner = self
-
-        class _Shim:
-            def prefs(self):
-                return cfg_owner._load_prefs()
-
-            def set_pref(self, key, value):
-                cfg_owner._save_prefs(**{key: value})
-
-        return _Shim()
+        from .model_gateway import load_config
+        with self._model_store() as store:
+            return load_config(store)
 
     def _refresh_model_status(self, live: bool = True):
         from .model_gateway import lan_urls, port_open
         cfg = self._model_cfg()
         token = cfg.get("token") or "（未生成，开启后生成）"
         urls = " / ".join(lan_urls(cfg["port"]))
-        if live and port_open(cfg["port"]):
+        running = bool(live and port_open(cfg["port"]))
+        if running:
             state = "运行中"
         elif cfg.get("enabled"):
             state = "已开启但未运行（重启本机服务或再点一次开关）" if live else "已开启"
         else:
             state = "未开启"
         self.model_status.setText(f"{state}｜{urls}｜令牌 {token}")
-        if live and port_open(cfg["port"]):
-            self._fetch_model_stats(cfg["port"])
+        if running:
+            self._fetch_model_stats(cfg["port"], cfg["token"])
 
-    def _fetch_model_stats(self, port: int):
+    def _fetch_model_stats(self, port: int, token: str):
         """Pull /health off the GUI thread; the numbers land in the same label."""
         from .model_gateway import probe
 
@@ -1687,13 +1683,15 @@ class MainWindow(QMainWindow):
             if not stats:
                 return
             mins = int(stats.get("uptime", 0)) // 60
+            no = "\n请求 "
             self.model_status.setText(
-                self.model_status.text() +
-                f"\n请求 {stats.get('requests', 0)}（成功 {stats.get('ok', 0)}，"
-                f"失败 {stats.get('failed', 0)}，拒绝 {stats.get('rejected', 0)}）"
+                self.model_status.text() + no +
+                f"{stats.get('requests', 0)}（成功 {stats.get('ok', 0)}，"
+                f"失败 {stats.get('failed', 0)}，拒绝 {stats.get('rejected', 0)}，"
+                f"超限 {stats.get('too_large', 0)}）"
                 f"｜进行中 {stats.get('active', 0)}｜已运行 {mins} 分钟")
 
-        thread = ApiThread(lambda: probe(port, timeout=2.0))
+        thread = ApiThread(lambda: probe(port, token, timeout=2.0))
         thread.result.connect(done)
         thread.failed.connect(lambda _msg: None)
         self._model_stats_thread = thread
@@ -1703,7 +1701,8 @@ class MainWindow(QMainWindow):
         from .model_gateway import save_config
         raw = self.model_upstream.text().strip()
         try:
-            cfg = save_config(self._model_prefs_store(), upstream=raw)
+            with self._model_store() as store:
+                cfg = save_config(store, upstream=raw)
         except ValueError as exc:
             self.model_status.setText(str(exc))
             return
@@ -1716,10 +1715,9 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(1500, self._refresh_model_status)
 
     def toggle_model_gateway(self, on: bool):
-        from .model_gateway import load_config, save_config
-        store = self._model_prefs_store()
-        cfg = save_config(store, enabled=bool(on))
-        cfg = load_config(store) if on else cfg
+        from .model_gateway import save_config
+        with self._model_store() as store:
+            save_config(store, enabled=bool(on))
         if on:
             self._spawn_model_gateway()
         else:
@@ -1742,32 +1740,21 @@ class MainWindow(QMainWindow):
                                        | subprocess.CREATE_NO_WINDOW)
         else:
             kwargs["start_new_session"] = True
-        proc = subprocess.Popen(cli_command(["models", "start"]), **kwargs)
-        self._model_proc = proc
-        self._save_prefs(modelGatewayPid=proc.pid)
+        subprocess.Popen(cli_command(["models", "start"]), **kwargs)
 
     def _stop_model_gateway(self):
-        import subprocess
-        proc = getattr(self, "_model_proc", None)
-        pid = proc.pid if proc is not None and proc.poll() is None else None
-        if pid is None:
-            pid = self._load_prefs().get("modelGatewayPid")
-        if not pid:
-            return
-        try:
-            if sys.platform == "win32":
-                subprocess.run(["taskkill", "/PID", str(int(pid)), "/T", "/F"],
-                               capture_output=True,
-                               creationflags=subprocess.CREATE_NO_WINDOW)
-            else:
-                os.kill(int(pid), 15)
-        except (OSError, ValueError, subprocess.SubprocessError):
-            pass
-        self._save_prefs(modelGatewayPid=0)
+        """Stop by port, not by remembered PID (PIDs get reused)."""
+        from .model_gateway import stop_gateway
+        cfg = self._model_cfg()
+        result = stop_gateway(cfg["port"])
+        if result.get("refused"):
+            self.model_status.setText(
+                f"端口 {cfg['port']} 被其他程序占用，未终止："
+                f"{result['refused']}")
 
     def copy_model_config(self):
-        from .model_gateway import lan_urls, load_config
-        cfg = load_config(self._model_prefs_store())
+        from .model_gateway import lan_urls
+        cfg = self._model_cfg()
         url = lan_urls(cfg["port"])[0]
         text = ("协议：Anthropic Messages\n"
                 f"Base URL：{url}\n"
@@ -1778,16 +1765,22 @@ class MainWindow(QMainWindow):
         self.model_status.setText("手机配置已复制到剪贴板")
 
     def reset_model_token(self):
-        from .model_gateway import load_config, reset_token
-        store = self._model_prefs_store()
-        load_config(store)      # make sure a config exists before rotating
-        reset_token(store)
-        self._refresh_model_status()
-        self.model_status.setText("令牌已重置，手机端需要重新填写新令牌")
+        from .model_gateway import load_config, port_open, reset_token
+        with self._model_store() as store:
+            load_config(store)      # make sure a config exists before rotating
+            reset_token(store)
+        cfg = self._model_cfg()
+        if port_open(cfg["port"]):
+            # The running process keeps the old token in memory.
+            self._stop_model_gateway()
+            self._spawn_model_gateway()
+            QTimer.singleShot(1500, self._refresh_model_status)
+        self._refresh_model_status(live=False)
+        self.model_status.setText("令牌已重置并重启网关，手机端需重新填写新令牌")
 
     def show_model_qr(self):
-        from .model_gateway import lan_urls, load_config, pair_text, qr_png
-        cfg = load_config(self._model_prefs_store())
+        from .model_gateway import lan_urls, pair_text, qr_png
+        cfg = self._model_cfg()
         try:
             png = qr_png(pair_text(cfg))
         except Exception as exc:  # segno missing or encoder failure

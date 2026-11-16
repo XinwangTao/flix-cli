@@ -6,18 +6,21 @@ mapping, account routing and billing stay in exactly one place.
 
 Wire contract (see docs/archify/flix_model_gateway_workflow.json):
 
-- POST /v1/messages   -> proxied to <upstream>/v1/messages
-- GET  /v1/models     -> proxied (health probe for clients)
-- GET  /health        -> uptime + counters, for status checks
-- GET  /?token=<tok>  -> usage card for a phone browser
+- POST /v1/messages   -> proxied to <upstream>/v1/messages  (token in a header)
+- GET  /v1/models     -> proxied (client health probe)
+- GET  /health        -> {"ok": true}; full counters only with a valid token
+- GET  /?token=<tok>  -> usage card for a phone browser (the only place a
+                          query token is accepted; page is no-store)
 
-Auth: `x-api-key` or `Authorization: Bearer <token>`; a `token` query
-parameter is accepted for the usage page and stripped before forwarding.
+Auth: `x-api-key` or `Authorization: Bearer`. The token is never accepted in
+the query string of a proxied API call, so it cannot leak into upstream logs.
 """
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hmac
+import html
 import io
 import json
 import secrets
@@ -33,6 +36,8 @@ PREF_KEY = "modelGateway"
 DEFAULT_PORT = 18993
 DEFAULT_UPSTREAM = "http://127.0.0.1:15721"
 DEFAULT_MAX_BODY_MB = 32
+MAX_BODY_MB_CAP = 128
+BODY_READ_TIMEOUT = 30.0
 
 CONFIG_TEMPLATE = {
     "enabled": False,
@@ -40,16 +45,15 @@ CONFIG_TEMPLATE = {
     "upstream": DEFAULT_UPSTREAM,
     "token": "",
     "max_body_mb": DEFAULT_MAX_BODY_MB,
+    # Off by default: a reachable gateway that can be pointed anywhere is an
+    # SSRF pivot for anyone holding the token.
+    "allow_remote_upstream": False,
 }
 
-# app[...] keys; AppKey silences aiohttp's NotAppKeyWarning and keeps typos
-# from silently creating a second slot.
 CFG = web.AppKey("cfg", dict)
 STATS = web.AppKey("stats", dict)
 SESSION = web.AppKey("session", aiohttp.ClientSession)
 
-# Response headers worth keeping: clients use request-id for support tickets
-# and the rate-limit trio to pace themselves.
 PASS_HEADERS = ("content-type", "request-id", "retry-after",
                 "anthropic-ratelimit-requests-limit",
                 "anthropic-ratelimit-requests-remaining",
@@ -63,15 +67,38 @@ def new_token() -> str:
     return "rd-" + secrets.token_urlsafe(24)
 
 
-def normalize_upstream(url: str) -> str:
-    """Accept only an absolute http(s) upstream; strip trailing slashes."""
+def mask_token(token: str) -> str:
+    return f"{token[:6]}…" if token else ""
+
+
+def _is_loopback(host: str) -> bool:
+    host = (host or "").strip("[]").lower()
+    return host in ("localhost", "::1") or host.startswith("127.")
+
+
+def normalize_upstream(url: str, allow_remote: bool = False) -> str:
+    """Absolute http(s), no credentials, loopback unless explicitly allowed."""
     text = str(url or "").strip().rstrip("/")
     if not text:
         return DEFAULT_UPSTREAM
     parts = urlsplit(text)
     if parts.scheme not in ("http", "https") or not parts.netloc:
         raise ValueError(f"upstream 必须是 http:// 或 https:// 地址：{url!r}")
+    if parts.username or parts.password:
+        raise ValueError("upstream 不能带用户名/密码")
+    if not _is_loopback(parts.hostname or "") and not allow_remote:
+        raise ValueError(
+            "upstream 只允许本机回环地址；要指向远端主机需显式开启"
+            " allow_remote_upstream（CLI: --allow-remote-upstream）")
     return text
+
+
+def _as_port(value) -> int:
+    try:
+        port = int(str(value).strip())
+    except (TypeError, ValueError):
+        return DEFAULT_PORT
+    return port if 1 <= port <= 65535 else DEFAULT_PORT
 
 
 def _merged(raw: dict | None) -> dict:
@@ -80,12 +107,14 @@ def _merged(raw: dict | None) -> dict:
         for key in CONFIG_TEMPLATE:
             if key in raw:
                 cfg[key] = raw[key]
-    cfg["port"] = int(cfg["port"] or DEFAULT_PORT)
+    cfg["port"] = _as_port(cfg["port"])
     cfg["upstream"] = str(cfg["upstream"] or DEFAULT_UPSTREAM).rstrip("/")
     try:
-        cfg["max_body_mb"] = max(1, int(cfg["max_body_mb"]))
+        mib = int(cfg["max_body_mb"])
     except (TypeError, ValueError):
-        cfg["max_body_mb"] = DEFAULT_MAX_BODY_MB
+        mib = DEFAULT_MAX_BODY_MB
+    cfg["max_body_mb"] = min(MAX_BODY_MB_CAP, max(1, mib))
+    cfg["allow_remote_upstream"] = bool(cfg["allow_remote_upstream"])
     return cfg
 
 
@@ -102,7 +131,8 @@ def save_config(store, **changes) -> dict:
     cfg = load_config(store)
     cfg.update(changes)
     cfg = _merged(cfg)
-    cfg["upstream"] = normalize_upstream(cfg["upstream"])
+    cfg["upstream"] = normalize_upstream(cfg["upstream"],
+                                         cfg["allow_remote_upstream"])
     store.set_pref(PREF_KEY, cfg)
     return cfg
 
@@ -162,8 +192,7 @@ def lan_urls(port: int, fresh: bool = False) -> list[str]:
     """Every private IPv4 this host could answer on, primary interface first.
 
     Phones usually sit on the Wi-Fi adapter while the wired NIC carries other
-    traffic, so list all of them and let the caller pick. Prefer an address
-    that is actually bound and not deprecated when Windows tells us.
+    traffic, so list all of them and let the caller pick.
     """
     from . import default_iface_ip
 
@@ -180,20 +209,23 @@ def lan_urls(port: int, fresh: bool = False) -> list[str]:
     return [f"http://{ip}:{port}" for ip in live] or [f"http://127.0.0.1:{port}"]
 
 
-def _token_from(request: web.Request) -> str:
+def _token_from(request: web.Request, allow_query: bool = False) -> str:
     raw = request.headers.get("x-api-key", "")
     if raw:
         return raw.strip()
     auth = request.headers.get("authorization", "")
     if auth.lower().startswith("bearer "):
         return auth[7:].strip()
-    return (request.query.get("token") or "").strip()
+    if allow_query:
+        return (request.query.get("token") or "").strip()
+    return ""
 
 
-def _authorized(request: web.Request, token: str) -> bool:
+def _authorized(request: web.Request, token: str,
+                allow_query: bool = False) -> bool:
     if not token:
         return False
-    return hmac.compare_digest(_token_from(request).encode(),
+    return hmac.compare_digest(_token_from(request, allow_query).encode(),
                                token.encode())
 
 
@@ -204,13 +236,10 @@ def _error(status: int, kind: str, message: str) -> web.Response:
 
 
 def _target_url(cfg: dict, request: web.Request) -> str:
-    """Upstream URL for this request; drops our own `token` query parameter."""
-    path = request.path
-    query = [(k, v) for k, v in request.query.items() if k != "token"]
-    url = cfg["upstream"] + path
-    if query:
-        url += "?" + "&".join(f"{quote(k)}={quote(v)}" for k, v in query)
-    return url
+    """Upstream URL; the query string is forwarded byte-for-byte."""
+    url = cfg["upstream"] + request.path
+    raw = request.rel_url.raw_query_string
+    return f"{url}?{raw}" if raw else url
 
 
 FORWARD_HEADERS = ("content-type", "accept", "anthropic-version",
@@ -219,7 +248,8 @@ FORWARD_HEADERS = ("content-type", "accept", "anthropic-version",
 
 def _new_stats() -> dict:
     return {"requests": 0, "ok": 0, "rejected": 0, "failed": 0,
-            "aborted": 0, "active": 0, "last": 0, "started": int(time.time())}
+            "aborted": 0, "too_large": 0, "active": 0, "last": 0,
+            "started": int(time.time())}
 
 
 async def _proxy(request: web.Request) -> web.StreamResponse:
@@ -230,13 +260,18 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
         return _error(401, "authentication_error",
                       "invalid gateway token; set x-api-key to the token "
                       "shown in RelayDesk settings")
-    body = await request.read()
+    try:
+        body = await asyncio.wait_for(request.read(), BODY_READ_TIMEOUT)
+    except asyncio.TimeoutError:
+        stats["failed"] += 1
+        return _error(408, "timeout_error", "request body read timed out")
     headers = {h: request.headers[h] for h in FORWARD_HEADERS
                if h in request.headers}
     url = _target_url(cfg, request)
     stats["requests"] += 1
     stats["active"] += 1
     stats["last"] = int(time.time())
+    stream = None  # set once response headers are on the wire
     try:
         async with request.app[SESSION].request(
                 request.method, url, data=body or None,
@@ -250,6 +285,7 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
                 resp.headers.setdefault("Cache-Control", "no-cache")
                 resp.headers.setdefault("X-Accel-Buffering", "no")
                 await resp.prepare(request)
+                stream = resp  # from here on, never return another Response
                 try:
                     async for chunk in upstream.content.iter_any():
                         await resp.write(chunk)
@@ -258,6 +294,7 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
                     # The phone locked or closed the app mid-stream; the
                     # upstream call is cancelled by the context manager.
                     stats["aborted"] += 1
+                    return resp
                 stats["ok"] += 1
                 return resp
             payload = await upstream.read()
@@ -270,9 +307,19 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
                                 headers=out_headers,
                                 content_type=ctype.split(";")[0].strip())
     except asyncio.TimeoutError:
+        if stream is not None:
+            stats["aborted"] += 1
+            return stream
         stats["failed"] += 1
         return _error(504, "timeout_error", "upstream timed out")
     except aiohttp.ClientError as exc:
+        if stream is not None:
+            # Headers already sent: writing a second response here would
+            # corrupt the chunked stream, so close and report by disconnect.
+            stats["aborted"] += 1
+            with contextlib.suppress(Exception):
+                await stream.write_eof()
+            return stream
         stats["failed"] += 1
         return _error(502, "api_error",
                       f"upstream {cfg['upstream']} unreachable: "
@@ -286,16 +333,24 @@ async def _too_large(request: web.Request, handler):
     try:
         return await handler(request)
     except web.HTTPRequestEntityTooLarge:
+        stats = request.app.get(STATS)
+        if isinstance(stats, dict):
+            stats["too_large"] += 1
         return _error(413, "request_too_large",
                       "request body exceeds max_body_mb in RelayDesk settings")
 
 
 async def _health(request: web.Request) -> web.Response:
+    """Cheap liveness for anyone; details only for the token holder."""
     cfg = request.app[CFG]
     stats = dict(request.app[STATS])
+    if not _authorized(request, cfg["token"]):
+        return web.json_response({"ok": True})
     stats["uptime"] = max(0, int(time.time()) - stats.pop("started", 0))
-    return web.json_response({"ok": True, "upstream": cfg["upstream"],
+    resp = web.json_response({"ok": True, "upstream": cfg["upstream"],
                               "port": cfg["port"], "stats": stats})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 PAGE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
@@ -320,12 +375,17 @@ textContent);this.textContent='已复制'">复制地址</button>
 
 async def _index(request: web.Request) -> web.Response:
     cfg = request.app[CFG]
-    if not _authorized(request, cfg["token"]):
+    if not _authorized(request, cfg["token"], allow_query=True):
         return web.Response(status=401, text="需要令牌：/?token=<令牌>",
                             content_type="text/plain")
-    base = f"http://{request.host}"
-    html = PAGE % {"base": base, "token": cfg["token"]}
-    return web.Response(text=html, content_type="text/html")
+    # Never trust the Host header: it is attacker-controlled and would be
+    # echoed into the page the phone then copies.
+    base = lan_urls(cfg["port"])[0] if cfg.get("port") else ""
+    body = PAGE % {"base": html.escape(base), "token": html.escape(cfg["token"])}
+    resp = web.Response(text=body, content_type="text/html")
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    return resp
 
 
 def make_model_app(store, cfg: dict | None = None) -> web.Application:
@@ -356,6 +416,7 @@ def make_model_app(store, cfg: dict | None = None) -> web.Application:
 
 async def run_gateway(store, port: int | None = None,
                       upstream: str | None = None,
+                      allow_remote_upstream: bool | None = None,
                       ready=None) -> None:
     """Serve until cancelled; used by `flix models start` and `serve`."""
     changes = {}
@@ -363,14 +424,17 @@ async def run_gateway(store, port: int | None = None,
         changes["port"] = port
     if upstream:
         changes["upstream"] = upstream
+    if allow_remote_upstream is not None:
+        changes["allow_remote_upstream"] = bool(allow_remote_upstream)
     cfg = save_config(store, **changes) if changes else load_config(store)
     app = make_model_app(store, cfg)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", cfg["port"])
     await site.start()
+    # The full token never goes to a log file; the GUI/CLI show it on demand.
     print(f"[models] gateway on http://0.0.0.0:{cfg['port']} -> "
-          f"{cfg['upstream']}  token: {cfg['token']}", flush=True)
+          f"{cfg['upstream']}  token: {mask_token(cfg['token'])}", flush=True)
     if ready:
         ready(cfg)
     try:
@@ -386,22 +450,100 @@ def port_open(port: int, timeout: float = 0.2) -> bool:
     try:
         with socket.create_connection(("127.0.0.1", int(port)), timeout=timeout):
             return True
-    except OSError:
+    except (OSError, TypeError, ValueError):
         return False
 
 
-def probe(port: int, timeout: float = 3.0) -> dict:
-    """Non-blocking status check used by CLI and GUI."""
+def probe(port: int, token: str = "", timeout: float = 3.0) -> dict:
+    """Status check used by CLI and GUI; full counters need the token."""
     import urllib.error
     import urllib.request
-    url = f"http://127.0.0.1:{port}/health"
+    url = f"http://127.0.0.1:{int(port)}/health"
+    req = urllib.request.Request(url)
+    if token:
+        req.add_header("x-api-key", token)
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return {"listening": True, **json.loads(resp.read().decode())}
     except urllib.error.URLError as exc:
         return {"listening": False, "detail": str(exc.reason)}
     except (OSError, ValueError) as exc:
         return {"listening": False, "detail": str(exc)}
+
+
+def _listening_pids(port: int) -> list[int]:
+    """PIDs listening on `port`; used to stop the gateway without pid files."""
+    import re
+    pids: list[int] = []
+    if sys.platform.startswith("win"):
+        try:
+            out = subprocess.run(["netstat", "-ano"], capture_output=True,
+                                 text=True, encoding="utf-8", errors="ignore",
+                                 creationflags=getattr(subprocess,
+                                                       "CREATE_NO_WINDOW", 0),
+                                 timeout=10).stdout
+        except (OSError, subprocess.SubprocessError):
+            return pids
+        needle = f":{port}"
+        for line in out.splitlines():
+            if needle not in line or "LISTENING" not in line.upper():
+                continue
+            local = line.split()[1] if len(line.split()) > 1 else ""
+            if not local.endswith(needle):
+                continue
+            tail = line.split()[-1]
+            if tail.isdigit():
+                pids.append(int(tail))
+    else:
+        try:
+            out = subprocess.run(["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
+                                 capture_output=True, text=True, timeout=10).stdout
+            pids = [int(x) for x in re.findall(r"\d+", out)]
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return sorted(set(pids))
+
+
+def stop_gateway(port: int) -> dict:
+    """Stop whatever listens on the gateway port, verifying it first.
+
+    PID files go stale (restart, reuse by an unrelated process), so the port
+    is the source of truth and the image name is the safety check.
+    """
+    pids = _listening_pids(port)
+    if not pids:
+        return {"ok": True, "stopped": [], "detail": "not listening"}
+    stopped, refused = [], []
+    for pid in pids:
+        image = ""
+        if sys.platform.startswith("win"):
+            with contextlib.suppress(Exception):
+                out = subprocess.run(
+                    ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="ignore",
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    timeout=10).stdout
+                image = (out.split(",")[0].strip('"') if out else "").lower()
+        if image and not (image.startswith("relaydesk") or
+                          image.startswith("python")):
+            refused.append({"pid": pid, "image": image})
+            continue
+        try:
+            if sys.platform.startswith("win"):
+                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                               capture_output=True,
+                               creationflags=getattr(subprocess,
+                                                     "CREATE_NO_WINDOW", 0),
+                               timeout=15)
+            else:
+                import os
+                import signal
+                os.kill(pid, signal.SIGTERM)
+            stopped.append(pid)
+        except (OSError, subprocess.SubprocessError):
+            refused.append({"pid": pid, "image": image or "?"})
+    return {"ok": not refused, "stopped": stopped, "refused": refused}
 
 
 def qr_png(text: str, scale: int = 6) -> bytes:
@@ -417,15 +559,16 @@ def qr_png(text: str, scale: int = 6) -> bytes:
 def pair_text(cfg: dict) -> str:
     """What the QR encodes: open the usage card, token included."""
     base = lan_urls(cfg["port"])[0]
-    return f"{base}/?token={cfg['token']}"
+    return f"{base}/?token={quote(cfg['token'])}"
 
 
 def status_payload(store) -> dict:
     cfg = load_config(store)
-    live = probe(cfg["port"])
+    live = probe(cfg["port"], cfg["token"])
     return {"ok": True, "enabled": bool(cfg["enabled"]), "port": cfg["port"],
             "upstream": cfg["upstream"], "token": cfg["token"],
             "max_body_mb": cfg["max_body_mb"],
+            "allow_remote_upstream": cfg["allow_remote_upstream"],
             "urls": lan_urls(cfg["port"]), "pair": pair_text(cfg),
             "listening": live.get("listening", False),
             "stats": live.get("stats", {}),

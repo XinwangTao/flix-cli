@@ -285,24 +285,38 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
         print(f"[flixd] web send page on http://0.0.0.0:{web_port}  PIN: {pin}",
               file=sys.stderr)
     model_runner = None
+    # The model gateway is a side channel: whatever happens to it (bad config,
+    # port taken by a standalone `flix models start`) must never take the
+    # device channel and the desktop API down with it.
     if not model_port:
         # The GUI toggle persists "enabled", so a plain restart keeps sharing.
-        from .model_gateway import load_config as _load_model_gw
-        _gw = _load_model_gw(store)
-        if _gw.get("enabled"):
-            model_port = int(_gw["port"])
+        try:
+            from .model_gateway import load_config as _load_model_gw
+            _gw = _load_model_gw(store)
+            if _gw.get("enabled"):
+                model_port = int(_gw["port"])
+        except (OSError, ValueError, TypeError) as e:
+            print(f"[flixd] model gateway config ignored: {e}",
+                  file=sys.stderr, flush=True)
+            model_port = 0
     if model_port:
-        from aiohttp import web as _webgw
-        from .model_gateway import load_config as _load_model_cfg
-        from .model_gateway import make_model_app
-        mcfg = _load_model_cfg(store)
-        mcfg["port"] = model_port
-        mr = _webgw.AppRunner(make_model_app(store, mcfg))
-        await mr.setup()
-        await _webgw.TCPSite(mr, "0.0.0.0", model_port).start()
-        model_runner = mr
-        print(f"[flixd] model gateway on http://0.0.0.0:{model_port} -> "
-              f"{mcfg['upstream']}", file=sys.stderr, flush=True)
+        try:
+            from aiohttp import web as _webgw
+            from .model_gateway import load_config as _load_model_cfg
+            from .model_gateway import make_model_app
+            mcfg = _load_model_cfg(store)
+            mcfg["port"] = model_port
+            mr = _webgw.AppRunner(make_model_app(store, mcfg))
+            await mr.setup()
+            await _webgw.TCPSite(mr, "0.0.0.0", model_port).start()
+            model_runner = mr
+            print(f"[flixd] model gateway on http://0.0.0.0:{model_port} -> "
+                  f"{mcfg['upstream']}", file=sys.stderr, flush=True)
+        except (OSError, ValueError, TypeError) as e:
+            print(f"[flixd] model gateway unavailable on port {model_port}: "
+                  f"{e} (device channel keeps running)", file=sys.stderr,
+                  flush=True)
+            model_runner = None
     disc = Discovery(on_device, multicast_if)
     bound = await disc.start()
     if bound:

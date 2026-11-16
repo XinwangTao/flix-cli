@@ -1013,7 +1013,14 @@ def cmd_models(args) -> int:
             changes["port"] = args.port
         if args.upstream:
             changes["upstream"] = args.upstream
-        cfg = save_config(store, **changes)
+        if getattr(args, "allow_remote_upstream", False):
+            changes["allow_remote_upstream"] = True
+        try:
+            cfg = save_config(store, **changes)
+        except ValueError as exc:
+            emit({"error": "upstream", "detail": str(exc)}, args.json)
+            store.close()
+            return 2
         if args.json:
             print(json.dumps({"ok": True, "port": cfg["port"],
                               "upstream": cfg["upstream"],
@@ -1022,6 +1029,13 @@ def cmd_models(args) -> int:
                              ensure_ascii=False, indent=1), flush=True)
         return _models_serve(store, cfg)  # coroutine: runs until interrupted
     try:
+        if action == "stop":
+            from .model_gateway import stop_gateway
+            cfg = load_config(store)
+            result = stop_gateway(cfg["port"])
+            emit({"ok": result.get("ok", False), **result,
+                  "port": cfg["port"]}, args.json)
+            return 0 if result.get("ok") else 5
         if action == "token":
             token = (reset_token(store) if args.reset
                      else load_config(store)["token"])
@@ -1364,13 +1378,15 @@ def main(argv: list[str] | None = None) -> int:
     p = add("models", "LAN model gateway for phones: Anthropic Messages "
                       "proxied to the local cc-switch proxy", cmd_models)
     p.add_argument("action", nargs="?", default="status",
-                   choices=["start", "status", "token"])
+                   choices=["start", "stop", "status", "token"])
     p.add_argument("--port", type=int, default=None,
                    help="listen port (default 18993)")
     p.add_argument("--upstream", default=None,
                    help="local proxy to forward to (default http://127.0.0.1:15721)")
     p.add_argument("--reset", action="store_true",
                    help="token: mint a new token")
+    p.add_argument("--allow-remote-upstream", action="store_true",
+                   help="allow an upstream outside 127.0.0.1 (default: loopback only)")
 
     args = ap.parse_args(_normalize_shell_argv(
         list(sys.argv[1:] if argv is None else argv)))
