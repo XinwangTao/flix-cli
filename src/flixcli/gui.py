@@ -888,6 +888,7 @@ class MainWindow(QMainWindow):
         for worker in (self.worker, self.action_worker,
                        getattr(self, "_discovery_worker", None),
                        getattr(self, "_update_worker", None),
+                       getattr(self, "_model_stats_thread", None),
                        getattr(self, "_prefetch_worker", None)):
             if worker is not None:
                 try:
@@ -1561,6 +1562,19 @@ class MainWindow(QMainWindow):
                                         QSizePolicy.Preferred)
         self.model_status.setMinimumWidth(0)
         card_box.addWidget(self.model_status)
+        upstream_row = QHBoxLayout()
+        upstream_label = QLabel("上游")
+        self.model_upstream = QLineEdit(self._model_cfg().get("upstream", ""))
+        self.model_upstream.setPlaceholderText("http://127.0.0.1:15721")
+        self.model_upstream.setClearButtonEnabled(True)
+        self.model_upstream_save = QPushButton("保存上游")
+        self.model_upstream_save.setObjectName("secondaryButton")
+        self.model_upstream_save.setCursor(Qt.PointingHandCursor)
+        self.model_upstream_save.clicked.connect(self.save_model_upstream)
+        upstream_row.addWidget(upstream_label)
+        upstream_row.addWidget(self.model_upstream, 1)
+        upstream_row.addWidget(self.model_upstream_save)
+        card_box.addLayout(upstream_row)
         model_row = QHBoxLayout()
         self.model_copy_button = QPushButton("复制手机配置")
         self.model_copy_button.setObjectName("secondaryButton")
@@ -1661,6 +1675,45 @@ class MainWindow(QMainWindow):
         else:
             state = "未开启"
         self.model_status.setText(f"{state}｜{urls}｜令牌 {token}")
+        if live and port_open(cfg["port"]):
+            self._fetch_model_stats(cfg["port"])
+
+    def _fetch_model_stats(self, port: int):
+        """Pull /health off the GUI thread; the numbers land in the same label."""
+        from .model_gateway import probe
+
+        def done(live: dict) -> None:
+            stats = live.get("stats") or {}
+            if not stats:
+                return
+            mins = int(stats.get("uptime", 0)) // 60
+            self.model_status.setText(
+                self.model_status.text() +
+                f"\n请求 {stats.get('requests', 0)}（成功 {stats.get('ok', 0)}，"
+                f"失败 {stats.get('failed', 0)}，拒绝 {stats.get('rejected', 0)}）"
+                f"｜进行中 {stats.get('active', 0)}｜已运行 {mins} 分钟")
+
+        thread = ApiThread(lambda: probe(port, timeout=2.0))
+        thread.result.connect(done)
+        thread.failed.connect(lambda _msg: None)
+        self._model_stats_thread = thread
+        thread.start()
+
+    def save_model_upstream(self):
+        from .model_gateway import save_config
+        raw = self.model_upstream.text().strip()
+        try:
+            cfg = save_config(self._model_prefs_store(), upstream=raw)
+        except ValueError as exc:
+            self.model_status.setText(str(exc))
+            return
+        self.model_upstream.setText(cfg["upstream"])
+        if cfg.get("enabled"):
+            # A live gateway keeps the old target until it is restarted.
+            self._stop_model_gateway()
+            self._spawn_model_gateway()
+        self._refresh_model_status()
+        QTimer.singleShot(1500, self._refresh_model_status)
 
     def toggle_model_gateway(self, on: bool):
         from .model_gateway import load_config, save_config

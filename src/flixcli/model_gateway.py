@@ -8,7 +8,7 @@ Wire contract (see docs/archify/flix_model_gateway_workflow.json):
 
 - POST /v1/messages   -> proxied to <upstream>/v1/messages
 - GET  /v1/models     -> proxied (health probe for clients)
-- GET  /health        -> {"ok": true, "upstream": ...} for status checks
+- GET  /health        -> uptime + counters, for status checks
 - GET  /?token=<tok>  -> usage card for a phone browser
 
 Auth: `x-api-key` or `Authorization: Bearer <token>`; a `token` query
@@ -23,7 +23,8 @@ import json
 import secrets
 import subprocess
 import sys
-from urllib.parse import quote
+import time
+from urllib.parse import quote, urlsplit
 
 import aiohttp
 from aiohttp import web
@@ -31,22 +32,49 @@ from aiohttp import web
 PREF_KEY = "modelGateway"
 DEFAULT_PORT = 18993
 DEFAULT_UPSTREAM = "http://127.0.0.1:15721"
+DEFAULT_MAX_BODY_MB = 32
 
 CONFIG_TEMPLATE = {
     "enabled": False,
     "port": DEFAULT_PORT,
     "upstream": DEFAULT_UPSTREAM,
     "token": "",
+    "max_body_mb": DEFAULT_MAX_BODY_MB,
 }
+
+# app[...] keys; AppKey silences aiohttp's NotAppKeyWarning and keeps typos
+# from silently creating a second slot.
+CFG = web.AppKey("cfg", dict)
+STATS = web.AppKey("stats", dict)
+SESSION = web.AppKey("session", aiohttp.ClientSession)
+
+# Response headers worth keeping: clients use request-id for support tickets
+# and the rate-limit trio to pace themselves.
+PASS_HEADERS = ("content-type", "request-id", "retry-after",
+                "anthropic-ratelimit-requests-limit",
+                "anthropic-ratelimit-requests-remaining",
+                "anthropic-ratelimit-requests-reset",
+                "anthropic-ratelimit-tokens-limit",
+                "anthropic-ratelimit-tokens-remaining",
+                "anthropic-ratelimit-tokens-reset")
 
 
 def new_token() -> str:
     return "rd-" + secrets.token_urlsafe(24)
 
 
-def load_config(store) -> dict:
-    """Preferences merged over defaults; mints a token on first use."""
-    raw = store.prefs().get(PREF_KEY)
+def normalize_upstream(url: str) -> str:
+    """Accept only an absolute http(s) upstream; strip trailing slashes."""
+    text = str(url or "").strip().rstrip("/")
+    if not text:
+        return DEFAULT_UPSTREAM
+    parts = urlsplit(text)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise ValueError(f"upstream 必须是 http:// 或 https:// 地址：{url!r}")
+    return text
+
+
+def _merged(raw: dict | None) -> dict:
     cfg = dict(CONFIG_TEMPLATE)
     if isinstance(raw, dict):
         for key in CONFIG_TEMPLATE:
@@ -54,6 +82,16 @@ def load_config(store) -> dict:
                 cfg[key] = raw[key]
     cfg["port"] = int(cfg["port"] or DEFAULT_PORT)
     cfg["upstream"] = str(cfg["upstream"] or DEFAULT_UPSTREAM).rstrip("/")
+    try:
+        cfg["max_body_mb"] = max(1, int(cfg["max_body_mb"]))
+    except (TypeError, ValueError):
+        cfg["max_body_mb"] = DEFAULT_MAX_BODY_MB
+    return cfg
+
+
+def load_config(store) -> dict:
+    """Preferences merged over defaults; mints a token on first use."""
+    cfg = _merged(store.prefs().get(PREF_KEY))
     if not cfg["token"]:
         cfg["token"] = new_token()
         store.set_pref(PREF_KEY, cfg)
@@ -63,8 +101,8 @@ def load_config(store) -> dict:
 def save_config(store, **changes) -> dict:
     cfg = load_config(store)
     cfg.update(changes)
-    cfg["port"] = int(cfg["port"] or DEFAULT_PORT)
-    cfg["upstream"] = str(cfg["upstream"] or DEFAULT_UPSTREAM).rstrip("/")
+    cfg = _merged(cfg)
+    cfg["upstream"] = normalize_upstream(cfg["upstream"])
     store.set_pref(PREF_KEY, cfg)
     return cfg
 
@@ -106,11 +144,26 @@ def _adapter_ipv4s() -> list[str]:
     return ips
 
 
-def lan_urls(port: int) -> list[str]:
+_URL_CACHE: dict[str, object] = {"at": 0.0, "ips": []}
+_URL_TTL = 60.0
+
+
+def _cached_adapter_ipv4s() -> list[str]:
+    """ipconfig costs ~100ms; the settings page asks on every switch."""
+    now = time.monotonic()
+    if now - float(_URL_CACHE["at"] or 0) < _URL_TTL and _URL_CACHE["ips"]:
+        return list(_URL_CACHE["ips"])
+    ips = _adapter_ipv4s()
+    _URL_CACHE["at"], _URL_CACHE["ips"] = now, list(ips)
+    return ips
+
+
+def lan_urls(port: int, fresh: bool = False) -> list[str]:
     """Every private IPv4 this host could answer on, primary interface first.
 
     Phones usually sit on the Wi-Fi adapter while the wired NIC carries other
-    traffic, so list all of them and let the caller pick.
+    traffic, so list all of them and let the caller pick. Prefer an address
+    that is actually bound and not deprecated when Windows tells us.
     """
     from . import default_iface_ip
 
@@ -118,12 +171,13 @@ def lan_urls(port: int) -> list[str]:
     primary = default_iface_ip()
     if primary:
         ordered.append(primary)
-    for ip in _adapter_ipv4s():
+    ips = _adapter_ipv4s() if fresh else _cached_adapter_ipv4s()
+    for ip in ips:
         if ip not in ordered:
             ordered.append(ip)
-    ips = [ip for ip in ordered
-           if not ip.startswith(("127.", "169.254."))]
-    return [f"http://{ip}:{port}" for ip in ips] or [f"http://127.0.0.1:{port}"]
+    live = [ip for ip in ordered
+            if not ip.startswith(("127.", "169.254."))]
+    return [f"http://{ip}:{port}" for ip in live] or [f"http://127.0.0.1:{port}"]
 
 
 def _token_from(request: web.Request) -> str:
@@ -163,10 +217,16 @@ FORWARD_HEADERS = ("content-type", "accept", "anthropic-version",
                    "anthropic-beta", "anthropic-dangerous-direct-browser-access")
 
 
+def _new_stats() -> dict:
+    return {"requests": 0, "ok": 0, "rejected": 0, "failed": 0,
+            "aborted": 0, "active": 0, "last": 0, "started": int(time.time())}
+
+
 async def _proxy(request: web.Request) -> web.StreamResponse:
-    cfg = request.app["model_cfg"]
+    cfg = request.app[CFG]
+    stats = request.app[STATS]
     if not _authorized(request, cfg["token"]):
-        request.app["stats"]["rejected"] += 1
+        stats["rejected"] += 1
         return _error(401, "authentication_error",
                       "invalid gateway token; set x-api-key to the token "
                       "shown in RelayDesk settings")
@@ -174,44 +234,68 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
     headers = {h: request.headers[h] for h in FORWARD_HEADERS
                if h in request.headers}
     url = _target_url(cfg, request)
-    request.app["stats"]["requests"] += 1
-    request.app["stats"]["active"] += 1
+    stats["requests"] += 1
+    stats["active"] += 1
+    stats["last"] = int(time.time())
     try:
-        async with request.app["session"].request(
+        async with request.app[SESSION].request(
                 request.method, url, data=body or None,
                 headers=headers) as upstream:
             ctype = upstream.headers.get("content-type", "application/json")
+            out_headers = {h: upstream.headers[h] for h in PASS_HEADERS
+                           if h in upstream.headers}
             if "text/event-stream" in ctype:
-                resp = web.StreamResponse(
-                    status=upstream.status,
-                    headers={"Content-Type": ctype,
-                             "Cache-Control": "no-cache",
-                             "X-Accel-Buffering": "no"})
+                resp = web.StreamResponse(status=upstream.status,
+                                          headers=out_headers)
+                resp.headers.setdefault("Cache-Control", "no-cache")
+                resp.headers.setdefault("X-Accel-Buffering", "no")
                 await resp.prepare(request)
-                async for chunk in upstream.content.iter_any():
-                    await resp.write(chunk)
-                await resp.write_eof()
+                try:
+                    async for chunk in upstream.content.iter_any():
+                        await resp.write(chunk)
+                    await resp.write_eof()
+                except (ConnectionResetError, BrokenPipeError):
+                    # The phone locked or closed the app mid-stream; the
+                    # upstream call is cancelled by the context manager.
+                    stats["aborted"] += 1
+                stats["ok"] += 1
                 return resp
             payload = await upstream.read()
+            if upstream.status >= 400:
+                stats["failed"] += 1
+            else:
+                stats["ok"] += 1
+            out_headers.pop("content-type", None)
             return web.Response(status=upstream.status, body=payload,
+                                headers=out_headers,
                                 content_type=ctype.split(";")[0].strip())
     except asyncio.TimeoutError:
-        request.app["stats"]["failed"] += 1
+        stats["failed"] += 1
         return _error(504, "timeout_error", "upstream timed out")
     except aiohttp.ClientError as exc:
-        request.app["stats"]["failed"] += 1
+        stats["failed"] += 1
         return _error(502, "api_error",
                       f"upstream {cfg['upstream']} unreachable: "
                       f"{type(exc).__name__}")
     finally:
-        request.app["stats"]["active"] -= 1
+        stats["active"] -= 1
+
+
+@web.middleware
+async def _too_large(request: web.Request, handler):
+    try:
+        return await handler(request)
+    except web.HTTPRequestEntityTooLarge:
+        return _error(413, "request_too_large",
+                      "request body exceeds max_body_mb in RelayDesk settings")
 
 
 async def _health(request: web.Request) -> web.Response:
-    cfg = request.app["model_cfg"]
+    cfg = request.app[CFG]
+    stats = dict(request.app[STATS])
+    stats["uptime"] = max(0, int(time.time()) - stats.pop("started", 0))
     return web.json_response({"ok": True, "upstream": cfg["upstream"],
-                              "port": cfg["port"],
-                              "stats": dict(request.app["stats"])})
+                              "port": cfg["port"], "stats": stats})
 
 
 PAGE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
@@ -235,7 +319,7 @@ textContent);this.textContent='已复制'">复制地址</button>
 
 
 async def _index(request: web.Request) -> web.Response:
-    cfg = request.app["model_cfg"]
+    cfg = request.app[CFG]
     if not _authorized(request, cfg["token"]):
         return web.Response(status=401, text="需要令牌：/?token=<令牌>",
                             content_type="text/plain")
@@ -246,17 +330,20 @@ async def _index(request: web.Request) -> web.Response:
 
 def make_model_app(store, cfg: dict | None = None) -> web.Application:
     cfg = cfg or load_config(store)
-    app = web.Application()
-    app["model_cfg"] = cfg
-    app["stats"] = {"requests": 0, "rejected": 0, "failed": 0, "active": 0}
+    app = web.Application(
+        middlewares=[_too_large],
+        client_max_size=max(1, int(cfg.get("max_body_mb",
+                                           DEFAULT_MAX_BODY_MB))) * 1024 * 1024)
+    app[CFG] = cfg
+    app[STATS] = _new_stats()
 
     async def _on_start(app: web.Application) -> None:
-        app["session"] = aiohttp.ClientSession(
+        app[SESSION] = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=None, connect=10,
-                                          sock_read=600))
+                                          sock_read=900))
 
     async def _on_cleanup(app: web.Application) -> None:
-        await app["session"].close()
+        await app[SESSION].close()
 
     app.on_startup.append(_on_start)
     app.on_cleanup.append(_on_cleanup)
@@ -338,6 +425,8 @@ def status_payload(store) -> dict:
     live = probe(cfg["port"])
     return {"ok": True, "enabled": bool(cfg["enabled"]), "port": cfg["port"],
             "upstream": cfg["upstream"], "token": cfg["token"],
+            "max_body_mb": cfg["max_body_mb"],
             "urls": lan_urls(cfg["port"]), "pair": pair_text(cfg),
             "listening": live.get("listening", False),
+            "stats": live.get("stats", {}),
             "detail": live.get("detail", "")}

@@ -35,7 +35,7 @@ def _upstream_app(seen: list[dict]) -> web.Application:
     async def models(request: web.Request) -> web.Response:
         return web.json_response({"data": []})
 
-    app = web.Application()
+    app = web.Application(client_max_size=64 * 1024 * 1024)
     app.router.add_post("/v1/messages", messages)
     app.router.add_get("/v1/models", models)
     return app
@@ -161,6 +161,110 @@ class ModelGatewayTests(unittest.TestCase):
                     await client.close()
 
         asyncio.run(run())
+
+    def test_large_body_beyond_aiohttp_default_is_forwarded(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as tmp:
+                seen: list[dict] = []
+                upstream = TestServer(_upstream_app(seen))
+                await upstream.start_server()
+                try:
+                    cfg = self._cfg(tmp, str(upstream.make_url("")).rstrip("/"))
+                    client = TestClient(TestServer(make_model_app(None, cfg)))
+                    await client.start_server()
+                    try:
+                        # aiohttp's own default is 1 MiB; real prompts exceed it.
+                        big = "x" * (2 * 1024 * 1024)
+                        resp = await client.post(
+                            "/v1/messages",
+                            json={"model": "claude-sonnet-4-5",
+                                  "messages": [{"role": "user",
+                                                "content": big}]},
+                            headers={"x-api-key": cfg["token"]})
+                        self.assertEqual(resp.status, 200)
+                        self.assertGreater(len(seen[0]["body"]), 2 * 1024 * 1024)
+                    finally:
+                        await client.close()
+                finally:
+                    await upstream.close()
+
+        asyncio.run(run())
+
+    def test_body_over_configured_limit_is_413_json(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as tmp:
+                seen: list[dict] = []
+                upstream = TestServer(_upstream_app(seen))
+                await upstream.start_server()
+                try:
+                    cfg = self._cfg(tmp, str(upstream.make_url("")).rstrip("/"))
+                    cfg["max_body_mb"] = 1
+                    client = TestClient(TestServer(make_model_app(None, cfg)))
+                    await client.start_server()
+                    try:
+                        resp = await client.post(
+                            "/v1/messages",
+                            json={"model": "x",
+                                  "messages": [{"role": "user",
+                                                "content": "y" * 1_200_000}]},
+                            headers={"x-api-key": cfg["token"]})
+                        self.assertEqual(resp.status, 413)
+                        body = await resp.json()
+                        self.assertEqual(body["type"], "error")
+                        self.assertEqual(seen, [])
+                    finally:
+                        await client.close()
+                finally:
+                    await upstream.close()
+
+        asyncio.run(run())
+
+    def test_upstream_error_status_and_headers_pass_through(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as tmp:
+                async def boom(request):
+                    return web.json_response(
+                        {"type": "error", "error": {"type": "rate_limit_error",
+                                                    "message": "slow down"}},
+                        status=429, headers={"request-id": "req-123",
+                                             "retry-after": "7"})
+
+                upstream = web.Application()
+                upstream.router.add_post("/v1/messages", boom)
+                server = TestServer(upstream)
+                await server.start_server()
+                try:
+                    cfg = self._cfg(tmp, str(server.make_url("")).rstrip("/"))
+                    client = TestClient(TestServer(make_model_app(None, cfg)))
+                    await client.start_server()
+                    try:
+                        resp = await client.post(
+                            "/v1/messages", json={},
+                            headers={"x-api-key": cfg["token"]})
+                        self.assertEqual(resp.status, 429)
+                        self.assertEqual(resp.headers.get("request-id"),
+                                         "req-123")
+                        self.assertEqual(resp.headers.get("retry-after"), "7")
+                        health = await (await client.get("/health")).json()
+                        self.assertEqual(health["stats"]["failed"], 1)
+                        self.assertEqual(health["stats"]["ok"], 0)
+                    finally:
+                        await client.close()
+                finally:
+                    await server.close()
+
+        asyncio.run(run())
+
+    def test_upstream_url_must_be_http(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "db.sqlite")
+            try:
+                with self.assertRaises(ValueError):
+                    save_config(store, upstream="file:///etc/passwd")
+                self.assertEqual(save_config(store, upstream="http://x:1/")[
+                    "upstream"], "http://x:1")
+            finally:
+                store.close()
 
     def test_new_token_prefix(self):
         self.assertTrue(new_token().startswith("rd-"))
