@@ -309,6 +309,29 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
                         model_token=(model or {}).get("token", ""))
         return web.json_response({"ok": True, "link": link, "model": model})
 
+    async def adb_connect_post(request: web.Request) -> web.Response:
+        """One click: discover the phone, relay through loopback, connect.
+
+        Android's wireless-debugging QR is displayed *by the phone* for the host
+        to scan, so there is no phone-side scanner to feed from here.
+        """
+        from .adb_wireless import AdbWirelessError, connect as wireless_connect
+        adb_path = getattr(adb_client, "adb_path", None)
+
+        def run():
+            return wireless_connect(adb_path=adb_path)
+
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, run)
+        except AdbWirelessError as exc:
+            return web.json_response({"ok": False, "error": exc.kind,
+                                      "detail": exc.detail}, status=503)
+        except Exception as exc:  # noqa: BLE001 - report, never 500 silently
+            return web.json_response({"ok": False, "error": "adb-connect",
+                                      "detail": str(exc)}, status=503)
+        return web.json_response(result)
+
     async def adb_devices_get(request: web.Request) -> web.Response:
         if adb_client is None:
             return web.json_response({"ok": False, "error": "adb-disabled"}, status=503)
@@ -558,6 +581,7 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
     app.router.add_get("/api/events", events_get)
     app.router.add_get("/api/pair-link", pair_link_get)
     app.router.add_get("/api/adb/devices", adb_devices_get)
+    app.router.add_post("/api/adb/connect", adb_connect_post)
     app.router.add_post("/api/adb/transfer", adb_transfer_post)
     app.router.add_post("/api/send-text", send_text_post)
     app.router.add_post("/api/send-files", send_files_post)

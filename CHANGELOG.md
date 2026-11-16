@@ -5,6 +5,14 @@
 
 ## [未发布]
 
+### 新增（ADB 一键无线连接）
+- ADB 页新增「一键无线连接」：`POST /api/adb/connect` → mDNS 发现 → 回环中继 →
+  `adb connect`，无需扫码或手输地址。
+- 设置页与 ADB 页的二维码统一成 `relaydesk://pair`（配对 + 模型配置），不再出现只能
+  在浏览器打开的模型地址码。
+- 说明：Android「无线调试 → 使用二维码配对设备」里的二维码是**手机显示、电脑来扫**，
+  手机端扫码口只接受 `WIFI:T:ADB;...`，所以不能用它扫 Mac 的码——ADB 方向只能是电脑连手机。
+
 ### 新增（macOS 实时毛玻璃）
 - macOS 窗口默认启用毛玻璃材质：每 300ms 用 CoreGraphics 截取「本窗口之下」的屏幕内容
   （`CGWindowListCreateImage` + below-window），再在 Qt 内模糊合成，窗口移动/背后内容变化

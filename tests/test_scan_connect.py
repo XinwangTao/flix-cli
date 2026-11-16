@@ -176,6 +176,33 @@ class WirelessConnectTests(unittest.TestCase):
         self.assertEqual(ctx.exception.kind, "relay-python")
 
 
+class AdbConnectApiTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self._tmp = TemporaryDirectory()
+        self.store = Store(Path(self._tmp.name) / "db.sqlite")
+        app, _ = desktop_api.make_desktop_app(
+            self.store, {"fingerprint": "fp-me", "alias": "me"}, lambda *a: None)
+        self.client = TestClient(TestServer(app))
+        await self.client.start_server()
+
+    async def asyncTearDown(self):
+        await self.client.close()
+        self.store.close()
+        self._tmp.cleanup()
+
+    async def test_missing_device_reports_a_readable_error(self):
+        from unittest import mock
+        from flixcli import adb_wireless
+        with mock.patch.object(adb_wireless, "connect",
+                               side_effect=adb_wireless.AdbWirelessError(
+                                   "no-service", "未发现无线调试服务")):
+            resp = await self.client.post("/api/adb/connect", json={})
+        body = await resp.json()
+        self.assertEqual(resp.status, 503)
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["error"], "no-service")
+
+
 class RelayLifecycleTests(unittest.TestCase):
     def test_stop_relay_never_kills_a_stranger_and_keeps_the_pid_file(self):
         import subprocess

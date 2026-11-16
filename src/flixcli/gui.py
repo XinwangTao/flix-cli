@@ -1546,6 +1546,21 @@ class MainWindow(QMainWindow):
         title = QLabel("Android / ADB"); title.setObjectName("pageTitle"); box.addWidget(title)
         note = QLabel("USB / 无线序列号与授权状态；文件操作要求显式目标。")
         note.setObjectName("muted"); box.addWidget(note); box.addSpacing(8)
+        row = QHBoxLayout()
+        qr_button = QPushButton("显示连接二维码")
+        qr_button.setObjectName("secondaryButton")
+        qr_button.setCursor(Qt.PointingHandCursor)
+        qr_button.setToolTip("手机 RelayDesk 扫码：一次完成配对与模型配置")
+        qr_button.clicked.connect(self.show_connect_qr)
+        row.addWidget(qr_button)
+        wireless = QPushButton("一键无线连接")
+        wireless.setObjectName("primaryBtn")
+        wireless.setCursor(Qt.PointingHandCursor)
+        wireless.setToolTip("自动发现手机无线调试端口，经回环中继连接（无需扫码）")
+        wireless.clicked.connect(self.wireless_adb_connect)
+        row.addWidget(wireless)
+        row.addStretch()
+        box.addLayout(row)
         self.adb_list = QListWidget(); self.adb_list.setObjectName("contentList")
         box.addWidget(self.adb_list, 1)
         return page
@@ -1636,8 +1651,9 @@ class MainWindow(QMainWindow):
         self.model_copy_button.setObjectName("secondaryButton")
         self.model_copy_button.setCursor(Qt.PointingHandCursor)
         self.model_copy_button.clicked.connect(self.copy_model_config)
-        self.model_qr_button = QPushButton("显示二维码")
+        self.model_qr_button = QPushButton("显示连接二维码")
         self.model_qr_button.setObjectName("secondaryButton")
+        self.model_qr_button.setToolTip("手机 RelayDesk 扫码：一次完成配对与模型配置")
         self.model_qr_button.setCursor(Qt.PointingHandCursor)
         self.model_qr_button.clicked.connect(self.show_model_qr)
         self.model_token_button = QPushButton("重置令牌")
@@ -1838,31 +1854,14 @@ class MainWindow(QMainWindow):
         self.model_status.setText("令牌已重置并重启网关，手机端需重新填写新令牌")
 
     def show_model_qr(self):
-        from .model_gateway import lan_urls, pair_text, qr_png
-        cfg = self._model_cfg()
-        try:
-            png = qr_png(pair_text(cfg))
-        except Exception as exc:  # segno missing or encoder failure
-            self.model_status.setText(f"二维码生成失败：{exc}")
-            return
-        pixmap = QPixmap()
-        pixmap.loadFromData(png)
-        dialog = QDialog(self)
-        dialog.setWindowTitle("手机扫码配置")
-        layout = QVBoxLayout(dialog)
-        image = QLabel()
-        image.setPixmap(pixmap)
-        image.setAlignment(Qt.AlignCenter)
-        layout.addWidget(image)
-        tip = QLabel(f"扫码后在手机浏览器里打开，即可看到地址与令牌\n"
-                     f"地址：{lan_urls(cfg['port'])[0]}\n令牌：{cfg['token']}")
-        tip.setWordWrap(True)
-        layout.addWidget(tip)
-        done = QPushButton("完成")
-        done.setObjectName("primaryBtn")
-        done.clicked.connect(dialog.accept)
-        layout.addWidget(done)
-        dialog.exec()
+        """One QR for both jobs.
+
+        This used to encode only the usage-card URL, which the phone app reads
+        as "not a pairing code". The unified connect code pairs the device and
+        carries the model endpoint at the same time; the plain URL is still
+        available through "复制手机配置".
+        """
+        self.show_connect_qr()
 
     def _load_prefs(self) -> dict:
         try:
@@ -3392,18 +3391,31 @@ class MainWindow(QMainWindow):
         menu.addAction("显示连接二维码…", self.show_connect_qr)
         menu.exec(self.cursor().pos())
 
+    def wireless_adb_connect(self):
+        """Discover the phone and connect without a QR or a typed address."""
+        self.run_action(
+            lambda: self.api.post("/api/adb/connect", {}),
+            lambda result: toast_hint(
+                self, f"已连接 {result.get('serial', 'ADB 设备')}".strip()))
+
     def show_connect_qr(self):
         """One scan: pair the phone and hand it the model-gateway endpoint."""
-        from .model_gateway import qr_png
+        from .model_gateway import pair_text, qr_png
+        link = ""
+        model = None
+        fallback_note = ""
         try:
             data = self.api.get("/api/pair-link") or {}
-        except ApiError as exc:
-            toast_hint(self, f"连接二维码生成失败：{exc}")
-            return
-        link = data.get("link") or ""
+            link = data.get("link") or ""
+            model = data.get("model")
+        except ApiError:
+            data = {}
         if not link:
-            toast_hint(self, "连接二维码生成失败：服务未返回 link")
-            return
+            # An older daemon has no /api/pair-link. Still show something
+            # scannable instead of an error, and say why it is different.
+            link = pair_text(self._model_cfg())
+            fallback_note = ("当前连接的本机服务版本较旧：这是模型网关地址码，"
+                             "不是配对码。退出并重开 RelayDesk 后再生成即可。")
         try:
             png = qr_png(link)
         except Exception as exc:  # noqa: BLE001 - segno missing or encoder failure
@@ -3418,8 +3430,9 @@ class MainWindow(QMainWindow):
         image.setPixmap(pixmap)
         image.setAlignment(Qt.AlignCenter)
         layout.addWidget(image)
-        model = data.get("model") or None
-        if model and not model.get("listening"):
+        if fallback_note:
+            model_text = fallback_note
+        elif model and not model.get("listening"):
             model_text = f"模型网关已开启但未监听：{model['base']}（先启动模型共享）"
         elif model:
             model_text = f"同时下发模型网关：{model['base']}"
