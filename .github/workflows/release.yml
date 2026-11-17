@@ -276,15 +276,20 @@ jobs:
 
       # Same key as the branch debug builds, so a release installs over the
       # tested APK (and over previous releases) without uninstall/data loss.
-      - name: Restore signing keystore
+      - name: Prepare signing keystore
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_B64 }}
         run: |
-          mkdir -p ~/.android
+          mkdir -p android/keystore
           if [ -n "$KEYSTORE_B64" ]; then
-            printf '%s' "$KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
-            chmod 600 ~/.android/debug.keystore
+            printf '%s' "$KEYSTORE_B64" | base64 -d > android/keystore/debug.keystore
+          else
+            keytool -genkeypair -keystore android/keystore/debug.keystore \
+              -storepass android -alias androiddebugkey -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
           fi
+          chmod 600 android/keystore/debug.keystore
 
       # Debug signing is deliberate: it is the build that was verified on the
       # tablet over wireless adb, so the released APK installs exactly like the

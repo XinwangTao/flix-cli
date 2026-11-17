@@ -35,15 +35,20 @@ jobs:
       # every APK signature different, so updates require uninstall/reinstall
       # (data loss) and can never install over a release. The secret is the
       # canonical copy; the bootstrap artifact below creates it once.
-      - name: Restore signing keystore
+      - name: Prepare signing keystore
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_B64 }}
         run: |
-          mkdir -p ~/.android
+          mkdir -p android/keystore
           if [ -n "$KEYSTORE_B64" ]; then
-            printf '%s' "$KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
-            chmod 600 ~/.android/debug.keystore
+            printf '%s' "$KEYSTORE_B64" | base64 -d > android/keystore/debug.keystore
+          elif [ ! -f android/keystore/debug.keystore ]; then
+            keytool -genkeypair -keystore android/keystore/debug.keystore \
+              -storepass android -alias androiddebugkey -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
           fi
+          chmod 600 android/keystore/debug.keystore
 
       - name: Build debug APK
         working-directory: android
@@ -56,14 +61,9 @@ jobs:
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
-      - name: Stage debug keystore (bootstrap)
-        run: |
-          mkdir -p bootstrap
-          cp "$HOME/.android/debug.keystore" bootstrap/debug.keystore
-
       - name: Upload debug keystore (bootstrap)
         uses: actions/upload-artifact@v4
         with:
           name: android-debug-keystore
-          path: bootstrap/debug.keystore
+          path: android/keystore/debug.keystore
           if-no-files-found: warn

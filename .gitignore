@@ -58,3 +58,6 @@ dist-macos/
 
 # 工具/调试产物
 .lancer/
+
+# CI-generated/shared signing key (never commit)
+android/keystore/

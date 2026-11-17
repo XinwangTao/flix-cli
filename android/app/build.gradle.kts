@@ -22,6 +22,20 @@ android {
         buildConfig = true
     }
 
+    // CI writes the shared debug keystore here (secret-restored or generated
+    // once). A normal local checkout has no such file and keeps AGP's default.
+    val ciKeystore = file("keystore/debug.keystore")
+    signingConfigs {
+        if (ciKeystore.exists()) {
+            getByName("debug") {
+                storeFile = ciKeystore
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
