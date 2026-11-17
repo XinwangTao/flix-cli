@@ -6,6 +6,7 @@ All state comes from flixd's loopback API; functional behavior is unchanged.
 """
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import json
 import os
@@ -925,6 +926,13 @@ class MainWindow(QMainWindow):
         if image is None or image.isNull():
             return
         root.set_snapshot((image, origin))
+
+    def live_threads(self) -> list:
+        """Workers that may still be running, for shutdown joins."""
+        names = ("worker", "action_worker", "scan_worker", "_discovery_worker",
+                 "_update_worker", "_model_stats_thread", "_prefetch_worker")
+        return [getattr(self, name, None) for name in names
+                if getattr(self, name, None) is not None]
 
     def closeEvent(self, event):
         self.timer.stop()
@@ -1907,6 +1915,11 @@ class MainWindow(QMainWindow):
 
     def _refresh_model_status(self, live: bool = True):
         from .model_gateway import lan_urls, port_open
+        running_thread = getattr(self, "_model_stats_thread", None)
+        if live and running_thread is not None and running_thread.isRunning():
+            # Replacing a running QThread drops its last Python reference and
+            # Qt aborts at teardown ("destroyed while still running").
+            return
         cfg = self._model_cfg()
         token = cfg.get("token") or "（未生成，开启后生成）"
         urls = " / ".join(lan_urls(cfg["port"]))
@@ -4111,7 +4124,21 @@ def main(argv: list[str] | None = None, *, api_port: int = 8898) -> int:
             except OSError:
                 pass
         QTimer.singleShot(2500, _dump)
-    return app.exec()
+    code = app.exec()
+    # Qt aborts (SIGABRT "QThread: Destroyed while thread is still running")
+    # when an interpreter-teardown destroys a QThread wrapper that is still
+    # alive — quitting during the launch update check hit exactly that.
+    # Join what we can, then leave without running those destructors.
+    for worker in window.live_threads():
+        try:
+            worker.quit()
+            worker.wait(2000)
+        except Exception:  # noqa: BLE001 - teardown must not throw
+            pass
+    with contextlib.suppress(OSError):
+        sys.stdout.flush()
+        sys.stderr.flush()
+    os._exit(int(code))
 
 
 PREFS_FILE = Path.home() / ".relaydesk_gui.json"
