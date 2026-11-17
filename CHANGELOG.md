@@ -15,6 +15,13 @@
 - GUI 增加构建指纹握手（`/api/overview` 的 `build`）：升级后不再复用旧 daemon；本机服务 API
   端口被旧实例占用时自动顺延，GUI 仍能发现新实例。
 
+### 新增（Android 自动更新）
+- 开机广播与应用启动时检查 GitHub `releases/latest`，发现新版本发通知；Wi-Fi 下自动下载、
+  校验 sha256，再交给系统安装器（Android 不允许静默安装，确认后保留数据）。
+- 设置页新增「检查更新」；应用内发现已下载的新版本时弹出安装提示。
+- 发布/调试工作流统一使用同一份 debug keystore Secret；Release 用 tag 写
+  `versionName/versionCode`，保证升级可比较、可覆盖安装。
+
 ### 变更（第三轮对抗性审查：删除常驻扫描）
 - 永久扫描调度器删除：启动后 2s 扫一次，之后由 GUI 刷新按钮触发
   `POST /api/discover/scan`。新设备靠周期广播；官方端晚于我们启动时会发启动广播，
@@ -50,6 +57,13 @@
   在浏览器打开的模型地址码。
 - 说明：Android「无线调试 → 使用二维码配对设备」是**电脑显示、手机扫**，载荷必须是
   `WIFI:T:ADB;S:<一次性服务名>;P:<6位码>;;`（见上一条 `flix adb pair-qr`）。
+
+### 新增（macOS 自动更新）
+- `flix update` 支持 macOS `.app`：能识别 bundle 为目标、按 CPU 架构选资产（Intel 取
+  `x86_64`、Apple Silicon 取 `arm64`，此前会误选另一架构）、整包原子替换并保留备份。
+- zip 解包时还原**可执行位**与**符号链接**：PyInstaller 的 `Contents/Frameworks/Python`
+  等链接若被解成普通文件，新装应用会在启动时报 "slice is not valid mach-o file"。
+- 更新前停止正在运行的实例，更新后 `open -a` 拉起并用 `--version` 验收，不健康则回滚。
 
 ### 新增（模型网关加固）
 - 并发上限：默认 4 个在途请求，超出直接 `429 overloaded_error`（带 `Retry-After: 2`），且不
