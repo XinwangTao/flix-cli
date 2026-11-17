@@ -53,6 +53,7 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
                      media_runtime=None) -> tuple[web.Application, Callable[[dict], None]]:
     events_q: asyncio.Queue = asyncio.Queue(maxsize=256)
     shutdown_ev = asyncio.Event()
+    from .pairgate import GATE as pair_gate
 
     def publish(evt: dict) -> None:
         with contextlib.suppress(asyncio.QueueFull):
@@ -143,6 +144,27 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
         return web.json_response({"ok": ok, "paired": ok, "peer": peer_fp,
                                   "replyCode": code, "detail": message},
                                  status=200 if ok else 400)
+
+    async def pair_approve_post(request: web.Request) -> web.Response:
+        """Resolve a peer-initiated pair request shown in the GUI.
+
+        The phone's one-tap flow cannot know our pairing key, so the daemon
+        holds the /intent request until the local operator decides here.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        fingerprint = body.get("fingerprint") if isinstance(body, dict) else None
+        if not isinstance(fingerprint, str) or not fingerprint:
+            return web.json_response({"ok": False, "error": "bad-params"}, status=400)
+        accept = body.get("accept", True) if isinstance(body, dict) else True
+        if isinstance(accept, str):
+            accept = accept.lower() != "false"
+        ok = pair_gate.approve(fingerprint, bool(accept))
+        return web.json_response({"ok": ok, "fingerprint": fingerprint,
+                                  "accept": bool(accept)},
+                                 status=200 if ok else 404)
 
     async def group_create_post(request: web.Request) -> web.Response:
         """Create a group locally, then announce it to every listed member."""
@@ -293,6 +315,7 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
             "groups": store.groups(), "media": media, "adb": adb,
             "paired": [row[0] for row in store.con.execute(
                 "SELECT fingerprint FROM pair_devices")],
+            "pendingPairs": pair_gate.pending(),
             "settings": {"autoReceive": settings.get("autoReceive", True),
                          "saveDir": settings.get("saveDir", ""),
                          "theme": settings.get("theme", "system")},
@@ -628,6 +651,7 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
     app.router.add_post("/api/media/apply-answer", media_apply_answer_post)
     app.router.add_get("/api/media/{call_id}/snapshot", media_snapshot_get)
     app.router.add_post("/api/pair", pair_post)
+    app.router.add_post("/api/pair/approve", pair_approve_post)
     for route in ("/api/respond-pair",
                   "/api/accept-transfer", "/api/cancel-transfer"):
         app.router.add_post(route, stub_post)

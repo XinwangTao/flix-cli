@@ -1285,7 +1285,7 @@ class MainWindow(QMainWindow):
         box.addWidget(self.offline_title)
         self.offline_detail = QLabel(
             "默认端口 8898 可能被原生 Flix 占用。\n"
-            "可一键启动本机服务（端口 18991/18998，与 Flix 共存）。")
+            "可一键启动本机服务（设备端口优先 8891，被占时退 18991）。")
         self.offline_detail.setObjectName("emptyNote")
         self.offline_detail.setAlignment(Qt.AlignCenter)
         box.addWidget(self.offline_detail)
@@ -1311,7 +1311,12 @@ class MainWindow(QMainWindow):
         return page
 
     def start_local_daemon(self):
-        """Start the background service detached (18991/18998)."""
+        """Start the background service, preferring the official port 8891.
+
+        The official Flix app sends to the fixed discovery/channel port 8891;
+        an instance parked on 18991 can be discovered but cannot receive its
+        messages. Fall back to 18991 only when 8891 is already owned.
+        """
         import subprocess
         from .config import APP_DIR
         log_dir = APP_DIR
@@ -1331,11 +1336,25 @@ class MainWindow(QMainWindow):
                                        | subprocess.CREATE_NO_WINDOW)
         else:
             kwargs["start_new_session"] = True
+        device_port = 8891 if self._port_free(8891) else 18991
         subprocess.Popen(
-            cmd + ["--device-port", "18991", "--api-port", "18998"], **kwargs)
-        self.offline_detail.setText("正在启动本机服务（18991/18998）…几秒后自动重连。")
+            cmd + ["--device-port", str(device_port), "--api-port", "18998"], **kwargs)
+        self.offline_detail.setText(
+            f"正在启动本机服务（{device_port}/18998）…几秒后自动重连。")
         self.start_daemon_button.setEnabled(False)
         QTimer.singleShot(3500, self.retry_connection)
+
+    @staticmethod
+    def _port_free(port: int) -> bool:
+        import socket
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.bind(("0.0.0.0", port))
+            return True
+        except OSError:
+            return False
+        finally:
+            probe.close()
 
     def retry_connection(self):
         found = LocalApi.discover(self.api_port)
@@ -2509,6 +2528,7 @@ class MainWindow(QMainWindow):
     def apply_overview(self, payload: dict):
         self.payload = payload
         self.self_id = (payload.get("self") or {}).get("id", "")
+        self.maybe_prompt_pair_requests(payload.get("pendingPairs") or [])
         self.notify_new_bubbles(payload.get("bubbles") or [])
         self.connection_dot.setProperty("online", True)
         self.connection_dot.style().unpolish(self.connection_dot)
@@ -2535,6 +2555,45 @@ class MainWindow(QMainWindow):
         if self.current and self.chat_page_is_showing():
             self.render_current(activate=False)
         self.statusBar().showMessage("最后更新 " + datetime.now().strftime("%H:%M:%S"))
+
+    def maybe_prompt_pair_requests(self, pending: list) -> None:
+        """Operator confirmation for a phone-initiated pair (one tap on phone).
+
+        The daemon holds the peer's /intent until this dialog answers; the
+        poll interval is shorter than the 30 s server-side timeout.
+        """
+        if not pending:
+            self._pair_dialog_fp = None
+            return
+        request = pending[0] if isinstance(pending[0], dict) else {}
+        fingerprint = str(request.get("fingerprint") or "")
+        if not fingerprint or getattr(self, "_pair_dialog_fp", None) == fingerprint:
+            return
+        self._pair_dialog_fp = fingerprint
+        alias = request.get("alias") or fingerprint[:8]
+        ip = request.get("ip") or "未知地址"
+        box = QMessageBox(self)
+        box.setWindowTitle("配对请求")
+        box.setText(f"「{alias}」（{ip}）请求与本机配对。\n"
+                    f"对方未携带本机配对码，是否允许？")
+        allow = box.addButton("允许", QMessageBox.AcceptRole)
+        box.addButton("拒绝", QMessageBox.RejectRole)
+        box.setModal(False)
+
+        def decide(_button=None) -> None:
+            accept = box.clickedButton() is allow
+            self._pair_dialog_fp = None
+            try:
+                self.api.post("/api/pair/approve",
+                              {"fingerprint": fingerprint, "accept": accept})
+                self.statusBar().showMessage(
+                    "已允许配对" if accept else "已拒绝配对", 5000)
+            except ApiError as exc:
+                self.statusBar().showMessage(f"配对确认失败：{exc}", 6000)
+            self.refresh()
+
+        box.buttonClicked.connect(decide)
+        box.open()
 
     def populate_sidebar(self):
         if not hasattr(self, "entity_list"):

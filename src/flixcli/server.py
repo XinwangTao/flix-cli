@@ -108,6 +108,36 @@ def _trusted_sender(store, sender, remote) -> bool:
     return bool(expected) and bool(remote) and expected == remote
 
 
+def _offer_first_contact_pair(store, sender, remote, publish, pair_gate) -> None:
+    """Ask the operator to pair a discovered device that just messaged us.
+
+    The official Android app accepts a first bubble from an unpaired peer,
+    while our inbound gate rejects it. Rather than weakening the gate, surface
+    a one-tap request for a device we already discovered at this exact address.
+    A forged `from` cannot trigger a prompt because the fingerprint must match
+    the address we learned for it; anything else never reaches the gate.
+    """
+    if not isinstance(sender, str) or not sender or store.is_paired(sender):
+        return
+    known_ip = _device_ip(store, sender)
+    if not known_ip or not remote or known_ip != remote:
+        return
+    if pair_gate.is_pending(sender):
+        return
+
+    async def wait_for_operator() -> None:
+        approved = await pair_gate.ask(sender, {"ip": remote,
+                                               "reason": "first-message"})
+        if approved:
+            store.add_pair(sender, store.own_pair_key())
+            _record_peer_ip(store, sender, remote)
+            publish("pairChanged", {"fingerprint": sender,
+                                    "action": "first-message"})
+
+    with contextlib.suppress(RuntimeError):
+        asyncio.get_running_loop().create_task(wait_for_operator())
+
+
 def _safe_destination(store, name: str) -> tuple[str, str] | None:
     clean = os.path.basename(name.replace("\\", "/"))
     if not clean or clean in (".", ".."):
@@ -124,7 +154,10 @@ def _safe_destination(store, name: str) -> tuple[str, str] | None:
 
 def make_app(store, ident: dict, publish: Callable[[str, dict], None],
              clipboard_setter=None, device_port: int = DEVICE_PORT,
-             signal_hub=None, media_manager=None, media_runtime=None) -> web.Application:
+             signal_hub=None, media_manager=None, media_runtime=None,
+             pair_gate=None) -> web.Application:
+    if pair_gate is None:
+        from .pairgate import GATE as pair_gate
     async def ping_v2_post(request: web.Request) -> web.Response:
         # Manual-add handshake [RT 2026-10-21]: the official client ignores
         # the request body except `from` (echoed back) and answers with its
@@ -154,6 +187,12 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
         # `from` is attacker-controlled in the JSON body. Pairing plus a
         # matching source address is the only identity this transport has.
         if not _trusted_sender(store, sender, request.remote):
+            # A discovered, unpaired peer (typically the official Flix app)
+            # gets one operator-confirmable pairing prompt instead of a
+            # silent drop. The bubble itself is still rejected: trust is
+            # changed only by the approval, never by the message.
+            _offer_first_contact_pair(store, sender, request.remote,
+                                      publish, pair_gate)
             return web.Response(status=403, text="sender not paired")
         btype = bubble.get("type")
         content = bubble.get("content")
@@ -240,7 +279,7 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
                     return web.Response(text="{0: success}")
             return web.Response(status=500, text="receive intent failed")
         if action in (model.ACTION_ASK_PAIR, model.ACTION_CONFIRM_PAIR):
-            return _pair_intent(intent, request)
+            return await _pair_intent(intent, request)
         if action == model.ACTION_CONFIRM_RECEIVE:
             # Receiver -> sender "accepted, upload now" ack. The bubble is
             # already armed in file_contents; nothing else to do here.
@@ -417,7 +456,7 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
                 await ws.close()
         return ws
 
-    def _pair_intent(intent: dict, request: web.Request) -> web.Response:
+    async def _pair_intent(intent: dict, request: web.Request) -> web.Response:
         # Pairing rides /intent [RT 2026-10-21]: askPairDevice/confirmPairDevice
         # with extra {verifyDevice, verifyCode, accept?}.
         # askPairDevice (A asks B): verifyDevice must equal OUR fp, else
@@ -446,12 +485,24 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
                          f"{verify_device} did = {ident.get('fingerprint')}}}")
             own_key = store.own_pair_key()
             supplied = verify_code if isinstance(verify_code, str) else ""
-            if not own_key or not hmac.compare_digest(supplied, own_key):
-                publish("pairRejected", {"fingerprint": str(device_id or ""),
-                                         "reason": "bad-code"})
-                return web.Response(text="{302: verifyCode mismatch}")
             if accept is False:
+                publish("pairRejected", {"fingerprint": str(device_id or ""),
+                                         "reason": "declined"})
                 return web.Response(text="{0: success}")
+            if not own_key or not hmac.compare_digest(supplied, own_key):
+                # A one-tap phone flow cannot know OUR key (it only knows its
+                # own). Rather than silently trusting anyone on the LAN, hold
+                # the request until the desktop operator approves it in the
+                # GUI (or POST /api/pair/approve). The HTTP reply is delayed,
+                # so the phone still sees a single success/reject.
+                approved = await pair_gate.ask(
+                    str(device_id or ""),
+                    {"ip": remote or "", "port": device_port,
+                     "reason": "code-mismatch"})
+                if not approved:
+                    publish("pairRejected", {"fingerprint": str(device_id or ""),
+                                             "reason": "not-approved"})
+                    return web.Response(text="{301: pair Device Null}")
             if isinstance(device_id, str) and device_id:
                 store.add_pair(device_id, own_key)
                 _record_peer_ip(store, device_id, remote)

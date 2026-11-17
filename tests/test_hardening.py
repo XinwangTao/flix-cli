@@ -20,6 +20,7 @@ from flixcli import __version__, default_iface_ip, is_virtual_ip
 from flixcli.config import Store
 from flixcli.model import (ACTION_ASK_PAIR, ACTION_CLIPBOARD, ACTION_SHELL,
                            BUBBLE_TEXT)
+from flixcli.pairgate import PairGate
 from flixcli.server import make_app
 from flixcli.webapp import make_web_app
 
@@ -38,8 +39,9 @@ class PairingHardeningTests(unittest.IsolatedAsyncioTestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
         self.store = _store(self.root)
+        self.gate = PairGate(timeout=1.0)
         self.client = TestClient(TestServer(make_app(
-            self.store, ME, lambda *_: None)))
+            self.store, ME, lambda *_: None, pair_gate=self.gate)))
         await self.client.start_server()
 
     async def asyncTearDown(self):
@@ -47,13 +49,34 @@ class PairingHardeningTests(unittest.IsolatedAsyncioTestCase):
         self.store.close()
         self._tmp.cleanup()
 
-    async def test_ask_without_correct_code_is_rejected(self):
-        r = await self.client.post("/intent", json={
+    async def test_ask_without_correct_code_waits_for_operator(self):
+        task = asyncio.create_task(self.client.post("/intent", json={
             "action": ACTION_ASK_PAIR, "deviceId": "attacker",
-            "extra": {"verifyDevice": ME["fingerprint"], "verifyCode": "0000"}})
+            "extra": {"verifyDevice": ME["fingerprint"], "verifyCode": "0000"}}))
+        for _ in range(20):
+            await asyncio.sleep(0.02)
+            if self.gate.pending():
+                break
+        self.assertEqual([p["fingerprint"] for p in self.gate.pending()],
+                         ["attacker"])
+        self.assertTrue(self.gate.approve("attacker", False))
+        r = await task
         self.assertEqual(r.status, 200)
-        self.assertIn("302", await r.text())
+        self.assertIn("301", await r.text())
         self.assertFalse(self.store.is_paired("attacker"))
+
+    async def test_ask_without_code_pairs_after_operator_approval(self):
+        task = asyncio.create_task(self.client.post("/intent", json={
+            "action": ACTION_ASK_PAIR, "deviceId": "attacker",
+            "extra": {"verifyDevice": ME["fingerprint"], "verifyCode": "0000"}}))
+        for _ in range(20):
+            await asyncio.sleep(0.02)
+            if self.gate.pending():
+                break
+        self.assertTrue(self.gate.approve("attacker", True))
+        r = await task
+        self.assertIn("0: success", await r.text())
+        self.assertTrue(self.store.is_paired("attacker"))
 
     async def test_ask_with_own_code_pairs_and_records_source(self):
         r = await self.client.post("/intent", json={

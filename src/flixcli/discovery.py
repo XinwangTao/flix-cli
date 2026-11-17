@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import json
 import socket
 import struct
@@ -86,6 +87,12 @@ class Discovery:
     def _open(self) -> socket.socket:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # macOS/BSD needs SO_REUSEPORT (not just SO_REUSEADDR) for a second
+        # listener on the same UDP port. Not every peer sets it, so this is a
+        # best-effort coexistence attempt; scan_lan() is the guaranteed
+        # fallback when it still fails.
+        with contextlib.suppress(AttributeError, OSError):
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         s.bind(("", DEVICE_PORT))
         mreq = (socket.inet_aton(MULTICAST_GROUP)
                 + socket.inet_aton(self.iface or "0.0.0.0"))
@@ -165,3 +172,78 @@ class _Protocol(asyncio.DatagramProtocol):
 
     def error_received(self, exc: Exception) -> None:
         print(f"[discovery] {exc}", file=sys.stderr, flush=True)
+
+
+def local_hosts(iface_ip: str | None = None) -> list[str]:
+    """Candidate hosts on the local /24, excluding this machine.
+
+    /24 is the common home/office LAN shape. A wider mask would multiply the
+    probe count without a matching discovery benefit; peers on another subnet
+    are out of scope for broadcast discovery anyway.
+    """
+    ip = iface_ip or default_iface_ip()
+    if not ip:
+        return []
+    try:
+        net = ipaddress.ip_network(f"{ip}/24", strict=False)
+    except ValueError:
+        return []
+    return [str(host) for host in net.hosts() if str(host) != ip]
+
+
+async def scan_lan(on_device: Callable[[dict], None], ident: dict,
+                   device_port: int = DEVICE_PORT,
+                   ports: tuple[int, ...] = (DEVICE_PORT, 18991),
+                   hosts: list[str] | None = None,
+                   timeout: float = 0.6,
+                   concurrency: int = 128) -> list[dict]:
+    """Active discovery fallback: probe TCP channel ports with /ping_v2.
+
+    Passive multicast cannot work when UDP 8891 is already owned by another
+    process, and official clients only announce at startup. A bounded TCP
+    sweep finds both cases and never needs the peer to announce. `ping_v2`
+    proves the fingerprint, so a scan hit is as trustworthy as an announce.
+    """
+    from .channel import ping_v2
+
+    targets = hosts if hosts is not None else local_hosts()
+    if not targets:
+        return []
+    sem = asyncio.Semaphore(concurrency)
+
+    async def probe(ip: str, port: int) -> dict | None:
+        async with sem:
+            try:
+                _, writer = await asyncio.wait_for(
+                    asyncio.open_connection(ip, port), timeout)
+            except (OSError, asyncio.TimeoutError):
+                return None
+            with contextlib.suppress(Exception):
+                writer.close()
+            try:
+                modal = await ping_v2(ip, ident, port=port,
+                                      device_port=device_port,
+                                      timeout=2.0, from_="scan")
+            except Exception:
+                return None
+            fp = modal.get("fingerprint")
+            if not fp or fp == ident.get("fingerprint"):
+                return None
+            dev = dict(modal)
+            dev["ip"] = ip
+            dev["source"] = ip
+            if not dev.get("port"):
+                dev["port"] = port
+            return dev
+
+    results = await asyncio.gather(
+        *(probe(ip, port) for ip in targets for port in ports))
+    seen: set[str] = set()
+    found: list[dict] = []
+    for dev in results:
+        if dev and dev["fingerprint"] not in seen:
+            seen.add(dev["fingerprint"])
+            found.append(dev)
+            with contextlib.suppress(Exception):
+                on_device(dev)
+    return found

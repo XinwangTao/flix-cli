@@ -322,12 +322,17 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
     if bound:
         print(f"[flixd] discovery multicast via {disc.iface or 'default interface'}",
               file=sys.stderr, flush=True)
-    if announce and bound:
+    if announce:
+        # Sending has its own socket and must not depend on the listen bind:
+        # when another process owns UDP 8891 we can still be discovered by
+        # phones and official clients, even though we cannot hear announces.
         disc.announce(ident, port=device_port)
         await asyncio.sleep(0.5)
         disc.announce(ident, times=3, port=device_port)
-    elif announce:
-        print("[flixd] discovery unavailable; skipping announce", file=sys.stderr)
+        if not bound:
+            print("[flixd] discovery listen unavailable; announcing send-only "
+                  "and falling back to active LAN scan", file=sys.stderr,
+                  flush=True)
 
     tasks: list[asyncio.Task] = []
     if clip_sync:
@@ -348,6 +353,35 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
 
     tasks.append(asyncio.create_task(announce_loop()))
     print("[flixd] periodic announce every 30s", file=sys.stderr, flush=True)
+
+    async def scan_loop() -> None:
+        # Passive discovery has two blind spots: another process may own UDP
+        # 8891, and official clients only announce at startup. A bounded TCP
+        # sweep (ping_v2 on the channel ports) covers both without touching
+        # the peer's configuration. First pass runs right after startup so a
+        # freshly opened desktop is visible within the 10 s acceptance window.
+        from .discovery import scan_lan
+        try:
+            await asyncio.sleep(2)
+            while True:
+                try:
+                    found = await scan_lan(on_device, ident, device_port)
+                    if found:
+                        names = ", ".join(
+                            f"{d.get('alias') or d['fingerprint'][:8]}"
+                            f"@{d.get('ip')}:{d.get('port')}" for d in found)
+                        print(f"[scan] discovered {names}", file=sys.stderr,
+                              flush=True)
+                except Exception as exc:  # one bad sweep must not kill the loop
+                    print(f"[scan] {exc}", file=sys.stderr, flush=True)
+                await asyncio.sleep(60 if not bound else 300)
+        except asyncio.CancelledError:
+            pass
+
+    if announce:
+        tasks.append(asyncio.create_task(scan_loop()))
+        print("[flixd] active LAN scan every 60s (300s when multicast is bound)",
+              file=sys.stderr, flush=True)
 
     async def agent_outbox_loop() -> None:
         # An agent envelope queued while the peer was offline must still land
