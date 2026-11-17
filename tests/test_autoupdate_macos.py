@@ -42,6 +42,8 @@ class HealthGateTests(unittest.TestCase):
             inner.write_text("#!/bin/sh\necho 'flix 9.9.9'\n", encoding="utf-8")
             inner.chmod(0o755)
             self.assertTrue(au.wait_app_healthy(app, timeout=5, expected="9.9.9"))
+            # Release.version is a parsed tuple; comparing must not raise.
+            self.assertTrue(au.wait_app_healthy(app, timeout=5, expected=(9, 9, 9)))
             self.assertFalse(au.wait_app_healthy(app, timeout=2, expected="1.0.0"))
 
     def test_health_fails_when_the_binary_cannot_execute(self):

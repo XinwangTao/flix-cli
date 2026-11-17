@@ -875,6 +875,8 @@ def wait_app_healthy(bundle: str | Path, previous: set[int] | None = None, *,
     Mach-O is the fact the update actually has to guarantee.
     """
     inner = bundle_executable(bundle)
+    if isinstance(expected, (tuple, list)):
+        expected = ".".join(str(part) for part in expected)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if inner.is_file():
@@ -884,7 +886,7 @@ def wait_app_healthy(bundle: str | Path, previous: set[int] | None = None, *,
                 text = (probe.stdout or "") + (probe.stderr or "")
                 if probe.returncode == 0 and (not expected or expected in text):
                     return True
-            except (OSError, subprocess.SubprocessError):
+            except Exception:  # noqa: BLE001 - a bad gate must roll back, not crash
                 pass
         time.sleep(0.5)
     return False
@@ -1091,11 +1093,18 @@ def run_update(*, repo: str = REPO_DEFAULT, api_base: str = API_DEFAULT,
                                       "args": instance.get("args") or "",
                                       "started": time.monotonic(), "grace": 5.0})
         result["restarted"] = [r["process"].pid for r in restarted if r["process"]]
-        if is_app_bundle(target):
-            healthy = wait_app_healthy(target, timeout=wait_s,
-                                       expected=release.version)
-        else:
-            healthy = wait_healthy(restarted, timeout=wait_s)
+        # A crash here used to escape *after* the swap, leaving a half-applied
+        # install with no rollback. Any failure is "unhealthy".
+        try:
+            if is_app_bundle(target):
+                healthy = wait_app_healthy(target, timeout=wait_s,
+                                           expected=release.version)
+            else:
+                healthy = wait_healthy(restarted, timeout=wait_s)
+        except Exception as exc:  # noqa: BLE001
+            log_line(f"health check crashed: {type(exc).__name__}: {exc}",
+                     path=log_path, echo=echo)
+            healthy = False
 
         if not healthy:
             log_line("unhealthy -> rollback", path=log_path, echo=echo)
