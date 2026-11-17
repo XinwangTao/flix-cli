@@ -33,6 +33,27 @@ def zip_bundle(app: Path, dest: Path) -> Path:
     return dest
 
 
+class HealthGateTests(unittest.TestCase):
+    def test_health_is_the_binary_running_not_a_new_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = Path(tmp) / au.APP_NAME
+            inner = au.bundle_executable(app)
+            inner.parent.mkdir(parents=True)
+            inner.write_text("#!/bin/sh\necho 'flix 9.9.9'\n", encoding="utf-8")
+            inner.chmod(0o755)
+            self.assertTrue(au.wait_app_healthy(app, timeout=5, expected="9.9.9"))
+            self.assertFalse(au.wait_app_healthy(app, timeout=2, expected="1.0.0"))
+
+    def test_health_fails_when_the_binary_cannot_execute(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = Path(tmp) / au.APP_NAME
+            inner = au.bundle_executable(app)
+            inner.parent.mkdir(parents=True)
+            inner.write_text("not a program", encoding="utf-8")
+            inner.chmod(0o644)
+            self.assertFalse(au.wait_app_healthy(app, timeout=2))
+
+
 class AssetPatternTests(unittest.TestCase):
     def test_intel_host_never_picks_the_arm64_zip(self):
         pattern = au.platform_asset_pattern("darwin", "x86_64")
