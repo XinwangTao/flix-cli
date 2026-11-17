@@ -184,15 +184,15 @@ class Store:
 
     def visible_devices(self, *, own: str | None = None,
                         local_ips: list[str] | None = None) -> list[dict]:
-        """Device list for humans and agents: one row per physical machine.
+        """Device list for humans and agents: one row per address+alias.
 
-        One host can be recorded several times — the official app on 8891 and
-        RelayDesk on 18991 use different fingerprints, and an older install of
-        this very machine can announce itself as a peer. Group by IP, keep the
-        freshest announcement, and drop our own addresses.
-
-        Routing and presence keep using the raw ``devices()``: they target
-        fingerprints, so collapsing rows there would lose reachable peers.
+        One address can legitimately host two products — the official Flix app
+        on 8891 and RelayDesk on 18991 — and they usually have different
+        aliases ("OPPO PKJ110" vs "PKJ110"). Collapsing purely by IP hid one
+        reachable peer, so the key includes the alias: duplicate installs of
+        the same product (same alias) still collapse to the freshest row, while
+        the two apps on one phone both stay selectable. Own addresses and the
+        own fingerprint are still dropped.
         """
         if own is None:
             own = (self.prefs().get("identity") or {}).get("fingerprint") or ""
@@ -201,7 +201,7 @@ class Store:
         # Loopback is this machine by definition: a native client installed
         # side by side probes as 127.0.0.1 and must not show up as a device.
         mine = {ip for ip in local_ips if ip} | {"127.0.0.1", "::1"}
-        by_ip: dict[str, dict] = {}
+        by_key: dict[tuple[str, str], dict] = {}
         without_ip: list[dict] = []
         for row in self.devices():
             if own and row["fingerprint"] == own:
@@ -212,10 +212,12 @@ class Store:
             if not ip:
                 without_ip.append(row)
                 continue
-            current = by_ip.get(ip)
+            alias = (row.get("alias") or "").strip().lower()
+            key = (ip, alias)
+            current = by_key.get(key)
             if current is None or _fresher(row, current):
-                by_ip[ip] = row
-        return sorted([*by_ip.values(), *without_ip],
+                by_key[key] = row
+        return sorted([*by_key.values(), *without_ip],
                       key=lambda r: (r.get("alias") or "").lower())
 
     def is_paired(self, fingerprint: str) -> bool:

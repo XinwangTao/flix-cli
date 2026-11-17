@@ -469,6 +469,44 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
                 await ws.close()
         return ws
 
+    async def _resolve_peer(fp: str, remote: str | None) -> tuple[str, int] | None:
+        """Find the peer's *current* address/port by proving its fingerprint.
+
+        Cached rows go stale: a phone's DHCP address changes, and the same
+        phone moves its RelayDesk channel between 8891 and 18991 depending on
+        whether the official app owns 8891. Resolve at the moment of action
+        instead of trusting the last scan/presence snapshot.
+        """
+        row = store.con.execute(
+            "SELECT ip, port FROM persistence_devices WHERE fingerprint=?",
+            (fp,)).fetchone()
+        stored_ip = (row[0] if row and row[0] else "") or ""
+        stored_port = int(row[1]) if row and row[1] else DEVICE_PORT
+        seen: set[tuple[str, int]] = set()
+        candidates: list[tuple[str, int]] = []
+        for ip in (remote, stored_ip):
+            if not ip:
+                continue
+            for port in (stored_port, DEVICE_PORT, 18991, device_port):
+                if (ip, port) in seen:
+                    continue
+                seen.add((ip, port))
+                candidates.append((ip, port))
+        from .channel import ping_v2
+        for ip, port in candidates:
+            try:
+                modal = await ping_v2(ip, ident, port=port,
+                                      device_port=device_port, timeout=2.0)
+            except Exception:
+                continue
+            if modal.get("fingerprint") == fp:
+                return ip, int(modal.get("port") or port)
+        if stored_ip:
+            return stored_ip, stored_port
+        if remote:
+            return remote, stored_port
+        return None
+
     async def _settle_pair_later(device_id: str, remote: str | None) -> None:
         """Deliver a late operator approval after the ask already returned.
 
@@ -485,12 +523,9 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
                 _record_peer_ip(store, device_id, remote)
             publish("pairChanged", {"fingerprint": device_id,
                                     "action": "confirm"})
-            row = store.con.execute(
-                "SELECT ip, port FROM persistence_devices WHERE fingerprint=?",
-                (device_id,)).fetchone()
-            ip = (row[0] if row and row[0] else remote) or ""
-            port = int(row[1]) if row and row[1] else device_port
-            if ip:
+            endpoint = await _resolve_peer(device_id, remote)
+            if endpoint:
+                ip, port = endpoint
                 from .channel import post_intent
                 intent = model.pair_intent(
                     ident["fingerprint"], ident["fingerprint"],

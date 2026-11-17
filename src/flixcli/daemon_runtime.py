@@ -375,12 +375,18 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
         # startup, then back off geometrically; a hit means peers are healthy
         # and another sweep is unnecessary for a long while.
         delay = 5.0
-        cap = 300.0 if not bound else 900.0
+        # Keep the bound cap at 5 min: phones change address/port when the
+        # official app and RelayDesk swap 8891, and a 15-min blind window made
+        # a reachable peer look offline. The sweep itself is cheap.
+        cap = 300.0
         try:
             await asyncio.sleep(2)
             while True:
                 try:
-                    found = await scan_lan(on_device, ident, device_port)
+                    found = await scan_lan(
+                        on_device, ident, device_port,
+                        ports=tuple(dict.fromkeys(
+                            (DEVICE_PORT, 18991, device_port))))
                     if found:
                         delay = 120.0 if not bound else cap
                         names = ", ".join(

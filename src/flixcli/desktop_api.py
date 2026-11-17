@@ -68,7 +68,7 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
             "deviceModel": ident.get("deviceModel", "Windows"),
             "deviceType": ident.get("deviceType", "desktop"),
             "ip": local_ip(), "port": channel_port,
-            "online": True, "paired": False,
+            "online": True, "paired": False, "pid": os.getpid(),
         })
 
     async def devices_get(request: web.Request) -> web.Response:
@@ -293,6 +293,16 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
             return web.json_response({"ok": False, "error": error.kind,
                                       "detail": error.detail}, status=400)
 
+    def _pending_with_alias(store, gate) -> list[dict]:
+        pending = gate.pending()
+        for item in pending:
+            row = store.con.execute(
+                "SELECT alias FROM persistence_devices WHERE fingerprint=?",
+                (item["fingerprint"],)).fetchone()
+            if row and row[0]:
+                item["alias"] = row[0]
+        return pending
+
     async def overview_get(request: web.Request) -> web.Response:
         settings = store.prefs()
         media = {"sessions": media_manager.list(), "audit": media_manager.audit[-50:]} \
@@ -310,13 +320,14 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
             "build": build_id(),
             "self": {"id": ident["fingerprint"], "alias": ident["alias"],
                      "deviceModel": ident.get("deviceModel", "Windows"),
-                     "ip": local_ip(), "port": channel_port, "online": True},
+                     "ip": local_ip(), "port": channel_port, "online": True,
+                     "pid": os.getpid()},
             "devices": store.visible_devices(own=ident["fingerprint"]),
             "bubbles": store.bubbles(100),
             "groups": store.groups(), "media": media, "adb": adb,
             "paired": [row[0] for row in store.con.execute(
                 "SELECT fingerprint FROM pair_devices")],
-            "pendingPairs": pair_gate.pending(),
+            "pendingPairs": _pending_with_alias(store, pair_gate),
             "settings": {"autoReceive": settings.get("autoReceive", True),
                          "saveDir": settings.get("saveDir", ""),
                          "theme": settings.get("theme", "system")},

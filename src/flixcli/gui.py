@@ -1320,6 +1320,10 @@ class MainWindow(QMainWindow):
         """
         import subprocess
         from .config import APP_DIR
+        if not self._stop_stale_daemons():
+            # A daemon from this exact build is already running; just attach.
+            self.retry_connection()
+            return
         log_dir = APP_DIR
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = open(log_dir / "flixd-gui-started.log", "ab")
@@ -1351,6 +1355,90 @@ class MainWindow(QMainWindow):
         self.start_daemon_button.setEnabled(False)
         QTimer.singleShot(3500, self.retry_connection)
 
+    def _stop_stale_daemons(self) -> bool:
+        """Terminate daemons from another build before starting this one.
+
+        The daemon holds a single-instance lock and the fixed device port, so a
+        pre-upgrade process would both block the new daemon and keep serving
+        8891 with the old code. Only runs when the user explicitly starts the
+        service. Returns False when a current-build daemon is already running.
+        """
+        import os
+        import signal
+        import time
+        stopped = False
+        for port in LocalApi.CANDIDATE_PORTS:
+            try:
+                data = LocalApi(port).get("/api/overview")
+            except ApiError:
+                continue
+            if not isinstance(data, dict):
+                continue
+            if (data.get("version") == APP_VERSION
+                    and data.get("build") == APP_BUILD):
+                return False
+            pid = (data.get("self") or {}).get("pid")
+            if not isinstance(pid, int) or pid <= 1:
+                # Builds before the `pid` field cannot name themselves; find
+                # the process listening on the API port instead.
+                pid = self._pid_on_port(port)
+            if isinstance(pid, int) and pid > 1:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    stopped = True
+                except OSError:
+                    pass
+        if stopped:
+            # Wait specifically for the preferred device port. Breaking on an
+            # already-free 18991 let the new daemon start there while 8891 was
+            # still being released, and it never moved back.
+            for _ in range(40):
+                if self._port_free(8891):
+                    break
+                time.sleep(0.1)
+        return True
+
+    def _terminate_api_daemon(self, api_port: int) -> None:
+        """Stop the daemon serving one desktop API port (self-heal path)."""
+        import signal
+        try:
+            data = LocalApi(api_port).get("/api/overview")
+        except ApiError:
+            data = {}
+        pid = (data.get("self") or {}).get("pid") if isinstance(data, dict) else None
+        if not isinstance(pid, int) or pid <= 1:
+            pid = self._pid_on_port(api_port)
+        if isinstance(pid, int) and pid > 1:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _pid_on_port(port: int) -> int | None:
+        """PID listening on a TCP port, for daemons too old to report `pid`."""
+        import subprocess
+        try:
+            if sys.platform == "win32":
+                out = subprocess.run(["netstat", "-ano"], capture_output=True,
+                                     text=True, timeout=3).stdout
+                for line in out.splitlines():
+                    parts = line.split()
+                    if (len(parts) >= 5 and parts[0] == "TCP"
+                            and parts[1].endswith(f":{port}")
+                            and parts[3] == "LISTENING"):
+                        return int(parts[4])
+            else:
+                out = subprocess.run(
+                    ["lsof", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
+                    capture_output=True, text=True, timeout=3).stdout
+                pids = [int(x) for x in out.split() if x.isdigit()]
+                if pids:
+                    return pids[0]
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return None
+        return None
+
     @staticmethod
     def _port_free(port: int) -> bool:
         import socket
@@ -1368,6 +1456,30 @@ class MainWindow(QMainWindow):
         if found is None:
             self.offline_detail.setText("仍未发现 flixcli 服务。确认 flixd 已启动后重试。")
             self.start_daemon_button.setEnabled(True)
+            return
+        # A daemon parked on 18991 while 8891 is free cannot receive official
+        # Flix traffic (that client is hard-wired to 8891). Move it back once
+        # per GUI session; if 8891 stays busy, keep the working daemon.
+        try:
+            overview = found.get("/api/overview")
+        except ApiError:
+            overview = {}
+        device_port = 0
+        if isinstance(overview, dict):
+            device_port = int((overview.get("self") or {}).get("port") or 0)
+        if (device_port and device_port != 8891 and self._port_free(8891)
+                and not getattr(self, "_port_heal_attempted", False)):
+            self._port_heal_attempted = True
+            stale_api = int(found.base.rsplit(":", 1)[-1])
+            self.statusBar().showMessage(
+                "8891 已空闲，正在重启本机服务以恢复官方 Flix 互通…", 8000)
+            self._terminate_api_daemon(stale_api)
+            import time
+            for _ in range(40):
+                if self._port_free(8891):
+                    break
+                time.sleep(0.1)
+            self.start_local_daemon()
             return
         self.api = found
         self.api_port = found.base.rsplit(":", 1)[-1]

@@ -237,3 +237,33 @@ class LatePairApprovalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(codes[0][0], "127.0.0.1")
         self.assertEqual(codes[0][1], 8899)
         self.assertEqual(codes[0][2].get("action"), "confirmPairDevice")
+
+    async def test_late_approval_resolves_current_port(self):
+        """A peer that moved its channel port is reached via its ping modal."""
+        self.store.upsert_device("late2-fp", alias="phone2", port=8899,
+                                 version=1, ip="127.0.0.1", os_name="android")
+        self.store.con.commit()
+        codes = []
+
+        async def fake_ping(ip, ident, port=8891, device_port=8891, timeout=6.0,
+                            from_="manual"):
+            return {"fingerprint": "late2-fp", "port": 19001}
+
+        async def fake_post(ip, intent, port=8891, timeout=8.0):
+            codes.append((ip, port, intent))
+            return "{0: success}"
+
+        bad = "0000" if self.store.own_pair_key() != "0000" else "0001"
+        body = {"action": "askPairDevice", "deviceId": "late2-fp",
+                "extra": {"verifyDevice": "me-fp", "verifyCode": bad}}
+        with mock.patch("flixcli.channel.ping_v2", fake_ping), \
+                mock.patch("flixcli.channel.post_intent", fake_post):
+            resp = await self.client.post("/intent", json=body)
+            self.assertIn("301", await resp.text())
+            self.assertTrue(self.gate.approve("late2-fp", True))
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                if codes:
+                    break
+        self.assertEqual(codes[0][0], "127.0.0.1")
+        self.assertEqual(codes[0][1], 19001)

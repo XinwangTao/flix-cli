@@ -6,6 +6,7 @@ where the reader put it (new messages only raise the "new messages" pill).
 from __future__ import annotations
 
 import os
+import time
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -44,11 +45,32 @@ def bubbles_for(peer: str, count: int = 40) -> list[dict]:
 
 
 def settle(window, ms: int = 150) -> None:
-    """Compute geometry first, then let the anchor re-assert timers run."""
+    """Compute geometry, then wait until the scroll state stops moving.
+
+    A fixed qWait() was load-sensitive: on a busy 8 GB host the anchor timers
+    sometimes had not fired yet, turning a green suite red at random.
+    """
     layout = window.timeline_widget.layout()
     if layout is not None:
         layout.activate()
-    QTest.qWait(ms)
+    bar = window.timeline.verticalScrollBar()
+    deadline = time.monotonic() + max(ms / 1000.0, 1.0)
+    hard_stop = deadline + 2.0
+    last = None
+    stable = 0
+    while time.monotonic() < hard_stop:
+        QTest.qWait(50)
+        current = (bar.value(), bar.maximum(), bool(window._follow_tail),
+                   len(window._timeline_rows))
+        if current == last:
+            stable += 1
+            if stable >= 3 and time.monotonic() >= deadline:
+                return
+        else:
+            stable = 0
+            last = current
+        if stable >= 3:
+            return
 
 
 def make_window() -> gui.MainWindow:
