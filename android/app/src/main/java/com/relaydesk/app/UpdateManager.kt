@@ -34,6 +34,8 @@ object UpdateManager {
     private const val KEY_PROMPTED = "update_prompted_tag"
     private const val KEY_DOWNLOADED = "update_downloaded_tag"
     private const val KEY_APK_PATH = "update_apk_path"
+    private const val KEY_INSTALL_PENDING = "update_install_pending"
+    const val ACTION_UPDATE_READY = "com.relaydesk.app.UPDATE_READY"
     private const val CH_UPDATES = "relaydesk_updates"
     private const val NOTIF_AVAILABLE = 2001
     private const val NOTIF_DOWNLOADED = 2002
@@ -44,15 +46,30 @@ object UpdateManager {
         Thread(r, "relaydesk-update").apply { isDaemon = true }
     }
 
-    fun maybeCheck(context: Context, force: Boolean = false) {
+    fun maybeCheck(context: Context, force: Boolean = false,
+                   onResult: ((String) -> Unit)? = null) {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val now = System.currentTimeMillis()
-        if (!force && now - prefs.getLong(KEY_LAST_CHECK, 0L) < THROTTLE_MS) return
+        if (!force && now - prefs.getLong(KEY_LAST_CHECK, 0L) < THROTTLE_MS) {
+            onResult?.let { done ->
+                android.os.Handler(android.os.Looper.getMainLooper())
+                    .post { done("throttled") }
+            }
+            return
+        }
         prefs.edit().putLong(KEY_LAST_CHECK, now).apply()
         android.util.Log.i("RD_UPDATE", "check start force=$force")
-        exec.execute { runCatching { check(context, prefs) }.onFailure {
-            android.util.Log.w("RD_UPDATE", "check crashed", it)
-        } }
+        exec.execute {
+            val status = runCatching { check(context, prefs) }.getOrElse {
+                android.util.Log.w("RD_UPDATE", "check crashed", it)
+                "error:${it.message}"
+            }
+            android.util.Log.i("RD_UPDATE", "check result=$status")
+            if (onResult != null) {
+                android.os.Handler(android.os.Looper.getMainLooper())
+                    .post { onResult(status) }
+            }
+        }
     }
 
     /** Downloaded, sha256-verified APK whose tag is newer than this build. */
@@ -64,27 +81,31 @@ object UpdateManager {
         return if (isNewer(tag, BuildConfig.VERSION_NAME)) tag else null
     }
 
-    private fun check(context: Context, prefs: SharedPreferences) {
-        val tag = latestTag()
+    private fun check(context: Context, prefs: SharedPreferences): String {
+        val tag = latestTag() ?: return "error:github"
+        val display = tag.removePrefix("v")
         android.util.Log.i("RD_UPDATE", "tag=$tag local=${BuildConfig.VERSION_NAME}")
-        if (tag.isNullOrEmpty() || !isNewer(tag, BuildConfig.VERSION_NAME)) return
-        if (prefs.getString(KEY_DOWNLOADED, "") == tag) return
-        if (prefs.getString(KEY_PROMPTED, "") == tag) return
+        if (!isNewer(tag, BuildConfig.VERSION_NAME)) return "latest:$display"
+        if (prefs.getString(KEY_DOWNLOADED, "") == tag) return "downloaded:$display"
+        if (prefs.getString(KEY_PROMPTED, "") == tag) return "pending:$display"
         val apkName = "RelayDesk-$tag-android.apk"
         val apkUrl = "https://github.com/XinwangTao/flix-cli/releases/download/$tag/$apkName"
         val sha = httpText("$apkUrl.sha256")?.trim()?.substringBefore(' ')
-            ?.lowercase()?.ifEmpty { null } ?: return
+            ?.lowercase()?.ifEmpty { null } ?: return "error:sha"
         android.util.Log.i("RD_UPDATE", "update $tag sha=${sha.take(8)}")
         prefs.edit().putString(KEY_PROMPTED, tag).apply()
         val wifi = isWifi(context)
-        notify(context, NOTIF_AVAILABLE, "发现新版本 v${tag.removePrefix("v")}",
+        notify(context, NOTIF_AVAILABLE, "发现新版本 v$display",
             if (wifi) "正在 Wi-Fi 下下载…" else "连接 Wi-Fi 后自动下载", install = false)
-        if (!wifi) return
-        if (download(context, prefs, tag, apkUrl, sha)) {
+        if (!wifi) return "available:$display"
+        return if (download(context, prefs, tag, apkUrl, sha)) {
             prefs.edit().putString(KEY_DOWNLOADED, tag).apply()
-            notify(context, NOTIF_DOWNLOADED, "新版本 v${tag.removePrefix("v")} 已下载",
+            notify(context, NOTIF_DOWNLOADED, "新版本 v$display 已下载",
                 "点按进入系统安装", install = true)
-        }
+            context.sendBroadcast(Intent(ACTION_UPDATE_READY)
+                .setPackage(context.packageName))
+            "downloaded:$display"
+        } else "error:download"
     }
 
     /**
@@ -156,13 +177,22 @@ object UpdateManager {
         val path = prefs.getString(KEY_APK_PATH, null) ?: return
         val apk = File(path)
         if (!apk.exists()) return
+        if (!sameSigner(context, apk)) {
+            android.widget.Toast.makeText(context,
+                "此版本与已安装应用签名不一致，无法自动覆盖安装；" +
+                    "下个由新密钥签名的版本才能自动更新。",
+                android.widget.Toast.LENGTH_LONG).show()
+            return
+        }
         if (!context.packageManager.canRequestPackageInstalls()) {
+            prefs.edit().putBoolean(KEY_INSTALL_PENDING, true).apply()
             context.startActivity(Intent(
                 Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
                 Uri.parse("package:${context.packageName}"))
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             return
         }
+        prefs.edit().putBoolean(KEY_INSTALL_PENDING, false).apply()
         runCatching {
             val installer = context.packageManager.packageInstaller
             val params = PackageInstaller.SessionParams(
@@ -183,6 +213,32 @@ object UpdateManager {
             }
         }
     }
+
+    /** After the user grants "install unknown apps", continue the install. */
+    fun resumePendingInstall(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        if (!prefs.getBoolean(KEY_INSTALL_PENDING, false)) return false
+        if (!context.packageManager.canRequestPackageInstalls()) return false
+        prefs.edit().putBoolean(KEY_INSTALL_PENDING, false).apply()
+        installDownloaded(context)
+        return true
+    }
+
+    /** The update must be signed by the same key as the installed app. */
+    private fun sameSigner(context: Context, apk: File): Boolean = runCatching {
+        val pm = context.packageManager
+        fun certs(info: android.content.pm.SigningInfo?): List<String> =
+            info?.apkContentsSigners?.map { sig ->
+                MessageDigest.getInstance("SHA-256").digest(sig.toByteArray())
+                    .joinToString("") { "%02x".format(it) }
+            }?.sorted() ?: emptyList()
+        val remote = pm.getPackageArchiveInfo(apk.absolutePath,
+            android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES)?.signingInfo
+        val local = pm.getPackageInfo(context.packageName,
+            android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES).signingInfo
+        val r = certs(remote)
+        r.isNotEmpty() && r == certs(local)
+    }.getOrDefault(false)
 
     private fun notify(context: Context, id: Int, title: String, body: String,
                        install: Boolean) {
