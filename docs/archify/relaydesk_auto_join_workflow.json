@@ -1,0 +1,273 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RelayDesk 自动发现与官方互通",
+    "locale": "zh-CN",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    {
+      "id": "desktop",
+      "label": "桌面端（Mac / Windows）"
+    },
+    {
+      "id": "phone",
+      "label": "RelayDesk Android"
+    },
+    {
+      "id": "official",
+      "label": "Flix 官方 Android"
+    },
+    {
+      "id": "degrade",
+      "label": "降级与失败出口",
+      "variant": "exception"
+    }
+  ],
+  "phases": [],
+  "groups": [],
+  "mainPath": [
+    "boot",
+    "bind",
+    "announce",
+    "auto",
+    "maclist",
+    "pair",
+    "chat",
+    "official"
+  ],
+  "nodes": [
+    {
+      "id": "boot",
+      "lane": "desktop",
+      "col": 0,
+      "type": "process",
+      "label": "启动 RelayDesk daemon",
+      "sublabel": "设备通道 18991 · API 18998"
+    },
+    {
+      "id": "bind",
+      "lane": "desktop",
+      "col": 1,
+      "type": "process",
+      "label": "绑定发现通道 UDP 8891",
+      "sublabel": "组播 224.0.0.168 · 失败不阻断后续",
+      "width": 190
+    },
+    {
+      "id": "announce",
+      "lane": "desktop",
+      "col": 2,
+      "type": "backend",
+      "label": "无条件广播自身",
+      "sublabel": "发送与监听解耦 · 独立 socket · 30s 周期",
+      "width": 190
+    },
+    {
+      "id": "sweep",
+      "lane": "desktop",
+      "col": 3,
+      "type": "process",
+      "label": "主动扫描兜底",
+      "sublabel": "TCP 8891 + ping_v2 · 监听失败时",
+      "width": 170
+    },
+    {
+      "id": "maclist",
+      "lane": "desktop",
+      "col": 4,
+      "type": "backend",
+      "label": "Mac 列表自动出现手机",
+      "sublabel": "入库去重，无需手输 IP",
+      "width": 180
+    },
+    {
+      "id": "auto",
+      "lane": "phone",
+      "col": 3,
+      "type": "frontend",
+      "label": "手机列表自动出现 Mac",
+      "sublabel": "收到广播 → upsert（现有能力）",
+      "width": 180
+    },
+    {
+      "id": "pair",
+      "lane": "phone",
+      "col": 5,
+      "type": "security",
+      "label": "一键配对确认",
+      "sublabel": "relaydesk://pair · 保留信任门",
+      "width": 160
+    },
+    {
+      "id": "chat",
+      "lane": "phone",
+      "col": 6,
+      "type": "process",
+      "label": "文本 / 文件 / 图片双向",
+      "sublabel": "bubble + /file · 图片预览",
+      "width": 170
+    },
+    {
+      "id": "official",
+      "lane": "official",
+      "col": 6,
+      "type": "external",
+      "label": "Flix 官方 App 2.4.4",
+      "sublabel": "同一套 ping_v2 / 配对 / bubble / file",
+      "width": 200
+    },
+    {
+      "id": "portbusy",
+      "lane": "degrade",
+      "col": 1,
+      "type": "security",
+      "label": "8891 被旧 flix.app 占用",
+      "sublabel": "实测 EADDRINUSE（UDP 8891）",
+      "width": 180
+    },
+    {
+      "id": "netblock",
+      "lane": "degrade",
+      "col": 4,
+      "type": "security",
+      "label": "跨网段 / 组播被屏蔽",
+      "sublabel": "转为扫描或手动 IP",
+      "width": 160
+    },
+    {
+      "id": "mismatch",
+      "lane": "degrade",
+      "col": 7,
+      "type": "security",
+      "label": "官方端版本差异",
+      "sublabel": "interop_check 报差异并降级",
+      "width": 160
+    },
+    {
+      "id": "firstmsg",
+      "lane": "degrade",
+      "col": 5,
+      "type": "security",
+      "label": "未配对首次来信",
+      "sublabel": "本机一键确认后补配对",
+      "width": 160
+    }
+  ],
+  "edges": [
+    {
+      "from": "boot",
+      "to": "bind",
+      "label": "启动发现",
+      "role": "main",
+      "variant": "emphasis"
+    },
+    {
+      "from": "bind",
+      "to": "announce",
+      "label": "成功或失败都继续",
+      "role": "main",
+      "variant": "emphasis"
+    },
+    {
+      "from": "bind",
+      "to": "portbusy",
+      "label": "EADDRINUSE",
+      "role": "error",
+      "variant": "dashed"
+    },
+    {
+      "from": "portbusy",
+      "to": "announce",
+      "label": "仍广播（只发不收）",
+      "role": "branch",
+      "variant": "dashed"
+    },
+    {
+      "from": "portbusy",
+      "to": "sweep",
+      "label": "补反向发现",
+      "role": "branch",
+      "variant": "dashed"
+    },
+    {
+      "from": "announce",
+      "to": "auto",
+      "label": "手机收到广播",
+      "role": "main",
+      "variant": "emphasis"
+    },
+    {
+      "from": "sweep",
+      "to": "maclist",
+      "label": "ping_v2 入库",
+      "role": "main",
+      "variant": "emphasis"
+    },
+    {
+      "from": "auto",
+      "to": "pair",
+      "label": "点按设备",
+      "role": "main",
+      "variant": "emphasis"
+    },
+    {
+      "from": "maclist",
+      "to": "pair",
+      "label": "Mac 侧确认",
+      "role": "main",
+      "variant": "emphasis"
+    },
+    {
+      "from": "pair",
+      "to": "chat",
+      "label": "配对成功",
+      "role": "main",
+      "variant": "emphasis"
+    },
+    {
+      "from": "chat",
+      "to": "official",
+      "label": "同一 wire 协议",
+      "role": "main",
+      "variant": "emphasis"
+    },
+    {
+      "from": "auto",
+      "to": "netblock",
+      "label": "收不到广播",
+      "role": "error",
+      "variant": "dashed"
+    },
+    {
+      "from": "netblock",
+      "to": "sweep",
+      "label": "扫描兜底",
+      "role": "branch",
+      "variant": "dashed"
+    },
+    {
+      "from": "official",
+      "to": "mismatch",
+      "label": "协议差异",
+      "role": "error",
+      "variant": "dashed"
+    },
+    {
+      "from": "official",
+      "to": "firstmsg",
+      "label": "未配对来信",
+      "role": "error",
+      "variant": "dashed"
+    },
+    {
+      "from": "firstmsg",
+      "to": "pair",
+      "label": "允许后补配对",
+      "role": "branch",
+      "variant": "dashed"
+    }
+  ],
+  "cards": []
+}

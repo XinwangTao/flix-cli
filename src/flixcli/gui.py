@@ -43,6 +43,7 @@ from . import is_port_text
 from .icons import icon, logo_icon, logo_pixmap
 from .presence import is_online
 from . import __version__ as APP_VERSION
+from . import build_id as APP_BUILD
 
 
 if sys.platform == "darwin":
@@ -220,10 +221,17 @@ class LocalApi:
             api = cls(port)
             try:
                 data = api.get("/api/overview")
-                if isinstance(data, dict) and "self" in data and "devices" in data:
-                    return api
             except ApiError:
                 continue
+            if not isinstance(data, dict) or "self" not in data or "devices" not in data:
+                continue
+            # Version alone is not identity: a pre-fix and a post-fix build
+            # both answer 2.4.0. Reusing the old daemon silently disables the
+            # new endpoints (and this actually happened during an upgrade).
+            # Require both; the offline page offers to start a fresh one.
+            if (data.get("version") == APP_VERSION
+                    and data.get("build") == APP_BUILD):
+                return api
         return None
 
     def get(self, path: str):
@@ -881,9 +889,47 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(980, 640)
         if self.width() < 980 or self.height() < 640:
             self.resize(1280, 840)
+        # macOS paints the backdrop itself; keep it fed from the live desktop.
+        if sys.platform == "darwin":
+            self._start_glass_refresh()
+
+    def _start_glass_refresh(self) -> None:
+        if getattr(self, "_glass_timer", None) is not None:
+            return
+        self._glass_timer = QTimer(self)
+        self._glass_timer.setInterval(300)
+        self._glass_timer.timeout.connect(self._refresh_glass_source)
+        self._glass_timer.start()
+
+    def _refresh_glass_source(self) -> None:
+        """Re-grab the desktop behind the window so the blur stays live.
+
+        QScreen.grabWindow would photograph this window too (white feedback),
+        so CoreGraphics lists only the windows below ours.
+        """
+        if not self.glass or system_contrast_enabled():
+            return
+        root = getattr(self, "glass_root", None)
+        if root is None or not root.isVisible():
+            return
+        # Only the real cocoa window has a CGWindow behind it; the offscreen
+        # platform used by tests has no window server to ask.
+        app = QApplication.instance()
+        if app is None or app.platformName() != "cocoa":
+            return
+        from . import desktop_capture
+        origin = root.mapToGlobal(QPoint(0, 0))
+        image = desktop_capture.grab_below(
+            int(self.winId()), origin.x(), origin.y(),
+            max(1, root.width()), max(1, root.height()))
+        if image is None or image.isNull():
+            return
+        root.set_snapshot((image, origin))
 
     def closeEvent(self, event):
         self.timer.stop()
+        if getattr(self, "_glass_timer", None) is not None:
+            self._glass_timer.stop()
         self.offline_mode = True  # stop the refresh/discovery churn
         for worker in (self.worker, self.action_worker,
                        getattr(self, "_discovery_worker", None),
@@ -901,12 +947,19 @@ class MainWindow(QMainWindow):
     # ---------- frameless plumbing ----------
 
     def _apply_system_backdrop(self) -> bool:
-        """Ask DWM for the real Mica/Acrylic surface (Windows 11 22H2+).
+        """Hand the surface to the OS compositor when it can blur for real.
 
-        Returns True when DWM accepted the request. The app then stops drawing
-        its launch-time desktop still: the blur follows whatever is actually
+        Windows 11 22H2+ paints Mica/Acrylic; macOS gets an NSVisualEffectView
+        inserted behind Qt's own view. Either way the app stops drawing its
+        launch-time desktop still: the blur follows whatever is actually
         behind the window instead of a frozen screenshot.
         """
+        if sys.platform == "darwin":
+            # AppKit will not composite a blur view behind Qt's layer-backed
+            # content view, and re-parenting the content view stops Qt from
+            # rendering at all. macOS therefore refreshes the painted backdrop
+            # from a live screen capture instead (see _refresh_glass_source).
+            return False
         if sys.platform != "win32":
             return False
         try:
@@ -1015,9 +1068,13 @@ class MainWindow(QMainWindow):
         self.apply_theme(self.theme)
         # Windows 11 paints Mica/Acrylic behind the window itself. When DWM
         # accepts it, the app stops compositing its own still; otherwise the
-        # snapshot fallback above stays active.
-        self._native_glass = self._apply_system_backdrop()
-        self.glass_root.set_native(self._native_glass)
+        # snapshot fallback above stays active. macOS re-parents Qt's content
+        # view, which is only safe once the window is on screen (showEvent).
+        self._native_glass = False
+        self.glass_root.set_native(False)
+        if sys.platform != "darwin":
+            self._native_glass = self._apply_system_backdrop()
+            self.glass_root.set_native(self._native_glass)
         if self._native_glass:
             # The first stylesheet ran before we knew DWM would own the
             # surface, so it still carried the heavy fallback alphas.
@@ -1149,7 +1206,7 @@ class MainWindow(QMainWindow):
         refresh.setIconSize(QSize(15, 15))
         refresh.setIcon(icon("refresh", PALETTES[self.theme]["icon"], 15))
         refresh.setCursor(Qt.PointingHandCursor)
-        refresh.clicked.connect(lambda: (self.refresh(), toast_hint(self, "已刷新")))
+        refresh.clicked.connect(self.refresh_and_scan)
         add = QPushButton()
         add.setObjectName("roundBtn")
         add.setToolTip("新建群组 / 添加设备")
@@ -1229,7 +1286,7 @@ class MainWindow(QMainWindow):
         box.addWidget(self.offline_title)
         self.offline_detail = QLabel(
             "默认端口 8898 可能被原生 Flix 占用。\n"
-            "可一键启动本机服务（端口 18991/18998，与 Flix 共存）。")
+            "可一键启动本机服务（设备端口优先 8891，被占时退 18991）。")
         self.offline_detail.setObjectName("emptyNote")
         self.offline_detail.setAlignment(Qt.AlignCenter)
         box.addWidget(self.offline_detail)
@@ -1238,7 +1295,7 @@ class MainWindow(QMainWindow):
         self.start_daemon_button = QPushButton("启动本机服务")
         self.start_daemon_button.setObjectName("primaryBtn")
         self.start_daemon_button.setCursor(Qt.PointingHandCursor)
-        self.start_daemon_button.clicked.connect(self.start_local_daemon)
+        self.start_daemon_button.clicked.connect(lambda: self.start_local_daemon())
         retry = QPushButton("重试连接")
         retry.setObjectName("secondaryButton")
         retry.setCursor(Qt.PointingHandCursor)
@@ -1254,10 +1311,30 @@ class MainWindow(QMainWindow):
         box.addStretch()
         return page
 
-    def start_local_daemon(self):
-        """Start the background service detached (18991/18998)."""
+    def start_local_daemon(self, force: bool = False):
+        """Start the background service, preferring the official port 8891.
+
+        The official Flix app sends to the fixed discovery/channel port 8891;
+        an instance parked on 18991 can be discovered but cannot receive its
+        messages. Fall back to 18991 only when 8891 is already owned.
+        """
+        force = force or getattr(self, "_force_start", False)
+        self._force_start = False
         import subprocess
+        import time
         from .config import APP_DIR
+        if not force:
+            # A daemon launched moments ago may still be binding its API port.
+            # Spawning a second one here used to park it on 18991 permanently.
+            for _ in range(30):
+                if LocalApi.discover(self.api_port) is not None:
+                    self.retry_connection()
+                    return
+                time.sleep(0.1)
+            if not self._stop_stale_daemons():
+                # A daemon from this exact build is already running; attach.
+                self.retry_connection()
+                return
         log_dir = APP_DIR
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = open(log_dir / "flixd-gui-started.log", "ab")
@@ -1275,11 +1352,140 @@ class MainWindow(QMainWindow):
                                        | subprocess.CREATE_NO_WINDOW)
         else:
             kwargs["start_new_session"] = True
+        device_port = 8891 if self._port_free(8891) else 18991
+        # A stale daemon may still own 18998; start the new build on the next
+        # free candidate so discover() can find it instead of colliding.
+        api_port = next(
+            (p for p in (18998, 19098, 19598, 18997, 18996, 8898)
+             if self._port_free(p)), 18998)
         subprocess.Popen(
-            cmd + ["--device-port", "18991", "--api-port", "18998"], **kwargs)
-        self.offline_detail.setText("正在启动本机服务（18991/18998）…几秒后自动重连。")
+            cmd + ["--device-port", str(device_port),
+                   "--api-port", str(api_port)], **kwargs)
+        self.offline_detail.setText(
+            f"正在启动本机服务（{device_port}/{api_port}）…几秒后自动重连。")
         self.start_daemon_button.setEnabled(False)
         QTimer.singleShot(3500, self.retry_connection)
+
+    def _stop_stale_daemons(self) -> bool:
+        """Terminate daemons from another build before starting this one.
+
+        The daemon holds a single-instance lock and the fixed device port, so a
+        pre-upgrade process would both block the new daemon and keep serving
+        8891 with the old code. Only runs when the user explicitly starts the
+        service. Returns False when a current-build daemon is already running.
+        """
+        import os
+        import signal
+        import time
+        stopped = False
+        for port in LocalApi.CANDIDATE_PORTS:
+            try:
+                data = LocalApi(port).get("/api/overview")
+            except ApiError:
+                continue
+            if not isinstance(data, dict):
+                continue
+            if (data.get("version") == APP_VERSION
+                    and data.get("build") == APP_BUILD):
+                return False
+            pid = (data.get("self") or {}).get("pid")
+            if not isinstance(pid, int) or pid <= 1:
+                # Builds before the `pid` field cannot name themselves; find
+                # the process listening on the API port instead.
+                pid = self._pid_on_port(port)
+            if isinstance(pid, int) and pid > 1:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    stopped = True
+                except OSError:
+                    pass
+        if stopped:
+            # Wait specifically for the preferred device port. Breaking on an
+            # already-free 18991 let the new daemon start there while 8891 was
+            # still being released, and it never moved back.
+            for _ in range(40):
+                if self._port_free(8891):
+                    break
+                time.sleep(0.1)
+        return True
+
+    def _terminate_api_daemon(self, api_port: int) -> None:
+        """Stop the daemon serving one desktop API port (self-heal path)."""
+        import signal
+        try:
+            data = LocalApi(api_port).get("/api/overview")
+        except ApiError:
+            data = {}
+        pid = (data.get("self") or {}).get("pid") if isinstance(data, dict) else None
+        if not isinstance(pid, int) or pid <= 1:
+            pid = self._pid_on_port(api_port)
+        if isinstance(pid, int) and pid > 1:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _pid_on_port(port: int) -> int | None:
+        """PID listening on a TCP port, for daemons too old to report `pid`."""
+        import subprocess
+        try:
+            if sys.platform == "win32":
+                out = subprocess.run(["netstat", "-ano"], capture_output=True,
+                                     text=True, timeout=3).stdout
+                for line in out.splitlines():
+                    parts = line.split()
+                    if (len(parts) >= 5 and parts[0] == "TCP"
+                            and parts[1].endswith(f":{port}")
+                            and parts[3] == "LISTENING"):
+                        return int(parts[4])
+            else:
+                out = subprocess.run(
+                    ["lsof", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
+                    capture_output=True, text=True, timeout=3).stdout
+                pids = [int(x) for x in out.split() if x.isdigit()]
+                if pids:
+                    return pids[0]
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return None
+        return None
+
+    @staticmethod
+    def _port_free(port: int) -> bool:
+        import socket
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.bind(("0.0.0.0", port))
+            return True
+        except OSError:
+            return False
+        finally:
+            probe.close()
+
+    def _heal_device_port(self, self_port: int) -> bool:
+        """Move a daemon parked off 8891 back to the official port once."""
+        # Only the known fallback port is healed. A user who chose a custom
+        # --device-port intentionally must not be moved, and test payloads
+        # (e.g. an API port in self.port) must not trigger a restart.
+        if (self_port != 18991
+                or getattr(self, "_port_heal_attempted", False)
+                or not self._port_free(8891)):
+            return False
+        self._port_heal_attempted = True
+        self.statusBar().showMessage(
+            "8891 已空闲，正在重启本机服务以恢复官方 Flix 互通…", 8000)
+        stale_api = int(self.api_port) if self.api_port else 0
+        if stale_api:
+            self._terminate_api_daemon(stale_api)
+        import time
+        for _ in range(40):
+            if self._port_free(8891) and (not stale_api
+                                          or self._port_free(stale_api)):
+                break
+            time.sleep(0.1)
+        self._force_start = True
+        self.start_local_daemon()
+        return True
 
     def retry_connection(self):
         found = LocalApi.discover(self.api_port)
@@ -1287,12 +1493,31 @@ class MainWindow(QMainWindow):
             self.offline_detail.setText("仍未发现 flixcli 服务。确认 flixd 已启动后重试。")
             self.start_daemon_button.setEnabled(True)
             return
+        # A daemon parked on 18991 while 8891 is free cannot receive official
+        # Flix traffic (that client is hard-wired to 8891). Move it back once
+        # per GUI session; if 8891 stays busy, keep the working daemon.
+        try:
+            overview = found.get("/api/overview")
+        except ApiError:
+            overview = {}
+        device_port = 0
+        if isinstance(overview, dict):
+            device_port = int((overview.get("self") or {}).get("port") or 0)
+        if self._heal_device_port(device_port):
+            return
         self.api = found
         self.api_port = found.base.rsplit(":", 1)[-1]
         self.api_port = int(self.api_port)
         self.offline_mode = False
         self.start_daemon_button.setEnabled(True)
-        self.statusBar().showMessage(f"已连接本机服务 :{self.api_port}")
+        self_port = 0
+        if isinstance(overview, dict):
+            self_port = int((overview.get("self") or {}).get("port") or 0)
+        if self_port and self_port != 8891:
+            self.statusBar().showMessage(
+                f"设备端口 {self_port}：官方 Flix 互通不可用（8891 被占用）", 10000)
+        else:
+            self.statusBar().showMessage(f"已连接本机服务 :{self.api_port}")
         self.refresh()
 
     def _build_header(self):
@@ -1490,6 +1715,27 @@ class MainWindow(QMainWindow):
         title = QLabel("Android / ADB"); title.setObjectName("pageTitle"); box.addWidget(title)
         note = QLabel("USB / 无线序列号与授权状态；文件操作要求显式目标。")
         note.setObjectName("muted"); box.addWidget(note); box.addSpacing(8)
+        row = QHBoxLayout()
+        qr_button = QPushButton("显示连接二维码")
+        qr_button.setObjectName("secondaryButton")
+        qr_button.setCursor(Qt.PointingHandCursor)
+        qr_button.setToolTip("手机 RelayDesk 扫码：一次完成配对与模型配置")
+        qr_button.clicked.connect(self.show_connect_qr)
+        row.addWidget(qr_button)
+        wireless = QPushButton("一键无线连接")
+        wireless.setObjectName("primaryBtn")
+        wireless.setCursor(Qt.PointingHandCursor)
+        wireless.setToolTip("自动发现手机无线调试端口，经回环中继连接（无需扫码）")
+        wireless.clicked.connect(self.wireless_adb_connect)
+        row.addWidget(wireless)
+        pair_qr = QPushButton("扫码配对（ADB）")
+        pair_qr.setObjectName("secondaryButton")
+        pair_qr.setCursor(Qt.PointingHandCursor)
+        pair_qr.setToolTip("显示官方 ADB 配对二维码，手机无线调试扫码后自动配对")
+        pair_qr.clicked.connect(self.adb_pair_qr)
+        row.addWidget(pair_qr)
+        row.addStretch()
+        box.addLayout(row)
         self.adb_list = QListWidget(); self.adb_list.setObjectName("contentList")
         box.addWidget(self.adb_list, 1)
         return page
@@ -1580,8 +1826,9 @@ class MainWindow(QMainWindow):
         self.model_copy_button.setObjectName("secondaryButton")
         self.model_copy_button.setCursor(Qt.PointingHandCursor)
         self.model_copy_button.clicked.connect(self.copy_model_config)
-        self.model_qr_button = QPushButton("显示二维码")
+        self.model_qr_button = QPushButton("显示连接二维码")
         self.model_qr_button.setObjectName("secondaryButton")
+        self.model_qr_button.setToolTip("手机 RelayDesk 扫码：一次完成配对与模型配置")
         self.model_qr_button.setCursor(Qt.PointingHandCursor)
         self.model_qr_button.clicked.connect(self.show_model_qr)
         self.model_token_button = QPushButton("重置令牌")
@@ -1782,31 +2029,14 @@ class MainWindow(QMainWindow):
         self.model_status.setText("令牌已重置并重启网关，手机端需重新填写新令牌")
 
     def show_model_qr(self):
-        from .model_gateway import lan_urls, pair_text, qr_png
-        cfg = self._model_cfg()
-        try:
-            png = qr_png(pair_text(cfg))
-        except Exception as exc:  # segno missing or encoder failure
-            self.model_status.setText(f"二维码生成失败：{exc}")
-            return
-        pixmap = QPixmap()
-        pixmap.loadFromData(png)
-        dialog = QDialog(self)
-        dialog.setWindowTitle("手机扫码配置")
-        layout = QVBoxLayout(dialog)
-        image = QLabel()
-        image.setPixmap(pixmap)
-        image.setAlignment(Qt.AlignCenter)
-        layout.addWidget(image)
-        tip = QLabel(f"扫码后在手机浏览器里打开，即可看到地址与令牌\n"
-                     f"地址：{lan_urls(cfg['port'])[0]}\n令牌：{cfg['token']}")
-        tip.setWordWrap(True)
-        layout.addWidget(tip)
-        done = QPushButton("完成")
-        done.setObjectName("primaryBtn")
-        done.clicked.connect(dialog.accept)
-        layout.addWidget(done)
-        dialog.exec()
+        """One QR for both jobs.
+
+        This used to encode only the usage-card URL, which the phone app reads
+        as "not a pairing code". The unified connect code pairs the device and
+        carries the model endpoint at the same time; the plain URL is still
+        available through "复制手机配置".
+        """
+        self.show_connect_qr()
 
     def _load_prefs(self) -> dict:
         try:
@@ -1820,6 +2050,8 @@ class MainWindow(QMainWindow):
         data.update(changes)
         try:
             PREFS_FILE.write_text(json.dumps(data), encoding="utf-8")
+            # Same credential rule as the store: owner-only.
+            PREFS_FILE.chmod(0o600)
         except OSError:
             pass
 
@@ -1861,16 +2093,21 @@ class MainWindow(QMainWindow):
         saved = self._load_prefs().get("glass")
         if isinstance(saved, bool):
             return saved
-        # Windows is the only platform where we can snapshot the desktop
-        # before the window maps. HIG accessibility: respect the system's
-        # "Reduce transparency" switch when the user has not chosen yet.
-        return (sys.platform == "win32" and system_transparency_enabled()
+        # Windows (DWM Mica/Acrylic) and macOS (NSVisualEffectView) can both
+        # blur for real; elsewhere the snapshot fallback is not worth showing
+        # by default. HIG accessibility: respect "Reduce transparency" when the
+        # user has not chosen yet.
+        return (sys.platform in ("win32", "darwin")
+                and system_transparency_enabled()
                 and not system_contrast_enabled())
 
     def _glass_visible(self) -> bool:
         root = getattr(self, "glass_root", None)
-        return bool(self.glass and not system_contrast_enabled()
-                    and root is not None and root.has_source())
+        if root is None or not self.glass or system_contrast_enabled():
+            return False
+        # The desktop still is only needed by the painted fallback. macOS draws
+        # a live NSVisualEffectView instead, so it needs no snapshot.
+        return root.has_source() or sys.platform in ("win32", "darwin")
 
     def set_glass(self, enabled: bool):
         self.glass = bool(enabled)
@@ -2429,6 +2666,28 @@ class MainWindow(QMainWindow):
 
     # ---------- data refresh ----------
 
+    def refresh_and_scan(self) -> None:
+        """Refresh locally, then ask the daemon for one LAN sweep."""
+        self.refresh()
+        if getattr(self, "api", None) is None:
+            return
+        worker = getattr(self, "scan_worker", None)
+        if worker is not None and worker.isRunning():
+            return
+        self.scan_worker = ApiThread(lambda: self.api.post("/api/discover/scan", {}))
+        self.scan_worker.result.connect(self._scan_done)
+        self.scan_worker.failed.connect(
+            lambda msg: self.statusBar().showMessage(f"扫描失败：{msg}", 5000))
+        self.scan_worker.start()
+
+    def _scan_done(self, result) -> None:
+        found = result.get("found") if isinstance(result, dict) else None
+        if found:
+            self.statusBar().showMessage(f"扫描发现 {len(found)} 台设备", 5000)
+        else:
+            self.statusBar().showMessage("扫描完成，未发现新设备", 4000)
+        self.refresh()
+
     def refresh(self):
         self._sync_contrast_state()
         if getattr(self, "offline_mode", False):
@@ -2443,6 +2702,10 @@ class MainWindow(QMainWindow):
     def apply_overview(self, payload: dict):
         self.payload = payload
         self.self_id = (payload.get("self") or {}).get("id", "")
+        self_port = int((payload.get("self") or {}).get("port") or 0)
+        if self._heal_device_port(self_port):
+            return
+        self.maybe_prompt_pair_requests(payload.get("pendingPairs") or [])
         self.notify_new_bubbles(payload.get("bubbles") or [])
         self.connection_dot.setProperty("online", True)
         self.connection_dot.style().unpolish(self.connection_dot)
@@ -2459,6 +2722,9 @@ class MainWindow(QMainWindow):
             f"设备通道端口：{(payload.get('self') or {}).get('port', '未设置')}\n"
             f"下载目录：{(payload.get('settings') or {}).get('saveDir') or '系统 Downloads'}\n"
             f"活动媒体会话：{len((payload.get('media') or {}).get('sessions', []))}")
+        if (payload.get("self") or {}).get("port") not in (None, 8891):
+            self.settings_text.setText(
+                self.settings_text.text() + "\n⚠ 未占用 8891，官方 Flix 互通不可用")
         self.populate_sidebar()
         self.populate_transfers()
         self.populate_adb()
@@ -2469,6 +2735,47 @@ class MainWindow(QMainWindow):
         if self.current and self.chat_page_is_showing():
             self.render_current(activate=False)
         self.statusBar().showMessage("最后更新 " + datetime.now().strftime("%H:%M:%S"))
+
+    def maybe_prompt_pair_requests(self, pending: list) -> None:
+        """Operator confirmation for a phone-initiated pair (one tap on phone).
+
+        The daemon holds the peer's /intent until this dialog answers; the
+        poll interval is shorter than the 30 s server-side timeout.
+        """
+        if not pending:
+            self._pair_dialog_fp = None
+            return
+        request = pending[0] if isinstance(pending[0], dict) else {}
+        fingerprint = str(request.get("fingerprint") or "")
+        if not fingerprint or getattr(self, "_pair_dialog_fp", None) == fingerprint:
+            return
+        self._pair_dialog_fp = fingerprint
+        alias = request.get("alias") or fingerprint[:8]
+        ip = request.get("ip") or "未知地址"
+        box = QMessageBox(self)
+        box.setWindowTitle("配对请求")
+        code = request.get("code")
+        detail = (f"对方验证码：{code}\n请与手机屏幕上的配对码核对后允许。"
+                  if code else "对方未携带验证码，是否允许？")
+        box.setText(f"「{alias}」（{ip}）请求与本机配对。\n{detail}")
+        allow = box.addButton("允许", QMessageBox.AcceptRole)
+        box.addButton("拒绝", QMessageBox.RejectRole)
+        box.setModal(False)
+
+        def decide(_button=None) -> None:
+            accept = box.clickedButton() is allow
+            self._pair_dialog_fp = None
+            try:
+                self.api.post("/api/pair/approve",
+                              {"fingerprint": fingerprint, "accept": accept})
+                self.statusBar().showMessage(
+                    "已允许配对" if accept else "已拒绝配对", 5000)
+            except ApiError as exc:
+                self.statusBar().showMessage(f"配对确认失败：{exc}", 6000)
+            self.refresh()
+
+        box.buttonClicked.connect(decide)
+        box.open()
 
     def populate_sidebar(self):
         if not hasattr(self, "entity_list"):
@@ -3328,7 +3635,100 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         menu.addAction("新建群组…", self.create_group_dialog)
         menu.addAction("手动添加设备…", self.manual_add_dialog)
+        menu.addAction("显示连接二维码…", self.show_connect_qr)
         menu.exec(self.cursor().pos())
+
+    def adb_pair_qr(self):
+        """Official ADB pairing QR: the phone scans, then we pair and connect."""
+        from .adb_wireless import pairing_payload
+        from .model_gateway import qr_png
+        payload, service, password = pairing_payload()
+        try:
+            png = qr_png(payload, scale=8)
+        except Exception as exc:  # noqa: BLE001 - segno missing
+            toast_hint(self, f"二维码渲染失败：{exc}")
+            return
+        pixmap = QPixmap()
+        pixmap.loadFromData(png)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("扫码配对 ADB")
+        layout = QVBoxLayout(dialog)
+        image = QLabel()
+        image.setPixmap(pixmap)
+        image.setAlignment(Qt.AlignCenter)
+        layout.addWidget(image)
+        tip = QLabel("手机：开发者选项 → 无线调试 → 使用二维码配对设备 → 扫这张码\n"
+                     "扫完请停留在该界面，电脑会自动完成配对与连接")
+        tip.setWordWrap(True)
+        layout.addWidget(tip)
+        done = QPushButton("完成")
+        done.setObjectName("primaryBtn")
+        done.clicked.connect(dialog.accept)
+        layout.addWidget(done)
+        self.run_action(
+            lambda: self.api.post("/api/adb/pair",
+                                  {"service": service, "password": password}),
+            lambda result: toast_hint(
+                self, f"已配对并连接 {result.get('serial', 'ADB 设备')}".strip()))
+        dialog.exec()
+
+    def wireless_adb_connect(self):
+        """Discover the phone and connect without a QR or a typed address."""
+        self.run_action(
+            lambda: self.api.post("/api/adb/connect", {}),
+            lambda result: toast_hint(
+                self, f"已连接 {result.get('serial', 'ADB 设备')}".strip()))
+
+    def show_connect_qr(self):
+        """One scan: pair the phone and hand it the model-gateway endpoint."""
+        from .model_gateway import pair_text, qr_png
+        link = ""
+        model = None
+        fallback_note = ""
+        try:
+            data = self.api.get("/api/pair-link") or {}
+            link = data.get("link") or ""
+            model = data.get("model")
+        except ApiError:
+            data = {}
+        if not link:
+            # An older daemon has no /api/pair-link. Still show something
+            # scannable instead of an error, and say why it is different.
+            link = pair_text(self._model_cfg())
+            fallback_note = ("当前连接的本机服务版本较旧：这是模型网关地址码，"
+                             "不是配对码。退出并重开 RelayDesk 后再生成即可。")
+        try:
+            png = qr_png(link)
+        except Exception as exc:  # noqa: BLE001 - segno missing or encoder failure
+            toast_hint(self, f"二维码渲染失败：{exc}")
+            return
+        pixmap = QPixmap()
+        pixmap.loadFromData(png)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("扫码连接设备")
+        layout = QVBoxLayout(dialog)
+        image = QLabel()
+        image.setPixmap(pixmap)
+        image.setAlignment(Qt.AlignCenter)
+        layout.addWidget(image)
+        if fallback_note:
+            model_text = fallback_note
+        elif model and not model.get("listening"):
+            model_text = f"模型网关已开启但未监听：{model['base']}（先启动模型共享）"
+        elif model:
+            model_text = f"同时下发模型网关：{model['base']}"
+        else:
+            model_text = "模型共享未开启：这次只配对；开启模型共享后重新扫码即可下发地址与令牌"
+        tip = QLabel("手机打开 RelayDesk → 扫码添加设备\n" + model_text +
+                     ("\n⚠ 这张码含模型令牌，等同密码：勿拍照、勿转发；泄露后点「重置令牌」"
+                      if model else ""))
+        tip.setWordWrap(True)
+        layout.addWidget(tip)
+        done = QPushButton("完成")
+        done.setObjectName("primaryBtn")
+        done.clicked.connect(dialog.accept)
+        layout.addWidget(done)
+        dialog.exec()
 
     def create_group_dialog(self):
         dialog = QDialog(self)
@@ -3681,7 +4081,8 @@ def main(argv: list[str] | None = None, *, api_port: int = 8898) -> int:
     app.setStyle("Fusion")
     app.setFont(QFont("Microsoft YaHei UI", 9))
     # Snapshot before the window maps, or the material would contain itself.
-    snapshot = desktop_snapshot() if sys.platform == "win32" else None
+    # macOS re-grabs it on a timer afterwards (see _refresh_glass_source).
+    snapshot = desktop_snapshot() if sys.platform in ("win32", "darwin") else None
     window = MainWindow(api_port, snapshot=snapshot)
     window.setWindowIcon(logo_icon())
     window.show()
@@ -3706,6 +4107,7 @@ def main(argv: list[str] | None = None, *, api_port: int = 8898) -> int:
                     fh.write(f"size={root.size().width()}x{root.size().height()}\n")
                     fh.write(f"cache={root._cache}\n")
                     fh.write(f"error={getattr(root, '_last_error', None)}\n")
+                    fh.write(f"native={getattr(window, '_native_glass', None)}\n")
             except OSError:
                 pass
         QTimer.singleShot(2500, _dump)

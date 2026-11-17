@@ -19,7 +19,7 @@ from typing import Callable
 
 from aiohttp import web
 
-from . import local_ip
+from . import __version__, build_id, local_ip
 from .adb import AdbClient, AdbError
 from .channel import PeerError, post_intent, post_json
 from .media_session import SessionError, SessionManager
@@ -50,9 +50,11 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
                      webrtc_hub=None,
                      adb_client: AdbClient | None = None,
                      media_manager: SessionManager | None = None,
-                     media_runtime=None) -> tuple[web.Application, Callable[[dict], None]]:
+                     media_runtime=None,
+                     scan_fn=None) -> tuple[web.Application, Callable[[dict], None]]:
     events_q: asyncio.Queue = asyncio.Queue(maxsize=256)
     shutdown_ev = asyncio.Event()
+    from .pairgate import GATE as pair_gate
 
     def publish(evt: dict) -> None:
         with contextlib.suppress(asyncio.QueueFull):
@@ -67,7 +69,7 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
             "deviceModel": ident.get("deviceModel", "Windows"),
             "deviceType": ident.get("deviceType", "desktop"),
             "ip": local_ip(), "port": channel_port,
-            "online": True, "paired": False,
+            "online": True, "paired": False, "pid": os.getpid(),
         })
 
     async def devices_get(request: web.Request) -> web.Response:
@@ -143,6 +145,27 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
         return web.json_response({"ok": ok, "paired": ok, "peer": peer_fp,
                                   "replyCode": code, "detail": message},
                                  status=200 if ok else 400)
+
+    async def pair_approve_post(request: web.Request) -> web.Response:
+        """Resolve a peer-initiated pair request shown in the GUI.
+
+        The phone's one-tap flow cannot know our pairing key, so the daemon
+        holds the /intent request until the local operator decides here.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            body = None
+        fingerprint = body.get("fingerprint") if isinstance(body, dict) else None
+        if not isinstance(fingerprint, str) or not fingerprint:
+            return web.json_response({"ok": False, "error": "bad-params"}, status=400)
+        accept = body.get("accept", True) if isinstance(body, dict) else True
+        if isinstance(accept, str):
+            accept = accept.lower() != "false"
+        ok = pair_gate.approve(fingerprint, bool(accept))
+        return web.json_response({"ok": ok, "fingerprint": fingerprint,
+                                  "accept": bool(accept)},
+                                 status=200 if ok else 404)
 
     async def group_create_post(request: web.Request) -> web.Response:
         """Create a group locally, then announce it to every listed member."""
@@ -271,6 +294,16 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
             return web.json_response({"ok": False, "error": error.kind,
                                       "detail": error.detail}, status=400)
 
+    def _pending_with_alias(store, gate) -> list[dict]:
+        pending = gate.pending()
+        for item in pending:
+            row = store.con.execute(
+                "SELECT alias FROM persistence_devices WHERE fingerprint=?",
+                (item["fingerprint"],)).fetchone()
+            if row and row[0]:
+                item["alias"] = row[0]
+        return pending
+
     async def overview_get(request: web.Request) -> web.Response:
         settings = store.prefs()
         media = {"sessions": media_manager.list(), "audit": media_manager.audit[-50:]} \
@@ -284,18 +317,103 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
                 adb = {"ok": False, "error": error.kind, "detail": error.detail,
                        "devices": []}
         return web.json_response({
+            "version": __version__,
+            "build": build_id(),
             "self": {"id": ident["fingerprint"], "alias": ident["alias"],
                      "deviceModel": ident.get("deviceModel", "Windows"),
-                     "ip": local_ip(), "port": channel_port, "online": True},
+                     "ip": local_ip(), "port": channel_port, "online": True,
+                     "pid": os.getpid()},
             "devices": store.visible_devices(own=ident["fingerprint"]),
             "bubbles": store.bubbles(100),
             "groups": store.groups(), "media": media, "adb": adb,
             "paired": [row[0] for row in store.con.execute(
                 "SELECT fingerprint FROM pair_devices")],
+            "pendingPairs": _pending_with_alias(store, pair_gate),
             "settings": {"autoReceive": settings.get("autoReceive", True),
                          "saveDir": settings.get("saveDir", ""),
                          "theme": settings.get("theme", "system")},
         })
+
+    async def discover_scan_post(request: web.Request) -> web.Response:
+        """One-shot LAN sweep (GUI refresh / recovery after an address move)."""
+        if scan_fn is None:
+            return web.json_response({"ok": False, "error": "scan-disabled"},
+                                     status=503)
+        try:
+            found = await scan_fn()
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+        return web.json_response({"ok": True, "found": [
+            {"fingerprint": d.get("fingerprint"), "alias": d.get("alias"),
+             "ip": d.get("ip"), "port": d.get("port")} for d in (found or [])]})
+
+    async def pair_link_get(request: web.Request) -> web.Response:
+        """One QR for the phone: pairing plus the model-gateway address/token."""
+        from .model_gateway import share_info
+        from .qrcode import pair_uri
+        # share_info probes the gateway over HTTP; on the event loop that would
+        # freeze every device message and discovery reply for up to its timeout.
+        loop = asyncio.get_running_loop()
+        model = await loop.run_in_executor(None, share_info, store)
+        link = pair_uri(ident["fingerprint"], channel_port,
+                        store.own_pair_key(), ip=local_ip(),
+                        model_base=(model or {}).get("base", ""),
+                        model_token=(model or {}).get("token", ""))
+        return web.json_response({"ok": True, "link": link, "model": model})
+
+    async def adb_pair_post(request: web.Request) -> web.Response:
+        """Wait for the scanned pairing service, `adb pair`, then connect."""
+        from .adb_wireless import (AdbWirelessError, connect as wireless_connect,
+                                   pair as wireless_pair)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        service = str(body.get("service") or "")
+        password = str(body.get("password") or "")
+        if not service or not password:
+            return web.json_response({"ok": False, "error": "bad-params"},
+                                     status=400)
+        timeout = float(body.get("timeout") or 90.0)
+        adb_path = getattr(adb_client, "adb_path", None)
+
+        def run():
+            wireless_pair(service, password, adb_path=adb_path, timeout=timeout)
+            return wireless_connect(adb_path=adb_path)
+
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, run)
+        except AdbWirelessError as exc:
+            return web.json_response({"ok": False, "error": exc.kind,
+                                      "detail": exc.detail}, status=503)
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": "adb-pair",
+                                      "detail": str(exc)}, status=503)
+        return web.json_response(result)
+
+    async def adb_connect_post(request: web.Request) -> web.Response:
+        """One click: discover the phone, relay through loopback, connect.
+
+        Android's wireless-debugging QR is displayed *by the phone* for the host
+        to scan, so there is no phone-side scanner to feed from here.
+        """
+        from .adb_wireless import AdbWirelessError, connect as wireless_connect
+        adb_path = getattr(adb_client, "adb_path", None)
+
+        def run():
+            return wireless_connect(adb_path=adb_path)
+
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, run)
+        except AdbWirelessError as exc:
+            return web.json_response({"ok": False, "error": exc.kind,
+                                      "detail": exc.detail}, status=503)
+        except Exception as exc:  # noqa: BLE001 - report, never 500 silently
+            return web.json_response({"ok": False, "error": "adb-connect",
+                                      "detail": str(exc)}, status=503)
+        return web.json_response(result)
 
     async def adb_devices_get(request: web.Request) -> web.Response:
         if adb_client is None:
@@ -544,7 +662,10 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
     app.router.add_post("/api/groups/update", group_update_post)
     app.router.add_post("/api/groups/create", group_create_post)
     app.router.add_get("/api/events", events_get)
+    app.router.add_get("/api/pair-link", pair_link_get)
     app.router.add_get("/api/adb/devices", adb_devices_get)
+    app.router.add_post("/api/adb/connect", adb_connect_post)
+    app.router.add_post("/api/adb/pair", adb_pair_post)
     app.router.add_post("/api/adb/transfer", adb_transfer_post)
     app.router.add_post("/api/send-text", send_text_post)
     app.router.add_post("/api/send-files", send_files_post)
@@ -559,6 +680,8 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
     app.router.add_post("/api/media/apply-answer", media_apply_answer_post)
     app.router.add_get("/api/media/{call_id}/snapshot", media_snapshot_get)
     app.router.add_post("/api/pair", pair_post)
+    app.router.add_post("/api/discover/scan", discover_scan_post)
+    app.router.add_post("/api/pair/approve", pair_approve_post)
     for route in ("/api/respond-pair",
                   "/api/accept-transfer", "/api/cancel-transfer"):
         app.router.add_post(route, stub_post)
@@ -604,12 +727,14 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
 
 async def serve_desktop_api(store, ident, send_text_fn, port: int,
                             channel_port: int = 8891, webrtc_hub=None,
-                            adb_client=None, media_manager=None, media_runtime=None):
+                            adb_client=None, media_manager=None, media_runtime=None,
+                            scan_fn=None):
     app, publish = make_desktop_app(store, ident, send_text_fn,
                                     api_port=port, channel_port=channel_port,
                                     webrtc_hub=webrtc_hub, adb_client=adb_client,
                                     media_manager=media_manager,
-                                    media_runtime=media_runtime)
+                                    media_runtime=media_runtime,
+                                    scan_fn=scan_fn)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", port)

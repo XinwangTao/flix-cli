@@ -1,0 +1,243 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RelayDesk 扫码快连与模型共享",
+    "locale": "zh-CN",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    {
+      "id": "desktop",
+      "label": "桌面端（Mac）"
+    },
+    {
+      "id": "phone",
+      "label": "Android App"
+    },
+    {
+      "id": "gateway",
+      "label": "模型网关 → cc-switch"
+    },
+    {
+      "id": "adb",
+      "label": "ADB 无线调试"
+    },
+    {
+      "id": "exceptions",
+      "label": "拒绝与故障出口",
+      "variant": "exception"
+    }
+  ],
+  "phases": [],
+  "groups": [],
+  "mainPath": [
+    "open",
+    "qr",
+    "scan",
+    "verify",
+    "pair",
+    "model",
+    "gw"
+  ],
+  "nodes": [
+    {
+      "id": "open",
+      "lane": "desktop",
+      "col": 0,
+      "type": "frontend",
+      "label": "打开「连接设备」",
+      "sublabel": "GUI 按钮 / flix qrcode --with-model"
+    },
+    {
+      "id": "qr",
+      "lane": "desktop",
+      "col": 1,
+      "type": "backend",
+      "label": "生成一码通二维码",
+      "sublabel": "relaydesk://pair?fp&ip&port&code&model_base&token",
+      "width": 170
+    },
+    {
+      "id": "scan",
+      "lane": "phone",
+      "col": 2,
+      "type": "frontend",
+      "label": "App 扫码",
+      "sublabel": "QrScanActivity → handleScannedCode"
+    },
+    {
+      "id": "verify",
+      "lane": "phone",
+      "col": 3,
+      "type": "security",
+      "label": "身份校验",
+      "sublabel": "pingV2 在线 + fingerprint 一致",
+      "tag": "不符即拒"
+    },
+    {
+      "id": "pair",
+      "lane": "phone",
+      "col": 4,
+      "type": "backend",
+      "label": "配对落库",
+      "sublabel": "postIntent(pairIntent) → pair_devices"
+    },
+    {
+      "id": "model",
+      "lane": "phone",
+      "col": 5,
+      "type": "frontend",
+      "label": "自动写入模型配置",
+      "sublabel": "base URL + token，不再手输"
+    },
+    {
+      "id": "gw",
+      "lane": "gateway",
+      "col": 6,
+      "type": "cloud",
+      "label": "请求打到本机网关",
+      "sublabel": "→ 127.0.0.1:15721 模型映射",
+      "width": 150
+    },
+    {
+      "id": "adb",
+      "lane": "adb",
+      "col": 2,
+      "type": "backend",
+      "label": "ADB 快连",
+      "sublabel": "扫码配对(WIFI:T:ADB) 或 mDNS 发现"
+    },
+    {
+      "id": "relay",
+      "lane": "adb",
+      "col": 3,
+      "type": "backend",
+      "label": "loopback 中继",
+      "sublabel": "Apple python 转发 127.0.0.1:40009"
+    },
+    {
+      "id": "dev",
+      "lane": "adb",
+      "col": 4,
+      "type": "external",
+      "label": "adb connect + devices",
+      "sublabel": "可见才报成功"
+    },
+    {
+      "id": "offline",
+      "lane": "exceptions",
+      "col": 3,
+      "type": "security",
+      "label": "设备离线 / 身份不符",
+      "sublabel": "提示重扫，两侧都不落库"
+    },
+    {
+      "id": "noadb",
+      "lane": "exceptions",
+      "col": 2,
+      "type": "messagebus",
+      "label": "未发现无线调试",
+      "sublabel": "未扫码/未开无线调试，给出指引"
+    }
+  ],
+  "edges": [
+    {
+      "from": "open",
+      "to": "qr",
+      "label": "汇总身份 + 模型地址令牌",
+      "variant": "emphasis"
+    },
+    {
+      "from": "qr",
+      "to": "scan",
+      "label": "手机扫码",
+      "variant": "emphasis"
+    },
+    {
+      "from": "scan",
+      "to": "verify",
+      "label": "解析 payload",
+      "variant": "emphasis"
+    },
+    {
+      "from": "verify",
+      "to": "pair",
+      "label": "通过",
+      "variant": "emphasis"
+    },
+    {
+      "from": "pair",
+      "to": "model",
+      "label": "同一批写入",
+      "variant": "emphasis"
+    },
+    {
+      "from": "model",
+      "to": "gw",
+      "label": "POST /v1/messages",
+      "variant": "emphasis"
+    },
+    {
+      "from": "verify",
+      "to": "offline",
+      "label": "不在线 / 指纹不符",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "from": "open",
+      "to": "adb",
+      "label": "可选：ADB 快连",
+      "variant": "dashed"
+    },
+    {
+      "from": "adb",
+      "to": "relay",
+      "label": "解析 host:port",
+      "variant": "emphasis"
+    },
+    {
+      "from": "relay",
+      "to": "dev",
+      "label": "adb connect",
+      "variant": "emphasis"
+    },
+    {
+      "from": "adb",
+      "to": "noadb",
+      "label": "无服务 / 解析失败",
+      "variant": "security",
+      "role": "error"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "一码两用",
+      "items": [
+        "同一张二维码同时承载配对与模型配置",
+        "扫码后不再手输 IP、base URL、token",
+        "模型映射与计费仍在 cc-switch，口径不变"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "ADB 不靠手工脚本",
+      "items": [
+        "官方 WIFI:T:ADB 配对码：电脑显示、手机无线调试扫，扫完电脑自动 adb pair",
+        "未配对时走 mDNS 发现 + 回环中继（绕开 macOS 15 本地网络权限）",
+        "应用内一键无线连接，不需要扫码也能连"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "失败可见",
+      "items": [
+        "设备不在线或指纹不符：拒绝，且不写入任何一边",
+        "未开无线调试：给出明确指引而不是空列表",
+        "网关未启用：二维码只带配对信息或直接提示"
+      ]
+    }
+  ]
+}

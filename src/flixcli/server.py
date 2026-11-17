@@ -108,6 +108,49 @@ def _trusted_sender(store, sender, remote) -> bool:
     return bool(expected) and bool(remote) and expected == remote
 
 
+def _offer_first_contact_pair(store, sender, remote, publish, pair_gate,
+                              ident, device_port=DEVICE_PORT) -> None:
+    """Ask the operator to pair a discovered device that just messaged us.
+
+    The official Android app accepts a first bubble from an unpaired peer,
+    while our inbound gate rejects it. Rather than weakening the gate, surface
+    a one-tap request for a device we already discovered at this exact address.
+    A forged `from` cannot trigger a prompt: the fingerprint must answer
+    ping_v2 at the source address before the operator is asked.
+    """
+    if not isinstance(sender, str) or not sender or store.is_paired(sender):
+        return
+    known_ip = _device_ip(store, sender)
+    if not known_ip or not remote or known_ip != remote:
+        return
+    if pair_gate.is_pending(sender):
+        return
+    row = store.con.execute(
+        "SELECT port FROM persistence_devices WHERE fingerprint=?",
+        (sender,)).fetchone()
+    port = int(row[0]) if row and row[0] else DEVICE_PORT
+
+    async def verify_then_ask() -> None:
+        from .channel import ping_v2
+        try:
+            modal = await ping_v2(remote, ident, port=port,
+                                  device_port=device_port, timeout=3.0)
+        except Exception:
+            return
+        if modal.get("fingerprint") != sender:
+            return
+        approved = await pair_gate.ask(sender, {"ip": remote,
+                                                "reason": "first-message"})
+        if approved:
+            store.add_pair(sender, store.own_pair_key())
+            _record_peer_ip(store, sender, remote)
+            publish("pairChanged", {"fingerprint": sender,
+                                    "action": "first-message"})
+
+    with contextlib.suppress(RuntimeError):
+        asyncio.get_running_loop().create_task(verify_then_ask())
+
+
 def _safe_destination(store, name: str) -> tuple[str, str] | None:
     clean = os.path.basename(name.replace("\\", "/"))
     if not clean or clean in (".", ".."):
@@ -124,7 +167,10 @@ def _safe_destination(store, name: str) -> tuple[str, str] | None:
 
 def make_app(store, ident: dict, publish: Callable[[str, dict], None],
              clipboard_setter=None, device_port: int = DEVICE_PORT,
-             signal_hub=None, media_manager=None, media_runtime=None) -> web.Application:
+             signal_hub=None, media_manager=None, media_runtime=None,
+             pair_gate=None) -> web.Application:
+    if pair_gate is None:
+        from .pairgate import GATE as pair_gate
     async def ping_v2_post(request: web.Request) -> web.Response:
         # Manual-add handshake [RT 2026-10-21]: the official client ignores
         # the request body except `from` (echoed back) and answers with its
@@ -154,6 +200,12 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
         # `from` is attacker-controlled in the JSON body. Pairing plus a
         # matching source address is the only identity this transport has.
         if not _trusted_sender(store, sender, request.remote):
+            # A discovered, unpaired peer (typically the official Flix app)
+            # gets one operator-confirmable pairing prompt instead of a
+            # silent drop. The bubble itself is still rejected: trust is
+            # changed only by the approval, never by the message.
+            _offer_first_contact_pair(store, sender, request.remote,
+                                      publish, pair_gate, ident, device_port)
             return web.Response(status=403, text="sender not paired")
         btype = bubble.get("type")
         content = bubble.get("content")
@@ -240,7 +292,7 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
                     return web.Response(text="{0: success}")
             return web.Response(status=500, text="receive intent failed")
         if action in (model.ACTION_ASK_PAIR, model.ACTION_CONFIRM_PAIR):
-            return _pair_intent(intent, request)
+            return await _pair_intent(intent, request)
         if action == model.ACTION_CONFIRM_RECEIVE:
             # Receiver -> sender "accepted, upload now" ack. The bubble is
             # already armed in file_contents; nothing else to do here.
@@ -417,7 +469,74 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
                 await ws.close()
         return ws
 
-    def _pair_intent(intent: dict, request: web.Request) -> web.Response:
+    async def _resolve_peer(fp: str, remote: str | None) -> tuple[str, int] | None:
+        """Find the peer's *current* address/port by proving its fingerprint.
+
+        Cached rows go stale: a phone's DHCP address changes, and the same
+        phone moves its RelayDesk channel between 8891 and 18991 depending on
+        whether the official app owns 8891. Resolve at the moment of action
+        instead of trusting the last scan/presence snapshot.
+        """
+        row = store.con.execute(
+            "SELECT ip, port FROM persistence_devices WHERE fingerprint=?",
+            (fp,)).fetchone()
+        stored_ip = (row[0] if row and row[0] else "") or ""
+        stored_port = int(row[1]) if row and row[1] else DEVICE_PORT
+        seen: set[tuple[str, int]] = set()
+        candidates: list[tuple[str, int]] = []
+        for ip in (remote, stored_ip):
+            if not ip:
+                continue
+            for port in (stored_port, DEVICE_PORT, 18991, device_port):
+                if (ip, port) in seen:
+                    continue
+                seen.add((ip, port))
+                candidates.append((ip, port))
+        from .channel import ping_v2
+        for ip, port in candidates:
+            try:
+                modal = await ping_v2(ip, ident, port=port,
+                                      device_port=device_port, timeout=2.0)
+            except Exception:
+                continue
+            if modal.get("fingerprint") == fp:
+                return ip, int(modal.get("port") or port)
+        if stored_ip:
+            return stored_ip, stored_port
+        if remote:
+            return remote, stored_port
+        return None
+
+    async def _settle_pair_later(device_id: str, remote: str | None) -> None:
+        """Deliver a late operator approval after the ask already returned.
+
+        The official flow is asynchronous: the accepting side replies
+        confirmPairDevice. Holding the phone's HTTP request past its 8 s
+        timeout only produced "pair failed" while the operator was deciding.
+        """
+        try:
+            approved = await pair_gate.wait(device_id, pair_gate.timeout)
+            if not approved:
+                return
+            store.add_pair(device_id, store.own_pair_key())
+            if remote:
+                _record_peer_ip(store, device_id, remote)
+            publish("pairChanged", {"fingerprint": device_id,
+                                    "action": "confirm"})
+            endpoint = await _resolve_peer(device_id, remote)
+            if endpoint:
+                ip, port = endpoint
+                from .channel import post_intent
+                intent = model.pair_intent(
+                    ident["fingerprint"], ident["fingerprint"],
+                    store.own_pair_key(), action=model.ACTION_CONFIRM_PAIR,
+                    accept=True)
+                with contextlib.suppress(Exception):
+                    await post_intent(ip, intent, port=port)
+        finally:
+            pair_gate.close(device_id)
+
+    async def _pair_intent(intent: dict, request: web.Request) -> web.Response:
         # Pairing rides /intent [RT 2026-10-21]: askPairDevice/confirmPairDevice
         # with extra {verifyDevice, verifyCode, accept?}.
         # askPairDevice (A asks B): verifyDevice must equal OUR fp, else
@@ -446,12 +565,37 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
                          f"{verify_device} did = {ident.get('fingerprint')}}}")
             own_key = store.own_pair_key()
             supplied = verify_code if isinstance(verify_code, str) else ""
-            if not own_key or not hmac.compare_digest(supplied, own_key):
-                publish("pairRejected", {"fingerprint": str(device_id or ""),
-                                         "reason": "bad-code"})
-                return web.Response(text="{302: verifyCode mismatch}")
             if accept is False:
+                publish("pairRejected", {"fingerprint": str(device_id or ""),
+                                         "reason": "declined"})
                 return web.Response(text="{0: success}")
+            if not own_key or not hmac.compare_digest(supplied, own_key):
+                # A one-tap phone flow cannot know OUR key (it only knows its
+                # own). Ask the operator, but do not outlive the caller's HTTP
+                # timeout: wait briefly for a quick answer, otherwise reply
+                # now and deliver the approval as confirmPairDevice later.
+                device_id = str(device_id or "")
+                if not device_id or not pair_gate.open(
+                        device_id, {"ip": remote or "", "port": device_port,
+                                    "reason": "code-mismatch",
+                                    "code": supplied}):
+                    return web.Response(text="{301: pair Device Null}")
+                approved = await pair_gate.wait(device_id, pair_gate.fast_timeout)
+                if approved is True:
+                    pair_gate.close(device_id)
+                    store.add_pair(device_id, own_key)
+                    _record_peer_ip(store, device_id, remote)
+                    publish("pairChanged", {"fingerprint": device_id,
+                                            "action": intent.get("action")})
+                    return web.Response(text="{0: success}")
+                if approved is False:
+                    pair_gate.close(device_id)
+                    publish("pairRejected", {"fingerprint": device_id,
+                                             "reason": "not-approved"})
+                    return web.Response(text="{301: pair Device Null}")
+                asyncio.get_running_loop().create_task(
+                    _settle_pair_later(device_id, remote))
+                return web.Response(text="{301: pair Device Null}")
             if isinstance(device_id, str) and device_id:
                 store.add_pair(device_id, own_key)
                 _record_peer_ip(store, device_id, remote)

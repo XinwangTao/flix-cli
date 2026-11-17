@@ -11,6 +11,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from flixcli.config import Store
+from flixcli import model_gateway
 from flixcli.model_gateway import (CONFIG_TEMPLATE, load_config, make_model_app,
                                    new_token, reset_token, save_config,
                                    stop_gateway)
@@ -87,6 +88,129 @@ class ModelGatewayTests(unittest.TestCase):
                     await upstream.close()
 
         asyncio.run(run())
+
+    def test_health_keeps_the_last_refusals(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as tmp:
+                seen: list[dict] = []
+                upstream = TestServer(_upstream_app(seen))
+                await upstream.start_server()
+                try:
+                    cfg = self._cfg(tmp, str(upstream.make_url("")).rstrip("/"))
+                    client = TestClient(TestServer(make_model_app(None, cfg)))
+                    await client.start_server()
+                    try:
+                        await client.post("/v1/messages", json={},
+                                          headers={"x-api-key": "stale"})
+                        resp = await client.get(
+                            "/health", headers={"x-api-key": cfg["token"]})
+                        body = await resp.json()
+                        recent = body["stats"]["recent"]
+                        self.assertEqual(recent[-1]["kind"], "401 token")
+                        self.assertIn("remote", recent[-1])
+                    finally:
+                        await client.close()
+                finally:
+                    await upstream.close()
+
+        asyncio.run(run())
+
+    def test_concurrency_limit_answers_429(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as tmp:
+                gate = asyncio.Event()
+
+                async def slow(request):
+                    await gate.wait()
+                    return web.json_response({"type": "message"})
+
+                upstream_app = web.Application()
+                upstream_app.router.add_post("/v1/messages", slow)
+                upstream = TestServer(upstream_app)
+                await upstream.start_server()
+                try:
+                    cfg = self._cfg(tmp, str(upstream.make_url("")).rstrip("/"))
+                    cfg["max_concurrent"] = 1
+                    client = TestClient(TestServer(make_model_app(None, cfg)))
+                    await client.start_server()
+                    try:
+                        headers = {"x-api-key": cfg["token"]}
+                        first = asyncio.create_task(client.post(
+                            "/v1/messages", json={"model": "x"}, headers=headers))
+                        # Wait for the request to be accounted in flight rather
+                        # than sleeping a fixed 0.2s (flaky on a loaded CI box).
+                        for _ in range(200):
+                            if client.app[model_gateway.STATS]["active"] >= 1:
+                                break
+                            await asyncio.sleep(0.01)
+                        self.assertEqual(
+                            client.app[model_gateway.STATS]["active"], 1,
+                            "第一个请求没有进入在途状态")
+                        second = await client.post(
+                            "/v1/messages", json={"model": "x"}, headers=headers)
+                        self.assertEqual(second.status, 429)
+                        self.assertEqual(second.headers.get("Retry-After"), "2")
+                        payload = await second.json()
+                        self.assertEqual(payload["error"]["type"],
+                                         "overloaded_error")
+                        gate.set()
+                        self.assertEqual((await first).status, 200)
+                    finally:
+                        await client.close()
+                finally:
+                    await upstream.close()
+
+        asyncio.run(run())
+
+    def test_limit_holds_when_requests_arrive_together(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as tmp:
+                gate = asyncio.Event()
+
+                async def slow(request):
+                    await gate.wait()
+                    return web.json_response({"type": "message"})
+
+                upstream_app = web.Application()
+                upstream_app.router.add_post("/v1/messages", slow)
+                upstream = TestServer(upstream_app)
+                await upstream.start_server()
+                try:
+                    cfg = self._cfg(tmp, str(upstream.make_url("")).rstrip("/"))
+                    cfg["max_concurrent"] = 1
+                    client = TestClient(TestServer(make_model_app(None, cfg)))
+                    await client.start_server()
+                    try:
+                        headers = {"x-api-key": cfg["token"]}
+                        tasks = [asyncio.create_task(client.post(
+                            "/v1/messages", json={"model": "x"},
+                            headers=headers)) for _ in range(4)]
+                        await asyncio.sleep(0.2)
+                        gate.set()
+                        responses = await asyncio.gather(*tasks)
+                        codes = [r.status for r in responses]
+                        # Without reserving the slot before the body read, all
+                        # four pass the guard and the cap does nothing.
+                        self.assertEqual(codes.count(200), 1, codes)
+                        self.assertEqual(codes.count(429), 3, codes)
+                    finally:
+                        await client.close()
+                finally:
+                    await upstream.close()
+
+        asyncio.run(run())
+
+    def test_concurrency_default_is_clamped(self):
+        self.assertEqual(CONFIG_TEMPLATE["max_concurrent"], 4)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "db.sqlite")
+            try:
+                cfg = save_config(store, max_concurrent=999)
+                self.assertEqual(cfg["max_concurrent"], 32)
+                cfg = save_config(store, max_concurrent=0)
+                self.assertEqual(cfg["max_concurrent"], 1)
+            finally:
+                store.close()
 
     def test_forwards_body_and_returns_upstream_json(self):
         async def run():

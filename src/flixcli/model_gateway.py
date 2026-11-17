@@ -37,6 +37,8 @@ DEFAULT_PORT = 18993
 DEFAULT_UPSTREAM = "http://127.0.0.1:15721"
 DEFAULT_MAX_BODY_MB = 32
 MAX_BODY_MB_CAP = 128
+DEFAULT_MAX_CONCURRENT = 4
+MAX_CONCURRENT_CAP = 32
 BODY_READ_TIMEOUT = 30.0
 
 CONFIG_TEMPLATE = {
@@ -45,6 +47,9 @@ CONFIG_TEMPLATE = {
     "upstream": DEFAULT_UPSTREAM,
     "token": "",
     "max_body_mb": DEFAULT_MAX_BODY_MB,
+    # One shared token means one phone (or anyone who copied it) can saturate
+    # the local cc-switch; cap what a single client can occupy.
+    "max_concurrent": DEFAULT_MAX_CONCURRENT,
     # Off by default: a reachable gateway that can be pointed anywhere is an
     # SSRF pivot for anyone holding the token.
     "allow_remote_upstream": False,
@@ -114,6 +119,11 @@ def _merged(raw: dict | None) -> dict:
     except (TypeError, ValueError):
         mib = DEFAULT_MAX_BODY_MB
     cfg["max_body_mb"] = min(MAX_BODY_MB_CAP, max(1, mib))
+    try:
+        slots = int(cfg["max_concurrent"])
+    except (TypeError, ValueError):
+        slots = DEFAULT_MAX_CONCURRENT
+    cfg["max_concurrent"] = min(MAX_CONCURRENT_CAP, max(1, slots))
     cfg["allow_remote_upstream"] = bool(cfg["allow_remote_upstream"])
     return cfg
 
@@ -209,6 +219,40 @@ def lan_urls(port: int, fresh: bool = False) -> list[str]:
     return [f"http://{ip}:{port}" for ip in live] or [f"http://127.0.0.1:{port}"]
 
 
+def _port_open(port: int, timeout: float = 0.15) -> bool:
+    """Cheap loopback connect; False means nothing listens (fail fast)."""
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def share_info(store) -> dict | None:
+    """LAN endpoint + token for a pairing QR; None while sharing is off.
+
+    A disabled gateway must not put a token on screen: the QR then carries
+    pairing fields only and the caller tells the user to turn sharing on.
+    """
+    cfg = load_config(store)
+    if not cfg.get("enabled"):
+        return None
+    info = {"base": lan_urls(cfg["port"])[0], "token": cfg["token"],
+            "port": cfg["port"]}
+    # Enabled but not listening is a real state (crashed or still starting);
+    # say so instead of handing out a dead endpoint. A connection check first
+    # keeps the common "down" case instant instead of waiting out the probe.
+    info["listening"] = False
+    if _port_open(cfg["port"]):
+        try:
+            info["listening"] = bool(probe(cfg["port"], cfg["token"],
+                                           timeout=1.5).get("listening"))
+        except Exception:  # noqa: BLE001 - a probe failure must not block the QR
+            info["listening"] = False
+    return info
+
+
 def _token_from(request: web.Request, allow_query: bool = False) -> str:
     raw = request.headers.get("x-api-key", "")
     if raw:
@@ -229,10 +273,11 @@ def _authorized(request: web.Request, token: str,
                                token.encode())
 
 
-def _error(status: int, kind: str, message: str) -> web.Response:
+def _error(status: int, kind: str, message: str,
+           headers: dict | None = None) -> web.Response:
     return web.json_response(
         {"type": "error", "error": {"type": kind, "message": message}},
-        status=status)
+        status=status, headers=headers)
 
 
 def _target_url(cfg: dict, request: web.Request) -> str:
@@ -249,7 +294,21 @@ FORWARD_HEADERS = ("content-type", "accept", "anthropic-version",
 def _new_stats() -> dict:
     return {"requests": 0, "ok": 0, "rejected": 0, "failed": 0,
             "aborted": 0, "too_large": 0, "active": 0, "last": 0,
-            "started": int(time.time())}
+            "started": int(time.time()), "recent": []}
+
+
+RECENT_LIMIT = 20
+
+
+def _note_reject(stats: dict, kind: str, remote: str) -> None:
+    """Keep the last few refusals so a failing phone can be diagnosed.
+
+    Counters say "3 rejected"; they do not say whether it was a stale token or
+    the concurrency cap, nor from which address.
+    """
+    recent = stats.setdefault("recent", [])
+    recent.append({"t": int(time.time()), "kind": kind, "remote": remote or ""})
+    del recent[:-RECENT_LIMIT]
 
 
 async def _proxy(request: web.Request) -> web.StreamResponse:
@@ -257,19 +316,35 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
     stats = request.app[STATS]
     if not _authorized(request, cfg["token"]):
         stats["rejected"] += 1
+        _note_reject(stats, "401 token", request.remote)
         return _error(401, "authentication_error",
                       "invalid gateway token; set x-api-key to the token "
                       "shown in RelayDesk settings")
+    limit = int(cfg.get("max_concurrent") or DEFAULT_MAX_CONCURRENT)
+    if stats["active"] >= limit:
+        # Checked before reading the body: a flood must not cost us a 32 MB
+        # buffer per request. 429 keeps the Anthropic error shape.
+        stats["rejected"] += 1
+        _note_reject(stats, "429 busy", request.remote)
+        return _error(429, "overloaded_error",
+                      f"gateway busy ({stats['active']} in flight, limit {limit}); "
+                      "retry shortly", headers={"Retry-After": "2"})
+    # Reserve the slot before the next await: reading the body suspends this
+    # coroutine, and two requests could otherwise both pass the guard at 0.
+    stats["active"] += 1
     try:
         body = await asyncio.wait_for(request.read(), BODY_READ_TIMEOUT)
     except asyncio.TimeoutError:
+        stats["active"] -= 1
         stats["failed"] += 1
         return _error(408, "timeout_error", "request body read timed out")
+    except BaseException:
+        stats["active"] -= 1
+        raise
     headers = {h: request.headers[h] for h in FORWARD_HEADERS
                if h in request.headers}
     url = _target_url(cfg, request)
     stats["requests"] += 1
-    stats["active"] += 1
     stats["last"] = int(time.time())
     stream = None  # set once response headers are on the wire
     try:
@@ -321,6 +396,7 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
                 await stream.write_eof()
             return stream
         stats["failed"] += 1
+        _note_reject(stats, "502 upstream", request.remote)
         return _error(502, "api_error",
                       f"upstream {cfg['upstream']} unreachable: "
                       f"{type(exc).__name__}")
@@ -592,6 +668,7 @@ def status_payload(store) -> dict:
     return {"ok": True, "enabled": bool(cfg["enabled"]), "port": cfg["port"],
             "upstream": cfg["upstream"], "token": cfg["token"],
             "max_body_mb": cfg["max_body_mb"],
+            "max_concurrent": cfg.get("max_concurrent", DEFAULT_MAX_CONCURRENT),
             "allow_remote_upstream": cfg["allow_remote_upstream"],
             "urls": lan_urls(cfg["port"]), "pair": pair_text(cfg),
             "listening": live.get("listening", False),

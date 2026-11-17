@@ -636,16 +636,44 @@ async def cmd_netcheck(args) -> int:
 
 
 def cmd_qrcode(args) -> int:
-    """Print the pairing QR payload (flix2:// base64url) for this node."""
+    """Print the pairing QR payload for this node.
+
+    Two formats: `flix2://` (base64, CLI peers) and `--link`/`--with-model`
+    (`relaydesk://pair?...`, the only form the Android app parses). With
+    `--with-model` the same code also carries the LAN model-gateway base URL
+    and token, so one scan pairs *and* configures model sharing.
+    """
     store = Store()
     try:
         ident = load_or_create_identity(store)
-        from .qrcode import pair_payload, parse_payload, lan_ips
-        payload = pair_payload(ident["fingerprint"], args.device_port,
-                               store.own_pair_key(), ips=lan_ips())
+        from .qrcode import pair_payload, parse_payload, lan_ips, pair_uri
+        code = store.own_pair_key()
+        ips = lan_ips()
+        payload = pair_payload(ident["fingerprint"], args.device_port, code, ips=ips)
         out = {"payload": payload}
         if args.decode:
             out["decoded"] = parse_payload(payload)
+        if args.link or args.with_model:
+            model = None
+            if args.with_model:
+                from .model_gateway import share_info
+                model = share_info(store)
+                if model and model.get("listening"):
+                    out["note"] = "扫码即配对并写入模型网关地址与令牌"
+                elif model:
+                    out["note"] = ("模型共享已开启但未在监听：二维码仍带上地址与令牌，"
+                                   "请先在本机启动模型共享再让手机使用")
+                else:
+                    out["note"] = ("模型共享未开启：二维码只含配对信息；"
+                                   "先运行 flix models start 再生成")
+            out["link"] = pair_uri(ident["fingerprint"], args.device_port, code,
+                                   ips=ips,
+                                   model_base=(model or {}).get("base", ""),
+                                   model_token=(model or {}).get("token", ""))
+            if model:
+                out["model"] = model
+                out["warning"] = ("二维码含模型令牌，等同密码：勿截图转发；"
+                                  "泄露后运行 flix models token --reset")
         emit(out, args.json)
         return 0
     finally:
@@ -928,6 +956,47 @@ async def cmd_adb(args) -> int:
         if args.adb_cmd == "devices":
             emit({"ok": True, "devices": [d.as_dict() for d in await client.devices()]}, args.json)
             return 0
+        if args.adb_cmd == "pair-qr":
+            from .adb_wireless import (DEFAULT_RELAY_PORT, AdbWirelessError,
+                                       connect as wireless_connect,
+                                       pair as wireless_pair, pairing_payload)
+            payload, service, password = pairing_payload()
+            emit({"ok": True, "qr": payload, "service": service,
+                  "hint": "手机：无线调试 → 使用二维码配对设备 → 扫这张码"},
+                 args.json)
+            if not args.json:
+                print(payload)
+            try:
+                paired = wireless_pair(service, password,
+                                       adb_path=args.adb_path,
+                                       timeout=args.pair_timeout)
+                result = wireless_connect(
+                    adb_path=args.adb_path,
+                    relay_port=getattr(args, "relay_port", None) or DEFAULT_RELAY_PORT,
+                    timeout=getattr(args, "discover_timeout", 3.0),
+                    adb_timeout=args.timeout)
+            except AdbWirelessError as exc:
+                emit({"ok": False, "error": exc.kind, "detail": exc.detail},
+                     args.json)
+                return 3
+            emit({**result, "paired": paired["device"]}, args.json)
+            return 0
+        if args.adb_cmd == "connect":
+            from .adb_wireless import (DEFAULT_RELAY_PORT, AdbWirelessError,
+                                       connect as wireless_connect, stop_relay)
+            relay_port = args.relay_port or DEFAULT_RELAY_PORT
+            if args.stop_relay:
+                emit({"ok": True, "stopped": stop_relay(relay_port)}, args.json)
+                return 0
+            try:
+                result = wireless_connect(
+                    adb_path=args.adb_path, relay_port=relay_port,
+                    timeout=args.discover_timeout, adb_timeout=args.timeout)
+            except AdbWirelessError as exc:
+                emit({"ok": False, "error": exc.kind, "detail": exc.detail}, args.json)
+                return 3
+            emit(result, args.json)
+            return 0
         if args.adb_cmd == "report":
             emit(await client.report(args.serial), args.json)
             return 0
@@ -1015,6 +1084,8 @@ def cmd_models(args) -> int:
             changes["upstream"] = args.upstream
         if getattr(args, "allow_remote_upstream", False):
             changes["allow_remote_upstream"] = True
+        if getattr(args, "max_concurrent", None) is not None:
+            changes["max_concurrent"] = args.max_concurrent
         try:
             cfg = save_config(store, **changes)
         except ValueError as exc:
@@ -1049,6 +1120,7 @@ def cmd_models(args) -> int:
             state = "运行中" if payload["listening"] else "未运行"
             print(f"状态: {state}（{'已开启' if payload['enabled'] else '未开启'}）")
             print(f"端口: {payload['port']}  上游: {payload['upstream']}")
+            print(f"并发上限: {payload.get('max_concurrent', 4)}")
             print(f"地址: {', '.join(payload['urls'])}")
             print(f"令牌: {payload['token']}")
             stats = payload.get("stats") or {}
@@ -1057,6 +1129,11 @@ def cmd_models(args) -> int:
                 print(f"请求: {stats.get('requests', 0)}（成功 {stats.get('ok', 0)}，"
                       f"失败 {stats.get('failed', 0)}，拒绝 {stats.get('rejected', 0)}）"
                       f"  进行中 {stats.get('active', 0)}  已运行 {mins} 分钟")
+                recent = stats.get("recent") or []
+                if recent:
+                    last = recent[-1]
+                    print(f"最近拒绝: {last.get('kind', '?')} ← "
+                          f"{last.get('remote') or '本机'}")
             if payload.get("detail") and not payload["listening"]:
                 print(f"提示: {payload['detail']}")
             return 0
@@ -1222,6 +1299,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--device-port", type=int, default=DEVICE_PORT)
     p.add_argument("--decode", action="store_true",
                    help="also print the decoded fields")
+    p.add_argument("--link", action="store_true",
+                   help="also print the relaydesk://pair URI the Android app scans")
+    p.add_argument("--with-model", action="store_true",
+                   help="put the LAN model-gateway address and token in that URI, "
+                        "so one scan also configures model sharing")
 
     p = add("ping", "manual-add handshake: POST /ping_v2 and report the "
                     "peer's identity", cmd_ping)
@@ -1320,6 +1402,19 @@ def main(argv: list[str] | None = None) -> int:
     adb_sub = p.add_subparsers(dest="adb_cmd", required=True)
     adb_sub.add_parser("devices", help="list connected devices")
     adb_sub.add_parser("report", help="show device authorization report")
+    p_conn = adb_sub.add_parser(
+        "connect", help="wireless debugging: discover the phone and connect "
+                        "through the loopback relay")
+    p_conn.add_argument("--relay-port", type=int, default=None,
+                        help="loopback relay port (default 40009)")
+    p_conn.add_argument("--discover-timeout", type=float, default=3.0,
+                        help="seconds to wait for each mDNS lookup")
+    p_conn.add_argument("--stop-relay", action="store_true",
+                        help="stop a relay started by an earlier connect")
+    p_qrpair = adb_sub.add_parser(
+        "pair-qr", help="show the official ADB pairing QR, then pair + connect")
+    p_qrpair.add_argument("--pair-timeout", type=float, default=90.0,
+                          help="seconds to wait for the phone to scan")
     p_push = adb_sub.add_parser("push", help="copy a local file to Android")
     p_push.add_argument("source")
     p_push.add_argument("destination")
@@ -1390,6 +1485,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="token: mint a new token")
     p.add_argument("--allow-remote-upstream", action="store_true",
                    help="allow an upstream outside 127.0.0.1 (default: loopback only)")
+    p.add_argument("--max-concurrent", type=int, default=None,
+                   help="max in-flight requests before answering 429 (1-32, default 4)")
 
     args = ap.parse_args(_normalize_shell_argv(
         list(sys.argv[1:] if argv is None else argv)))

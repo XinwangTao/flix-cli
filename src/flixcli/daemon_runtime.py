@@ -151,7 +151,16 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
         fp = dev.get("fingerprint")
         if not fp or fp == ident["fingerprint"]:
             return
-        if devices.get(fp) == dev:
+
+        def _key(row: dict) -> tuple:
+            # `source`/`from` differ between an announce and a scan probe;
+            # comparing them caused a redundant upsert and log line on every
+            # sweep for a device that had not moved.
+            return (row.get("ip"), row.get("port"), row.get("alias"),
+                    row.get("deviceModel"), row.get("os"), row.get("version"))
+
+        old_dev = devices.get(fp)
+        if old_dev is not None and _key(old_dev) == _key(dev):
             return
         old_ip = store.device_ip(fp)[0]
         new_ip = dev.get("ip", "")
@@ -244,13 +253,21 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
                                                   signal_hub=hub,
                                                   media_manager=media_manager,
                                                   media_runtime=media_runtime)
+    async def scan_now() -> list[dict]:
+        """On-demand LAN sweep; shares the same identity check as discovery."""
+        from .discovery import scan_lan
+        return await scan_lan(
+            on_device, ident, device_port,
+            ports=tuple(dict.fromkeys((DEVICE_PORT, 18991, device_port))))
+
     api_runner, api_publish = await serve_desktop_api(store, ident, send_text,
                                                       api_port,
                                                       channel_port=device_port,
                                                       webrtc_hub=hub,
                                                       adb_client=adb_client,
                                                       media_manager=media_manager,
-                                                      media_runtime=media_runtime)
+                                                      media_runtime=media_runtime,
+                                                      scan_fn=scan_now)
 
     web_runner = None
     if web_port:
@@ -322,12 +339,17 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
     if bound:
         print(f"[flixd] discovery multicast via {disc.iface or 'default interface'}",
               file=sys.stderr, flush=True)
-    if announce and bound:
+    if announce:
+        # Sending has its own socket and must not depend on the listen bind:
+        # when another process owns UDP 8891 we can still be discovered by
+        # phones and official clients, even though we cannot hear announces.
         disc.announce(ident, port=device_port)
         await asyncio.sleep(0.5)
         disc.announce(ident, times=3, port=device_port)
-    elif announce:
-        print("[flixd] discovery unavailable; skipping announce", file=sys.stderr)
+        if not bound:
+            print("[flixd] discovery listen unavailable; announcing send-only "
+                  "and falling back to active LAN scan", file=sys.stderr,
+                  flush=True)
 
     tasks: list[asyncio.Task] = []
     if clip_sync:
@@ -348,6 +370,30 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
 
     tasks.append(asyncio.create_task(announce_loop()))
     print("[flixd] periodic announce every 30s", file=sys.stderr, flush=True)
+
+    async def startup_scan() -> None:
+        # Official clients announce only at startup, so a peer that booted
+        # before us is invisible until a sweep. One sweep is enough; later
+        # peers announce, and the GUI can ask for another via the API.
+        try:
+            await asyncio.sleep(2)
+            found = await scan_now()
+            if found:
+                names = ", ".join(
+                    f"{d.get('alias') or d['fingerprint'][:8]}"
+                    f"@{d.get('ip')}:{d.get('port')}" for d in found)
+                print(f"[scan] discovered {names}", file=sys.stderr, flush=True)
+        except Exception as exc:
+            print(f"[scan] {exc}", file=sys.stderr, flush=True)
+
+    if announce:
+        # One sweep repairs peers that were already running before us (the
+        # official client announces only at startup). New peers announce, and
+        # the GUI can request another sweep via POST /api/discover/scan, so a
+        # permanent scheduler would only add noise and stale-window bugs.
+        tasks.append(asyncio.create_task(startup_scan()))
+        print("[flixd] startup LAN scan; on-demand via /api/discover/scan",
+              file=sys.stderr, flush=True)
 
     async def agent_outbox_loop() -> None:
         # An agent envelope queued while the peer was offline must still land

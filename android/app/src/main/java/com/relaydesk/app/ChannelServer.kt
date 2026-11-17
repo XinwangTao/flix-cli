@@ -276,15 +276,12 @@ class ChannelServer(
             return text(Response.Status.CONFLICT, "destination exists")
         }
         val resolver = context.contentResolver
-        val values = android.content.ContentValues().apply {
-            put(MediaStore.Downloads.DISPLAY_NAME, "$cleanName.part")
-            put(MediaStore.Downloads.MIME_TYPE, "application/octet-stream")
-            put(MediaStore.Downloads.RELATIVE_PATH,
-                Environment.DIRECTORY_DOWNLOADS + "/RelayDesk")
-            put(MediaStore.Downloads.IS_PENDING, 1)
-        }
-        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-            ?: return text(Response.Status.INTERNAL_ERROR, "cannot create file")
+        val target = openPendingDownload(resolver, cleanName, "RelayDesk")
+            ?: openPendingDownload(resolver, cleanName,
+                "RelayDesk-${android.os.Process.myUid()}")
+            ?: return text(Response.Status.INTERNAL_ERROR, "no output stream")
+        val uri = target.first
+        val stream = target.second
         // Images get a private copy as well: the chat reads them back for the
         // bubble thumbnail and the viewer, and a MediaStore download row is not
         // reliably readable in-process (scoped storage / MIUI). Other files keep
@@ -298,7 +295,7 @@ class ChannelServer(
             onProgress(JSONObject().put("from", sender).put("rid", rid)
                 .put("name", cleanName).put("got", 0L)
                 .put("total", declared).put("done", false))
-            resolver.openOutputStream(uri)?.use { out ->
+            stream.use { out ->
                 val local = localCopy?.let { java.io.FileOutputStream(it) }
                 // NO .use on the session stream: closing it closes the whole
                 // socket before NanoHTTPD can deliver the response.
@@ -334,7 +331,7 @@ class ChannelServer(
                 out.flush()
                 local?.flush()
                 local?.close()
-            } ?: throw IllegalStateException("no output stream")
+            }
             if (got != declared) {
                 throw IllegalStateException("size mismatch: $got != $declared")
             }
@@ -363,6 +360,33 @@ class ChannelServer(
             runCatching { resolver.delete(uri, null, null) }
             return text(Response.Status.BAD_REQUEST, e.message ?: "transfer failed")
         }
+    }
+
+    /** Open a pending Downloads row, falling back to a per-install directory.
+     *
+     * The shared Download/RelayDesk directory can be owned by a previous
+     * install's UID (uninstall/reinstall), and MediaProvider then refuses the
+     * new UID's openOutputStream. The per-install fallback keeps transfers
+     * working instead of returning a bare "no output stream".
+     */
+    private fun openPendingDownload(
+        resolver: android.content.ContentResolver, name: String, dir: String
+    ): Pair<android.net.Uri, java.io.OutputStream>? {
+        val values = android.content.ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, "$name.part")
+            put(MediaStore.Downloads.MIME_TYPE, "application/octet-stream")
+            put(MediaStore.Downloads.RELATIVE_PATH,
+                Environment.DIRECTORY_DOWNLOADS + "/" + dir)
+            put(MediaStore.Downloads.IS_PENDING, 1)
+        }
+        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: return null
+        val out = resolver.openOutputStream(uri)
+        if (out == null) {
+            runCatching { resolver.delete(uri, null, null) }
+            return null
+        }
+        return uri to out
     }
 
     /** Minimal Transfer-Encoding: chunked decoder for the file body. */

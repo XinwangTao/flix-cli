@@ -1573,6 +1573,14 @@ class MainActivity : Activity() {
             setTextColor(getColor(R.color.textMuted)); textSize = 12f
             gravity = Gravity.CENTER; setPadding(0, dp(10), 0, dp(4))
         })
+        // Readable counterpart of the code inside the QR: the desktop shows
+        // the same 4 digits when it asks its operator to approve a pair.
+        column.addView(TextView(this).apply {
+            text = "配对码：${store.ownPairKey(prefs)}"
+            setTextColor(getColor(R.color.textPrimary)); textSize = 18f
+            setTypeface(typeface, Typeface.BOLD)
+            gravity = Gravity.CENTER; setPadding(0, dp(4), 0, 0)
+        })
         AlertDialog.Builder(this, dlgTheme())
             .setTitle("我的配对二维码")
             .setView(column)
@@ -1611,6 +1619,10 @@ class MainActivity : Activity() {
         val ip = uri.getQueryParameter("ip").orEmpty()
         val port = uri.getQueryParameter("port")?.toIntOrNull() ?: Wire.DEVICE_PORT
         val code = uri.getQueryParameter("code").orEmpty()
+        // Same code can carry the LAN model gateway, so one scan pairs and
+        // configures model sharing instead of typing a base URL and token.
+        val modelBase = uri.getQueryParameter("model_base").orEmpty()
+        val modelToken = uri.getQueryParameter("model_token").orEmpty()
         if (fp.isEmpty() || ip.isEmpty()) {
             toast("配对码不完整")
             return
@@ -1637,9 +1649,11 @@ class MainActivity : Activity() {
                 AlertDialog.Builder(this, dlgTheme())
                     .setTitle("发现设备")
                     .setMessage("「$name」（$ip:$port）\n配对码：${code.ifEmpty { "—" }}\n" +
+                        (if (modelBase.isNotEmpty()) "模型网关：$modelBase\n" else "") +
                         "请与对方屏幕核对后确认。")
                     .setPositiveButton("配对") { _, _ ->
-                        pairScanned(realFp, ip, port, name, modal)
+                        pairScanned(realFp, ip, port, name, modal, code,
+                                    modelBase, modelToken)
                     }
                     .setNegativeButton("取消", null)
                     .show()
@@ -1648,8 +1662,13 @@ class MainActivity : Activity() {
     }
 
     private fun pairScanned(fp: String, ip: String, port: Int, name: String,
-                            modal: JSONObject?) {
+                            modal: JSONObject?, peerCode: String = "",
+                            modelBase: String = "", modelToken: String = "") {
         val myKey = store.ownPairKey(prefs)
+        // The peer verifies the 4-digit code *it* printed in its own QR, so the
+        // scanned code must be sent back; sending our own key was rejected
+        // with `302 verifyCode mismatch`.
+        val verifyCode = peerCode.ifEmpty { myKey }
         store.upsertDevice(fp, name,
             modal?.optString("deviceModel").orEmpty(), port,
             modal?.optInt("version") ?: 0, ip, modal?.optString("os").orEmpty())
@@ -1657,11 +1676,18 @@ class MainActivity : Activity() {
         Thread {
             try {
                 val (code, msg) = ChannelClient.postIntent(ip, port,
-                    Wire.pairIntent(fingerprint, fp, myKey))
+                    Wire.pairIntent(fingerprint, fp, verifyCode))
                 mainHandler.post {
                     if (code == 0) {
                         store.addPair(fp, myKey)
-                        toast("已配对 $msg")
+                        if (modelBase.isNotEmpty()) {
+                            prefs.edit()
+                                .putString("model_base", modelBase)
+                                .putString("model_token", modelToken)
+                                .putString("model_peer", fp)
+                                .apply()
+                            toast("已配对并写入模型网关：$modelBase")
+                        } else toast("已配对 $msg")
                         refreshDevices()
                         resyncGroupsTo(fp)
                         store.devices().firstOrNull { it.optString("fingerprint") == fp }
@@ -2214,6 +2240,10 @@ class MainActivity : Activity() {
                         pairButton.visibility = View.GONE
                         toast("已配对 $msg")
                         resyncGroupsTo(peer.optString("fingerprint"))
+                    } else if (code == 301) {
+                        // The desktop asks its operator; confirmation arrives
+                        // later as confirmPairDevice, not in this reply.
+                        toast("已请求配对，等待对方确认")
                     } else toast("配对被拒：$msg")
                 }
             } catch (e: Exception) {
@@ -2594,6 +2624,87 @@ class MainActivity : Activity() {
         settingsBody.addView(row)
     }
 
+    /** Shows the model gateway handed over by the desktop pairing QR. */
+    private fun showModelGatewayDialog() {
+        val base = prefs.getString("model_base", "").orEmpty()
+        val token = prefs.getString("model_token", "").orEmpty()
+        if (base.isEmpty()) {
+            AlertDialog.Builder(this, dlgTheme())
+                .setTitle("模型网关")
+                .setMessage("还没有配置。\n\n电脑 RelayDesk「显示连接二维码…」扫码可自动配置；" +
+                    "也可以手动填写地址与令牌（在电脑设置页「复制手机配置」里能看到）。")
+                .setPositiveButton("手动填写") { _, _ -> editModelGateway() }
+                .setNegativeButton("关闭", null)
+                .show()
+            return
+        }
+        val masked = if (token.length > 12) token.take(6) + "…" + token.takeLast(4) else token
+        AlertDialog.Builder(this, dlgTheme())
+            .setTitle("模型网关")
+            .setMessage("地址：$base\n令牌：$masked\n\n" +
+                "模型：glm-5.3-flash / step-5-preview / step-3.7-flash / deepseek-v4-flash")
+            .setPositiveButton("测试连通") { _, _ -> testModelGateway(base, token) }
+            .setNeutralButton("复制配置") { _, _ ->
+                copyText("Base URL: $base\nAPI Key: $token\nModel: glm-5.3-flash")
+            }
+            .setNegativeButton("关闭", null)
+            .show()
+    }
+
+    private fun editModelGateway() {
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), dp(0))
+        }
+        val baseEdit = EditText(this).apply {
+            hint = "http://192.168.1.10:18993"
+            setText(prefs.getString("model_base", "").orEmpty())
+            setSingleLine()
+        }
+        val tokenEdit = EditText(this).apply {
+            hint = "rd-…"
+            setText(prefs.getString("model_token", "").orEmpty())
+            setSingleLine()
+        }
+        column.addView(baseEdit)
+        column.addView(tokenEdit)
+        AlertDialog.Builder(this, dlgTheme())
+            .setTitle("模型网关")
+            .setView(column)
+            .setPositiveButton("保存") { _, _ ->
+                val base = baseEdit.text.toString().trim().trimEnd('/')
+                if (base.isEmpty()) {
+                    toast("地址不能为空")
+                } else {
+                    prefs.edit().putString("model_base", base)
+                        .putString("model_token", tokenEdit.text.toString().trim())
+                        .apply()
+                    toast("已保存模型网关")
+                    refreshSettings()
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun testModelGateway(base: String, token: String) {
+        Thread {
+            val result = runCatching {
+                val conn = java.net.URL(base.trimEnd('/') + "/health")
+                    .openConnection() as java.net.HttpURLConnection
+                conn.connectTimeout = 4000
+                conn.readTimeout = 8000
+                conn.setRequestProperty("x-api-key", token)
+                val code = conn.responseCode
+                val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+                val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                conn.disconnect()
+                if (code in 200..299) "网关可达（HTTP $code）" else "网关返回 HTTP $code"
+            }.getOrElse { "连接失败：${it.message ?: it.javaClass.simpleName}" }
+            mainHandler.post { toast(result) }
+        }.start()
+    }
+
     /** Rebuilt on every open so port / IME / alias are never stale. */
     private fun refreshSettings() {
         settingsBody.removeAllViews()
@@ -2602,6 +2713,10 @@ class MainActivity : Activity() {
         addRow("名称", alias) { editAliasDialog() }
         addRow("设备号", fingerprint.take(8)) { copyText(fingerprint) }
         addRow("配对二维码", "查看 ›") { showQrDialog() }
+
+        addSection("模型网关")
+        val gatewayBase = prefs.getString("model_base", "").orEmpty()
+        addRow("网关地址", gatewayBase.ifEmpty { "未配置" }) { showModelGatewayDialog() }
 
         addSection("通道")
         addRow("后台接收", if (Runtime.serviceRunning) "运行中" else "未运行")

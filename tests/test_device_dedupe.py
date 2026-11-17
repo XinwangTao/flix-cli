@@ -1,9 +1,9 @@
-"""Device list dedupe: one physical machine must show up once.
+"""Device list dedupe: one product per address, but not one row per IP.
 
-A host is recorded once per fingerprint, but the official app (8891) and
-RelayDesk (18991) use different fingerprints, and an older install of this
-machine can announce itself as a peer — device pickers then list the same PC
-several times.
+Duplicate installs of the same product (same alias) collapse to the freshest
+row. Two products on the same phone — the official app on 8891 and RelayDesk on
+18991 — have different aliases and must both remain selectable; hiding one made
+the other unreachable from the desktop picker.
 """
 from __future__ import annotations
 
@@ -35,6 +35,13 @@ class VisibleDeviceTests(unittest.TestCase):
         self._seed("new-fp", "DESKTOP", "192.168.1.20", 18991, 2_000)
         rows = self.store.visible_devices(own="me", local_ips=["192.168.1.99"])
         self.assertEqual([r["fingerprint"] for r in rows], ["new-fp"])
+
+    def test_two_apps_on_one_phone_stay_separate(self):
+        self._seed("official-fp", "OPPO PKJ110", "192.168.1.7", 8891, 1_000)
+        self._seed("relaydesk-fp", "PKJ110", "192.168.1.7", 18991, 2_000)
+        rows = self.store.visible_devices(own="me", local_ips=["192.168.1.99"])
+        self.assertEqual(sorted(r["fingerprint"] for r in rows),
+                         ["official-fp", "relaydesk-fp"])
 
     def test_own_fingerprint_and_own_addresses_are_hidden(self):
         self._seed("me", "SELF", "192.168.1.99", 8891, 3_000)
