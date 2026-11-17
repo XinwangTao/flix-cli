@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 from pathlib import Path
 
@@ -31,6 +32,55 @@ def zip_bundle(app: Path, dest: Path) -> Path:
             if path.is_file():
                 zf.write(path, path.relative_to(app.parent))
     return dest
+
+
+class TokenAndCacheTests(unittest.TestCase):
+    def test_token_comes_from_env_or_the_app_dir_file(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(au, "APP_DIR", Path(tmp)), \
+                 mock.patch.dict(os.environ, {"GITHUB_TOKEN": "env-token"}):
+                self.assertEqual(au.default_token(), "env-token")
+            token_file = Path(tmp) / "github_token"
+            token_file.write_text("file-token\n", encoding="utf-8")
+            with mock.patch.object(au, "APP_DIR", Path(tmp)), \
+                 mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("GITHUB_TOKEN", None)
+                os.environ.pop("GH_TOKEN", None)
+                self.assertEqual(au.default_token(), "file-token")
+
+    def test_successful_fetch_is_cached(self):
+        import json as json_mod
+        payload = [{"tag_name": "v9.9.9", "name": "9.9.9", "draft": False,
+                    "prerelease": False, "html_url": "https://x",
+                    "assets": []}]
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "releases_cache.json"
+            fake = mock.MagicMock()
+            fake.__enter__.return_value.read.return_value = json_mod.dumps(payload).encode()
+            fake.__exit__.return_value = False
+            with mock.patch.object(au, "CACHE_PATH", cache), \
+                 mock.patch.object(au, "_open", return_value=fake):
+                releases = au.fetch_releases(token="t")
+            self.assertEqual(releases[0].tag, "v9.9.9")
+            self.assertTrue(cache.exists())
+
+    def test_rate_limit_falls_back_to_the_cache(self):
+        import json as json_mod
+        import urllib.error
+        payload = [{"tag_name": "v9.9.9", "name": "9.9.9", "draft": False,
+                    "prerelease": False, "html_url": "https://x", "assets": []}]
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "releases_cache.json"
+            cache.write_text(json_mod.dumps({"repo": au.REPO_DEFAULT,
+                                             "at": 2 ** 31,
+                                             "releases": payload}), encoding="utf-8")
+            limited = urllib.error.HTTPError("u", 403, "rate limited", {}, None)
+            with mock.patch.object(au, "CACHE_PATH", cache), \
+                 mock.patch.object(au, "_open", side_effect=limited):
+                releases = au.fetch_releases(token="t")
+            self.assertEqual(releases[0].tag, "v9.9.9",
+                             "限流时应回退到缓存而不是报失败")
 
 
 class StateRecordTests(unittest.TestCase):
