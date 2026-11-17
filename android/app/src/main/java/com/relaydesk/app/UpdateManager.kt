@@ -52,7 +52,10 @@ object UpdateManager {
         val now = System.currentTimeMillis()
         if (!force && now - prefs.getLong(KEY_LAST_CHECK, 0L) < THROTTLE_MS) return
         prefs.edit().putLong(KEY_LAST_CHECK, now).apply()
-        exec.execute { runCatching { check(context, prefs) } }
+        android.util.Log.i("RD_UPDATE", "check start force=$force")
+        exec.execute { runCatching { check(context, prefs) }.onFailure {
+            android.util.Log.w("RD_UPDATE", "check crashed", it)
+        } }
     }
 
     /** Downloaded, sha256-verified APK whose tag is newer than this build. */
@@ -65,9 +68,14 @@ object UpdateManager {
     }
 
     private fun check(context: Context, prefs: SharedPreferences) {
-        val release = httpJson(API) ?: return
+        val release = httpJson(API)
+        android.util.Log.i("RD_UPDATE", "release=${release?.optString("tag_name")} " +
+            "draft=${release?.optBoolean("draft")} pre=${release?.optBoolean("prerelease")}")
+        if (release == null) return
         if (release.optBoolean("draft") || release.optBoolean("prerelease")) return
         val tag = release.optString("tag_name").removePrefix("v")
+        android.util.Log.i("RD_UPDATE", "tag=$tag local=${BuildConfig.VERSION_NAME} " +
+            "newer=${isNewer(tag, BuildConfig.VERSION_NAME)}")
         if (tag.isEmpty() || !isNewer(tag, BuildConfig.VERSION_NAME)) return
         if (prefs.getString(KEY_DOWNLOADED, "") == tag) return
         if (prefs.getString(KEY_PROMPTED, "") == tag) return
@@ -115,6 +123,8 @@ object UpdateManager {
         if (size <= 0 || size > MAX_APK_BYTES) return false
         val dir = File(context.cacheDir, "updates").apply { mkdirs() }
         val apk = File(dir, "RelayDesk-$tag.apk")
+        android.util.Log.i("RD_UPDATE", "download ${asset.optString("name")} " +
+            "size=$size sha=${sha.take(8)}")
         return runCatching {
             val conn = (URL(asset.optString("browser_download_url"))
                 .openConnection() as HttpURLConnection).apply {
@@ -125,13 +135,18 @@ object UpdateManager {
             }
             conn.inputStream.use { input -> apk.outputStream().use { input.copyTo(it) } }
             conn.disconnect()
-            if (sha256(apk) != sha.lowercase()) {
+            val actual = sha256(apk)
+            if (actual != sha.lowercase()) {
+                android.util.Log.w("RD_UPDATE", "sha mismatch $actual")
                 apk.delete()
                 false
             } else {
                 prefs.edit().putString(KEY_APK_PATH, apk.absolutePath).apply()
+                android.util.Log.i("RD_UPDATE", "download ok ${apk.length()}B")
                 true
             }
+        }.onFailure {
+            android.util.Log.w("RD_UPDATE", "download failed", it)
         }.getOrDefault(false)
     }
 
@@ -199,11 +214,16 @@ object UpdateManager {
             setRequestProperty("Accept", "application/vnd.github+json")
         }
         try {
-            if (conn.responseCode != 200) null
-            else conn.inputStream.bufferedReader().use { it.readText() }
+            val code = conn.responseCode
+            if (code != 200) {
+                android.util.Log.w("RD_UPDATE", "http $code $url")
+                null
+            } else conn.inputStream.bufferedReader().use { it.readText() }
         } finally {
             conn.disconnect()
         }
+    }.onFailure {
+        android.util.Log.w("RD_UPDATE", "http fail $url", it)
     }.getOrNull()
 
     private fun isWifi(context: Context): Boolean {
