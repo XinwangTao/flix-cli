@@ -54,6 +54,27 @@ class ShareInfoTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_dead_gateway_is_reported_without_waiting_for_a_probe(self):
+        import socket
+        import time
+        with TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "db.sqlite")
+            try:
+                # Bind then close: the port is certainly nobody's now.
+                sock = socket.socket()
+                sock.bind(("127.0.0.1", 0))
+                port = sock.getsockname()[1]
+                sock.close()
+                save_config(store, enabled=True, port=port)
+                started = time.monotonic()
+                info = share_info(store)
+                elapsed = time.monotonic() - started
+                self.assertFalse(info["listening"])
+                self.assertLess(elapsed, 0.5,
+                                "端口没人监听时不该等满探测超时")
+            finally:
+                store.close()
+
     def test_enabled_gateway_returns_address_and_token(self):
         with TemporaryDirectory() as tmp:
             store = Store(Path(tmp) / "db.sqlite")

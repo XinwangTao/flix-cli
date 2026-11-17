@@ -89,6 +89,32 @@ class ModelGatewayTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_health_keeps_the_last_refusals(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as tmp:
+                seen: list[dict] = []
+                upstream = TestServer(_upstream_app(seen))
+                await upstream.start_server()
+                try:
+                    cfg = self._cfg(tmp, str(upstream.make_url("")).rstrip("/"))
+                    client = TestClient(TestServer(make_model_app(None, cfg)))
+                    await client.start_server()
+                    try:
+                        await client.post("/v1/messages", json={},
+                                          headers={"x-api-key": "stale"})
+                        resp = await client.get(
+                            "/health", headers={"x-api-key": cfg["token"]})
+                        body = await resp.json()
+                        recent = body["stats"]["recent"]
+                        self.assertEqual(recent[-1]["kind"], "401 token")
+                        self.assertIn("remote", recent[-1])
+                    finally:
+                        await client.close()
+                finally:
+                    await upstream.close()
+
+        asyncio.run(run())
+
     def test_concurrency_limit_answers_429(self):
         async def run():
             with tempfile.TemporaryDirectory() as tmp:

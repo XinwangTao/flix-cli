@@ -1129,6 +1129,11 @@ def cmd_models(args) -> int:
                 print(f"请求: {stats.get('requests', 0)}（成功 {stats.get('ok', 0)}，"
                       f"失败 {stats.get('failed', 0)}，拒绝 {stats.get('rejected', 0)}）"
                       f"  进行中 {stats.get('active', 0)}  已运行 {mins} 分钟")
+                recent = stats.get("recent") or []
+                if recent:
+                    last = recent[-1]
+                    print(f"最近拒绝: {last.get('kind', '?')} ← "
+                          f"{last.get('remote') or '本机'}")
             if payload.get("detail") and not payload["listening"]:
                 print(f"提示: {payload['detail']}")
             return 0

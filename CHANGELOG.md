@@ -55,6 +55,9 @@
 - 并发上限：默认 4 个在途请求，超出直接 `429 overloaded_error`（带 `Retry-After: 2`），且不
   缓冲请求体，避免一个持有令牌的客户端打满本机 cc-switch；`flix models start --max-concurrent`
   可调（1–32），`models status` 会显示当前值。
+- 失败可诊断：网关保留最近 20 条拒绝（时间 / 原因 / 来源地址），`/health`（凭令牌）与
+  `flix models status` 都能看到最后一条，便于判断是令牌过期还是并发打满。
+- 端口无人监听时立即返回「未监听」，不再等满探测超时。
 - 含网关令牌的 `shared_preferences.json` 落盘权限改为 `0600`。
 - `/api/pair-link` 的健康探测移到线程池执行：1.5s 的同步探测原先会卡住整个 daemon 事件循环。
 - 手机端设置页新增「模型网关」项：显示地址与掩码令牌，可复制配置、测试连通、手动填写。

@@ -219,6 +219,16 @@ def lan_urls(port: int, fresh: bool = False) -> list[str]:
     return [f"http://{ip}:{port}" for ip in live] or [f"http://127.0.0.1:{port}"]
 
 
+def _port_open(port: int, timeout: float = 0.15) -> bool:
+    """Cheap loopback connect; False means nothing listens (fail fast)."""
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 def share_info(store) -> dict | None:
     """LAN endpoint + token for a pairing QR; None while sharing is off.
 
@@ -231,13 +241,15 @@ def share_info(store) -> dict | None:
     info = {"base": lan_urls(cfg["port"])[0], "token": cfg["token"],
             "port": cfg["port"]}
     # Enabled but not listening is a real state (crashed or still starting);
-    # say so instead of handing out a dead endpoint. 0.3s was too tight: a
-    # loaded machine reported a healthy gateway as dead in the QR dialog.
-    try:
-        info["listening"] = bool(probe(cfg["port"], cfg["token"],
-                                       timeout=1.5).get("listening"))
-    except Exception:  # noqa: BLE001 - a probe failure must not block the QR
-        info["listening"] = False
+    # say so instead of handing out a dead endpoint. A connection check first
+    # keeps the common "down" case instant instead of waiting out the probe.
+    info["listening"] = False
+    if _port_open(cfg["port"]):
+        try:
+            info["listening"] = bool(probe(cfg["port"], cfg["token"],
+                                           timeout=1.5).get("listening"))
+        except Exception:  # noqa: BLE001 - a probe failure must not block the QR
+            info["listening"] = False
     return info
 
 
@@ -282,7 +294,21 @@ FORWARD_HEADERS = ("content-type", "accept", "anthropic-version",
 def _new_stats() -> dict:
     return {"requests": 0, "ok": 0, "rejected": 0, "failed": 0,
             "aborted": 0, "too_large": 0, "active": 0, "last": 0,
-            "started": int(time.time())}
+            "started": int(time.time()), "recent": []}
+
+
+RECENT_LIMIT = 20
+
+
+def _note_reject(stats: dict, kind: str, remote: str) -> None:
+    """Keep the last few refusals so a failing phone can be diagnosed.
+
+    Counters say "3 rejected"; they do not say whether it was a stale token or
+    the concurrency cap, nor from which address.
+    """
+    recent = stats.setdefault("recent", [])
+    recent.append({"t": int(time.time()), "kind": kind, "remote": remote or ""})
+    del recent[:-RECENT_LIMIT]
 
 
 async def _proxy(request: web.Request) -> web.StreamResponse:
@@ -290,6 +316,7 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
     stats = request.app[STATS]
     if not _authorized(request, cfg["token"]):
         stats["rejected"] += 1
+        _note_reject(stats, "401 token", request.remote)
         return _error(401, "authentication_error",
                       "invalid gateway token; set x-api-key to the token "
                       "shown in RelayDesk settings")
@@ -298,6 +325,7 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
         # Checked before reading the body: a flood must not cost us a 32 MB
         # buffer per request. 429 keeps the Anthropic error shape.
         stats["rejected"] += 1
+        _note_reject(stats, "429 busy", request.remote)
         return _error(429, "overloaded_error",
                       f"gateway busy ({stats['active']} in flight, limit {limit}); "
                       "retry shortly", headers={"Retry-After": "2"})
@@ -368,6 +396,7 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
                 await stream.write_eof()
             return stream
         stats["failed"] += 1
+        _note_reject(stats, "502 upstream", request.remote)
         return _error(502, "api_error",
                       f"upstream {cfg['upstream']} unreachable: "
                       f"{type(exc).__name__}")
