@@ -33,6 +33,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+from urllib.parse import urlsplit
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -196,12 +197,23 @@ class UpdateError(RuntimeError):
         self.code = code
 
 
-def _open(url: str, *, token: str | None = None, timeout: float = 20.0):
-    request = urllib.request.Request(url, headers={
+def _open(url: str, *, token: str | None = None,
+          token_hosts: tuple[str, ...] = ("api.github.com",),
+          timeout: float = 20.0):
+    """GET a URL, sending the token only to GitHub itself.
+
+    The retry list includes third-party mirrors (gh-proxy.com, ghfast.top);
+    attaching `Authorization` to those would hand the user's GitHub token to a
+    random proxy just because api.github.com timed out.
+    """
+    headers = {
         "Accept": "application/vnd.github+json",
         "User-Agent": f"flixcli-autoupdate/{sys.platform}",
-        **({"Authorization": f"Bearer {token}"} if token else {}),
-    })
+    }
+    host = (urlsplit(url).hostname or "").lower()
+    if token and host in tuple(h.lower() for h in token_hosts):
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers)
     return urllib.request.urlopen(request, timeout=timeout)
 
 
@@ -258,12 +270,13 @@ def fetch_releases(repo: str = REPO_DEFAULT, *, api_base: str = API_DEFAULT,
                    mirrors: tuple[str, ...] = MIRRORS) -> list[Release]:
     """Newest-first releases, or UpdateError('network') with the reason kept."""
     token = token or default_token()
+    token_hosts = (urlsplit(api_base).hostname or "api.github.com",)
     url = f"{api_base.rstrip('/')}/repos/{repo}/releases?per_page={per_page}"
     attempts = [url] + [f"{m.rstrip('/')}/{url}" for m in mirrors]
     errors: list[str] = []
     for candidate in attempts:
         try:
-            with _open(candidate, token=token) as response:
+            with _open(candidate, token=token, token_hosts=token_hosts) as response:
                 payload = json.loads(response.read().decode("utf-8"))
             releases = [Release.from_api(item) for item in payload]
             _write_cache(repo, payload)

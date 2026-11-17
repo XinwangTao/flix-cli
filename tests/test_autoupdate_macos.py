@@ -83,6 +83,32 @@ class TokenAndCacheTests(unittest.TestCase):
                              "限流时应回退到缓存而不是报失败")
 
 
+    def test_token_never_goes_to_a_mirror(self):
+        sent = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return b"[]"
+
+        def fake_urlopen(request, timeout=20):
+            sent.append((request.full_url, request.get_header("Authorization")))
+            return FakeResponse()
+
+        with mock.patch.object(au.urllib.request, "urlopen", fake_urlopen):
+            au._open("https://api.github.com/repos/x/y/releases", token="secret")
+            au._open("https://gh-proxy.com/https://api.github.com/x", token="secret")
+            au._open("https://ghfast.top/https://api.github.com/x", token="secret")
+        self.assertEqual(sent[0][1], "Bearer secret")
+        self.assertIsNone(sent[1][1], "镜像收到了 GitHub 令牌")
+        self.assertIsNone(sent[2][1], "镜像收到了 GitHub 令牌")
+
+
 class StateRecordTests(unittest.TestCase):
     def test_stale_tag_is_dropped_when_the_bytes_changed(self):
         with tempfile.TemporaryDirectory() as tmp:
