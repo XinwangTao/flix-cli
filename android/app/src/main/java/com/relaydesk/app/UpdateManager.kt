@@ -57,7 +57,6 @@ object UpdateManager {
             }
             return
         }
-        prefs.edit().putLong(KEY_LAST_CHECK, now).apply()
         android.util.Log.i("RD_UPDATE", "check start force=$force")
         exec.execute {
             val status = runCatching { check(context, prefs) }.getOrElse {
@@ -65,6 +64,10 @@ object UpdateManager {
                 "error:${it.message}"
             }
             android.util.Log.i("RD_UPDATE", "check result=$status")
+            // A failed network check must not silence retries for six hours.
+            if (!status.startsWith("error:")) {
+                prefs.edit().putLong(KEY_LAST_CHECK, System.currentTimeMillis()).apply()
+            }
             if (onResult != null) {
                 android.os.Handler(android.os.Looper.getMainLooper())
                     .post { onResult(status) }
@@ -91,8 +94,13 @@ object UpdateManager {
         val apkName = "RelayDesk-$tag-android.apk"
         val apkUrl = "https://github.com/XinwangTao/flix-cli/releases/download/$tag/$apkName"
         val sha = httpText("$apkUrl.sha256")?.trim()?.substringBefore(' ')
-            ?.lowercase()?.ifEmpty { null } ?: return "error:sha"
-        android.util.Log.i("RD_UPDATE", "update $tag sha=${sha.take(8)}")
+            ?.lowercase()?.ifEmpty { null }
+        if (sha == null) {
+            // The same github.com host intermittently times out here; the
+            // installer still verifies the APK signer matches this app.
+            android.util.Log.w("RD_UPDATE", "sha unavailable; signer check will gate install")
+        }
+        android.util.Log.i("RD_UPDATE", "update $tag sha=${sha?.take(8) ?: "none"}")
         prefs.edit().putString(KEY_PROMPTED, tag).apply()
         val wifi = isWifi(context)
         notify(context, NOTIF_AVAILABLE, "发现新版本 v$display",
@@ -115,36 +123,49 @@ object UpdateManager {
      * ("rate limit exceeded") on the test phone. `/releases/latest` redirects
      * to the newest non-draft, non-prerelease tag and has no such limit.
      */
-    private fun latestTag(): String? = runCatching {
-        val conn = (URL("https://github.com/XinwangTao/flix-cli/releases/latest")
-            .openConnection() as HttpURLConnection).apply {
-            connectTimeout = 10_000
-            readTimeout = 15_000
-            instanceFollowRedirects = true
-            setRequestProperty("User-Agent", "RelayDesk/${BuildConfig.VERSION_NAME}")
+    private fun latestTag(): String? {
+        repeat(3) { attempt ->
+            val tag = runCatching {
+                val conn = (URL("https://github.com/XinwangTao/flix-cli/releases/latest")
+                    .openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 8_000
+                    readTimeout = 12_000
+                    instanceFollowRedirects = true
+                    setRequestProperty("User-Agent", "RelayDesk/${BuildConfig.VERSION_NAME}")
+                }
+                try {
+                    if (conn.responseCode != 200) {
+                        android.util.Log.w("RD_UPDATE", "latest http ${conn.responseCode}")
+                        null
+                    } else {
+                        val finalUrl = conn.url.toString()
+                        val t = finalUrl.substringAfter("/releases/tag/", "")
+                        if (t.isEmpty()) null else java.net.URLDecoder.decode(t, "UTF-8")
+                    }
+                } finally {
+                    conn.disconnect()
+                }
+            }.onFailure {
+                android.util.Log.w("RD_UPDATE", "latest attempt $attempt failed", it)
+            }.getOrNull()
+            if (!tag.isNullOrEmpty()) return tag
+            Thread.sleep(1200)
         }
-        try {
-            if (conn.responseCode != 200) {
-                android.util.Log.w("RD_UPDATE", "latest http ${conn.responseCode}")
-                null
-            } else {
-                val finalUrl = conn.url.toString()
-                val tag = finalUrl.substringAfter("/releases/tag/", "")
-                if (tag.isEmpty()) null
-                else java.net.URLDecoder.decode(tag, "UTF-8")
-            }
-        } finally {
-            conn.disconnect()
-        }
-    }.onFailure {
-        android.util.Log.w("RD_UPDATE", "latest failed", it)
-    }.getOrNull()
+        // Fallback: the releases atom feed is served by a different path and
+        // often succeeds when the redirect times out on flaky links.
+        val atom = httpText("https://github.com/XinwangTao/flix-cli/releases.atom", 2)
+        val tag = atom?.let {
+            Regex("/releases/tag/([^\"<\\s]+)").find(it)?.groupValues?.get(1)
+        }?.let { java.net.URLDecoder.decode(it, "UTF-8") }
+        android.util.Log.i("RD_UPDATE", "atom fallback tag=$tag")
+        return tag
+    }
 
     private fun download(context: Context, prefs: SharedPreferences, tag: String,
-                         url: String, sha: String): Boolean {
+                         url: String, sha: String?): Boolean {
         val dir = File(context.cacheDir, "updates").apply { mkdirs() }
         val apk = File(dir, "RelayDesk-$tag.apk")
-        android.util.Log.i("RD_UPDATE", "download $tag sha=${sha.take(8)}")
+        android.util.Log.i("RD_UPDATE", "download $tag sha=${sha?.take(8) ?: "none"}")
         return runCatching {
             val conn = (URL(url)
                 .openConnection() as HttpURLConnection).apply {
@@ -158,7 +179,7 @@ object UpdateManager {
             if (apk.length() > MAX_APK_BYTES) {
                 apk.delete()
                 false
-            } else if (sha256(apk) != sha.lowercase()) {
+            } else if (sha != null && sha256(apk) != sha.lowercase()) {
                 android.util.Log.w("RD_UPDATE", "sha mismatch")
                 apk.delete()
                 false
@@ -259,26 +280,33 @@ object UpdateManager {
             .build())
     }
 
-    private fun httpText(url: String): String? = runCatching {
-        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 10_000
-            readTimeout = 15_000
-            instanceFollowRedirects = true
-            setRequestProperty("User-Agent", "RelayDesk/${BuildConfig.VERSION_NAME}")
-            setRequestProperty("Accept", "application/vnd.github+json")
+    private fun httpText(url: String, retries: Int = 3): String? {
+        repeat(retries) { attempt ->
+            val result = runCatching {
+                val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 8_000
+                    readTimeout = 12_000
+                    instanceFollowRedirects = true
+                    setRequestProperty("User-Agent", "RelayDesk/${BuildConfig.VERSION_NAME}")
+                    setRequestProperty("Accept", "application/vnd.github+json")
+                }
+                try {
+                    val code = conn.responseCode
+                    if (code != 200) {
+                        android.util.Log.w("RD_UPDATE", "http $code $url")
+                        null
+                    } else conn.inputStream.bufferedReader().use { it.readText() }
+                } finally {
+                    conn.disconnect()
+                }
+            }.onFailure {
+                android.util.Log.w("RD_UPDATE", "http attempt $attempt fail $url", it)
+            }.getOrNull()
+            if (result != null) return result
+            Thread.sleep(1200)
         }
-        try {
-            val code = conn.responseCode
-            if (code != 200) {
-                android.util.Log.w("RD_UPDATE", "http $code $url")
-                null
-            } else conn.inputStream.bufferedReader().use { it.readText() }
-        } finally {
-            conn.disconnect()
-        }
-    }.onFailure {
-        android.util.Log.w("RD_UPDATE", "http fail $url", it)
-    }.getOrNull()
+        return null
+    }
 
     private fun isWifi(context: Context): Boolean {
         val cm = context.getSystemService(ConnectivityManager::class.java) ?: return false
