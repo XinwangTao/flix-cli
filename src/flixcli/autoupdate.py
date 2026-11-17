@@ -205,10 +205,59 @@ def _open(url: str, *, token: str | None = None, timeout: float = 20.0):
     return urllib.request.urlopen(request, timeout=timeout)
 
 
+TOKEN_ENV = ("GITHUB_TOKEN", "GH_TOKEN")
+CACHE_PATH = Path(APP_DIR) / "releases_cache.json"
+CACHE_MAX_AGE = 24 * 3600
+
+
+def default_token() -> str | None:
+    """A token the user already has on this machine, without asking again.
+
+    Anonymous GitHub allows 60 requests/hour per IP; a GUI that checks on every
+    launch burns that by itself. The environment covers shells and LaunchAgents;
+    the file covers apps started from Finder, which inherit no env.
+    """
+    for name in TOKEN_ENV:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    try:
+        value = (Path(APP_DIR) / "github_token").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return value or None
+
+
+def _read_cache(repo: str, max_age: float = CACHE_MAX_AGE) -> list["Release"] | None:
+    try:
+        data = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if data.get("repo") != repo:
+        return None
+    if time.time() - float(data.get("at") or 0) > max_age:
+        return None
+    try:
+        return [Release.from_api(item) for item in data.get("releases") or []]
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
+def _write_cache(repo: str, payload: list) -> None:
+    try:
+        CACHE_PATH.write_text(json.dumps({"repo": repo, "at": time.time(),
+                                          "releases": payload}),
+                              encoding="utf-8")
+        os.chmod(CACHE_PATH, 0o600)
+    except OSError:
+        pass
+
+
 def fetch_releases(repo: str = REPO_DEFAULT, *, api_base: str = API_DEFAULT,
                    token: str | None = None, per_page: int = 10,
                    mirrors: tuple[str, ...] = MIRRORS) -> list[Release]:
     """Newest-first releases, or UpdateError('network') with the reason kept."""
+    token = token or default_token()
     url = f"{api_base.rstrip('/')}/repos/{repo}/releases?per_page={per_page}"
     attempts = [url] + [f"{m.rstrip('/')}/{url}" for m in mirrors]
     errors: list[str] = []
@@ -216,7 +265,9 @@ def fetch_releases(repo: str = REPO_DEFAULT, *, api_base: str = API_DEFAULT,
         try:
             with _open(candidate, token=token) as response:
                 payload = json.loads(response.read().decode("utf-8"))
-            return [Release.from_api(item) for item in payload]
+            releases = [Release.from_api(item) for item in payload]
+            _write_cache(repo, payload)
+            return releases
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 raise UpdateError("no-releases", f"{repo} 没有 release", EXIT_NETWORK) from exc
@@ -229,6 +280,14 @@ def fetch_releases(repo: str = REPO_DEFAULT, *, api_base: str = API_DEFAULT,
             errors.append(f"{candidate} -> HTTP {exc.code} {hint}")
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
             errors.append(f"{candidate} -> {exc}")
+    cached = _read_cache(repo)
+    if cached:
+        # Rate limits and flaky networks are the normal case on this machine;
+        # a release list from the last day is good enough to answer "is there
+        # something newer", and the asset download itself is verified by sha256.
+        log_line(f"network failed, using cached release list ({len(cached)} entries): "
+                 f"{errors[-1] if errors else ''}")
+        return cached
     raise UpdateError("network", "; ".join(errors) or "所有镜像均不可用", EXIT_NETWORK)
 
 
