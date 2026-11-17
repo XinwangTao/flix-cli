@@ -31,19 +31,23 @@ jobs:
         with:
           gradle-version: "8.9"
 
-      # A fresh runner would otherwise generate a new debug keystore on every
-      # run, so each APK had a different signature: the phone needed an
-      # uninstall/reinstall (wiping data and changing its UID) every time.
-      # Caching the keystore makes consecutive builds update-compatible.
-      - name: Cache debug keystore
-        uses: actions/cache@v4
-        with:
-          path: ~/.android/debug.keystore
-          key: android-debug-keystore-v1
+      # One stable key across branches and tags: a per-runner debug key makes
+      # every APK signature different, so updates require uninstall/reinstall
+      # (data loss) and can never install over a release. The secret is the
+      # canonical copy; the bootstrap artifact below creates it once.
+      - name: Restore signing keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_B64 }}
+        run: |
+          mkdir -p ~/.android
+          if [ -n "$KEYSTORE_B64" ]; then
+            printf '%s' "$KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
+            chmod 600 ~/.android/debug.keystore
+          fi
 
       - name: Build debug APK
         working-directory: android
-        run: gradle assembleDebug --no-daemon
+        run: gradle assembleDebug --no-daemon -PversionName=2.3.0-dev -PversionCode=2
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -51,3 +55,10 @@ jobs:
           name: RelayDesk-debug-apk
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+
+      - name: Upload debug keystore (bootstrap)
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-debug-keystore
+          path: ~/.android/debug.keystore
+          if-no-files-found: warn

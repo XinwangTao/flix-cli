@@ -28,6 +28,7 @@ class RelayService : Service() {
         const val CH_SERVICE = "relaydesk_service"
         const val CH_MESSAGES = "relaydesk_messages"
         const val ACTION_REFRESH = "com.relaydesk.app.REFRESH"
+        const val ACTION_CHECK_UPDATE = "com.relaydesk.app.CHECK_UPDATE"
         private const val NOTIF_SERVICE = 1
         private const val NOTIF_SUMMARY = 1000
         private const val FALLBACK_PORT = 18991
@@ -74,6 +75,8 @@ class RelayService : Service() {
         } else {
             startDiscovery(port)
             updateServiceNotification("设备通道 :$port · 后台接收已开启")
+            // Throttled: the same check also runs from MainActivity.
+            UpdateManager.maybeCheck(this)
         }
 
         worker = Executors.newSingleThreadScheduledExecutor { r ->
@@ -85,7 +88,10 @@ class RelayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_REFRESH) discovery?.announce()
+        when (intent?.action) {
+            ACTION_REFRESH -> discovery?.announce()
+            ACTION_CHECK_UPDATE -> UpdateManager.maybeCheck(this, force = true)
+        }
         return START_STICKY
     }
 

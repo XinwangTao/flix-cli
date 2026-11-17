@@ -15,6 +15,13 @@
 - GUI 增加构建指纹握手（`/api/overview` 的 `build`）：升级后不再复用旧 daemon；本机服务 API
   端口被旧实例占用时自动顺延，GUI 仍能发现新实例。
 
+### 新增（Android 自动更新）
+- 开机广播与应用启动时检查 GitHub `releases/latest`，发现新版本发通知；Wi-Fi 下自动下载、
+  校验 sha256，再交给系统安装器（Android 不允许静默安装，确认后保留数据）。
+- 设置页新增「检查更新」；应用内发现已下载的新版本时弹出安装提示。
+- 发布/调试工作流统一使用同一份 debug keystore Secret；Release 用 tag 写
+  `versionName/versionCode`，保证升级可比较、可覆盖安装。
+
 ### 变更（第三轮对抗性审查：删除常驻扫描）
 - 永久扫描调度器删除：启动后 2s 扫一次，之后由 GUI 刷新按钮触发
   `POST /api/discover/scan`。新设备靠周期广播；官方端晚于我们启动时会发启动广播，

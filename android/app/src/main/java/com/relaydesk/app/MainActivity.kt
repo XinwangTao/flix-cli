@@ -183,12 +183,14 @@ class MainActivity : Activity() {
         buildUi()
         restoreAfterRecreate()
         RelayService.start(this)
+        UpdateManager.maybeCheck(this)
         if (android.os.Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 7)
         }
         handleDeepLink(intent)
+        promptUpdateIfReady()
     }
 
     override fun onStart() {
@@ -220,6 +222,15 @@ class MainActivity : Activity() {
     /** Notification taps arrive as `peer` (or `group`) extras and open that chat. */
     private fun handleDeepLink(intent: Intent?) {
         if (intent == null) return
+        if (intent.getBooleanExtra("install_update", false)) {
+            intent.removeExtra("install_update")
+            UpdateManager.installDownloaded(this)
+            return
+        }
+        if (intent.getBooleanExtra("check_update", false)) {
+            intent.removeExtra("check_update")
+            UpdateManager.maybeCheck(this, force = true)
+        }
         val peer = intent.getStringExtra("peer")?.takeIf { it.isNotEmpty() }
         val group = intent.getStringExtra("group")?.takeIf { it.isNotEmpty() }
         if (peer == null && group == null) return
@@ -2744,8 +2755,23 @@ class MainActivity : Activity() {
         addRow("主题", if (lightTheme) "浅色" else "深色") { switchTheme(!lightTheme) }
 
         addSection("关于")
+        addRow("检查更新", "检查 ›") {
+            UpdateManager.maybeCheck(this, force = true)
+            toast("正在检查更新…")
+        }
         addRow("版本", versionName())
         addRow("连接方式", "局域网直连 · 无需账号")
+    }
+
+    private fun promptUpdateIfReady() {
+        val tag = UpdateManager.downloadedTag(this) ?: return
+        AlertDialog.Builder(this, dlgTheme())
+            .setTitle("发现新版本 v$tag")
+            .setMessage("安装包已下载并通过 sha256 校验。安装需要系统确认，" +
+                "聊天与配对数据会保留。")
+            .setPositiveButton("安装") { _, _ -> UpdateManager.installDownloaded(this) }
+            .setNegativeButton("稍后", null)
+            .show()
     }
 
     private fun editAliasDialog() {

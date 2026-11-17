@@ -274,12 +274,30 @@ jobs:
         with:
           gradle-version: "8.9"
 
+      # Same key as the branch debug builds, so a release installs over the
+      # tested APK (and over previous releases) without uninstall/data loss.
+      - name: Restore signing keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_B64 }}
+        run: |
+          mkdir -p ~/.android
+          if [ -n "$KEYSTORE_B64" ]; then
+            printf '%s' "$KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
+            chmod 600 ~/.android/debug.keystore
+          fi
+
       # Debug signing is deliberate: it is the build that was verified on the
       # tablet over wireless adb, so the released APK installs exactly like the
-      # tested one. A release keystore can replace this once one exists.
+      # tested one. The tag becomes the APK version so auto-update can compare.
       - name: Build APK
         working-directory: android
-        run: gradle assembleDebug --no-daemon
+        env:
+          VERSION: ${{ env.VERSION }}
+        run: |
+          V="${VERSION#v}"; CORE="${V%%-*}"
+          IFS=. read -r MA MI PA <<< "$CORE"
+          CODE=$((10#${MA:-0}*10000 + 10#${MI:-0}*100 + 10#${PA:-0}))
+          gradle assembleDebug --no-daemon -PversionName="$V" -PversionCode="$CODE"
 
       - name: Package
         run: |

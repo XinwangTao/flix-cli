@@ -1,0 +1,143 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RelayDesk Android 自动更新",
+    "locale": "zh-CN",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    {"id": "phone", "label": "Android App"},
+    {"id": "github", "label": "GitHub Releases"},
+    {"id": "system", "label": "Android 系统"},
+    {"id": "exceptions", "label": "失败与人工出口", "variant": "exception"}
+  ],
+  "phases": [],
+  "groups": [],
+  "mainPath": ["boot", "check", "gh", "compare", "notify", "download", "install", "relaunch"],
+  "nodes": [
+    {
+      "id": "boot",
+      "lane": "phone",
+      "col": 0,
+      "type": "frontend",
+      "label": "开机 / 打开 App",
+      "sublabel": "BOOT_COMPLETED · 前台启动",
+      "width": 160
+    },
+    {
+      "id": "check",
+      "lane": "phone",
+      "col": 1,
+      "type": "backend",
+      "label": "入队更新检查",
+      "sublabel": "WorkManager · 联网约束",
+      "width": 160
+    },
+    {
+      "id": "gh",
+      "lane": "github",
+      "col": 2,
+      "type": "external",
+      "label": "GET releases/latest",
+      "sublabel": "api.github.com/XinwangTao/flix-cli",
+      "width": 190
+    },
+    {
+      "id": "compare",
+      "lane": "phone",
+      "col": 2,
+      "type": "process",
+      "label": "比较版本",
+      "sublabel": "tag vs BuildConfig.VERSION_NAME",
+      "width": 180
+    },
+    {
+      "id": "notify",
+      "lane": "phone",
+      "col": 3,
+      "type": "frontend",
+      "label": "通知 + 应用内横幅",
+      "sublabel": "发现新版本，点按更新",
+      "width": 170
+    },
+    {
+      "id": "download",
+      "lane": "phone",
+      "col": 4,
+      "type": "backend",
+      "label": "下载 APK + sha256",
+      "sublabel": "Wi-Fi / 用户确认后",
+      "width": 170
+    },
+    {
+      "id": "install",
+      "lane": "system",
+      "col": 5,
+      "type": "security",
+      "label": "系统安装器确认",
+      "sublabel": "PackageInstaller · 保留数据",
+      "width": 180
+    },
+    {
+      "id": "relaunch",
+      "lane": "phone",
+      "col": 6,
+      "type": "process",
+      "label": "安装后重启",
+      "sublabel": "版本更新 · 数据保留",
+      "width": 160
+    },
+    {
+      "id": "offline",
+      "lane": "exceptions",
+      "col": 1,
+      "type": "security",
+      "label": "无网络 / API 限流",
+      "sublabel": "下次联网重试",
+      "width": 160
+    },
+    {
+      "id": "noasset",
+      "lane": "exceptions",
+      "col": 2,
+      "type": "security",
+      "label": "无 Android 资产",
+      "sublabel": "缺少 -android.apk",
+      "width": 160
+    },
+    {
+      "id": "sig",
+      "lane": "exceptions",
+      "col": 5,
+      "type": "security",
+      "label": "签名不一致",
+      "sublabel": "需卸载重装（丢数据）",
+      "width": 160
+    },
+    {
+      "id": "oem",
+      "lane": "exceptions",
+      "col": 6,
+      "type": "security",
+      "label": "OEM 拦截",
+      "sublabel": "自启动/未知来源设置",
+      "width": 160
+    }
+  ],
+  "edges": [
+    {"from": "boot", "to": "check", "label": "开机广播 / 应用启动", "role": "main", "variant": "emphasis"},
+    {"from": "check", "to": "gh", "label": "联网时", "role": "main", "variant": "emphasis"},
+    {"from": "gh", "to": "compare", "label": "tag + assets", "role": "main", "variant": "emphasis"},
+    {"from": "compare", "to": "notify", "label": "tag 更新", "role": "main", "variant": "emphasis"},
+    {"from": "notify", "to": "download", "label": "用户点按 / Wi-Fi 自动", "role": "main", "variant": "emphasis"},
+    {"from": "download", "to": "install", "label": "sha256 通过", "role": "main", "variant": "emphasis"},
+    {"from": "install", "to": "relaunch", "label": "同一签名", "role": "main", "variant": "emphasis"},
+    {"from": "gh", "to": "offline", "label": "网络失败", "role": "error", "variant": "dashed"},
+    {"from": "offline", "to": "check", "label": "联网重试", "role": "branch", "variant": "dashed"},
+    {"from": "gh", "to": "noasset", "label": "无匹配资产", "role": "error", "variant": "dashed"},
+    {"from": "install", "to": "sig", "label": "签名不符", "role": "error", "variant": "dashed"},
+    {"from": "install", "to": "oem", "label": "系统拦截", "role": "error", "variant": "dashed"}
+  ],
+  "cards": []
+}

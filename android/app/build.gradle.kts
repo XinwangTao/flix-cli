@@ -11,8 +11,15 @@ android {
         applicationId = "com.relaydesk.app"
         minSdk = 29
         targetSdk = 34
-        versionCode = 2
-        versionName = "2.3.0"
+        // Release builds pass -PversionName/-PversionCode from the tag; a plain
+        // checkout keeps the development version so auto-update can tell that a
+        // published release is newer.
+        versionCode = (findProperty("versionCode") as String?)?.toIntOrNull() ?: 2
+        versionName = (findProperty("versionName") as String?) ?: "2.3.0"
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     buildTypes {
