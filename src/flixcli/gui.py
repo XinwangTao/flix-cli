@@ -43,6 +43,7 @@ from . import is_port_text
 from .icons import icon, logo_icon, logo_pixmap
 from .presence import is_online
 from . import __version__ as APP_VERSION
+from . import build_id as APP_BUILD
 
 
 if sys.platform == "darwin":
@@ -216,22 +217,22 @@ class LocalApi:
         if env and is_port_text(env):
             candidates.insert(0, int(env))
         candidates += [p for p in cls.CANDIDATE_PORTS if p not in candidates]
-        fallback = None
         for port in candidates:
             api = cls(port)
             try:
                 data = api.get("/api/overview")
             except ApiError:
                 continue
-            if isinstance(data, dict) and "self" in data and "devices" in data:
-                # A daemon from another build answers the same old endpoints
-                # but lacks the newer ones, so prefer an exact version match
-                # and only fall back to whatever is there.
-                if data.get("version") == APP_VERSION:
-                    return api
-                if fallback is None:
-                    fallback = api
-        return fallback
+            if not isinstance(data, dict) or "self" not in data or "devices" not in data:
+                continue
+            # Version alone is not identity: a pre-fix and a post-fix build
+            # both answer 2.4.0. Reusing the old daemon silently disables the
+            # new endpoints (and this actually happened during an upgrade).
+            # Require both; the offline page offers to start a fresh one.
+            if (data.get("version") == APP_VERSION
+                    and data.get("build") == APP_BUILD):
+                return api
+        return None
 
     def get(self, path: str):
         return self._request(path)
@@ -1337,10 +1338,16 @@ class MainWindow(QMainWindow):
         else:
             kwargs["start_new_session"] = True
         device_port = 8891 if self._port_free(8891) else 18991
+        # A stale daemon may still own 18998; start the new build on the next
+        # free candidate so discover() can find it instead of colliding.
+        api_port = next(
+            (p for p in (18998, 19098, 19598, 18997, 18996, 8898)
+             if self._port_free(p)), 18998)
         subprocess.Popen(
-            cmd + ["--device-port", str(device_port), "--api-port", "18998"], **kwargs)
+            cmd + ["--device-port", str(device_port),
+                   "--api-port", str(api_port)], **kwargs)
         self.offline_detail.setText(
-            f"正在启动本机服务（{device_port}/18998）…几秒后自动重连。")
+            f"正在启动本机服务（{device_port}/{api_port}）…几秒后自动重连。")
         self.start_daemon_button.setEnabled(False)
         QTimer.singleShot(3500, self.retry_connection)
 
@@ -1900,6 +1907,8 @@ class MainWindow(QMainWindow):
         data.update(changes)
         try:
             PREFS_FILE.write_text(json.dumps(data), encoding="utf-8")
+            # Same credential rule as the store: owner-only.
+            PREFS_FILE.chmod(0o600)
         except OSError:
             pass
 

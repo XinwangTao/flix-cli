@@ -221,10 +221,11 @@ def share_info(store) -> dict | None:
     info = {"base": lan_urls(cfg["port"])[0], "token": cfg["token"],
             "port": cfg["port"]}
     # Enabled but not listening is a real state (crashed or still starting);
-    # say so instead of handing out a dead endpoint.
+    # say so instead of handing out a dead endpoint. 0.3s was too tight: a
+    # loaded machine reported a healthy gateway as dead in the QR dialog.
     try:
         info["listening"] = bool(probe(cfg["port"], cfg["token"],
-                                       timeout=0.3).get("listening"))
+                                       timeout=1.5).get("listening"))
     except Exception:  # noqa: BLE001 - a probe failure must not block the QR
         info["listening"] = False
     return info

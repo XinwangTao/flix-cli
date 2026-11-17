@@ -614,7 +614,13 @@ class Store:
             tmp = self.prefs_path.with_suffix(".json.tmp")
             tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1),
                            encoding="utf-8")
+            # The file holds the model-gateway token; keep it owner-only so
+            # another local account cannot read the credential.
+            with contextlib.suppress(OSError):
+                os.chmod(tmp, 0o600)
             os.replace(tmp, self.prefs_path)
+            with contextlib.suppress(OSError):
+                os.chmod(self.prefs_path, 0o600)
             return data
 
     def set_pref(self, key: str, value) -> None:

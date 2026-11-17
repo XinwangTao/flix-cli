@@ -176,6 +176,21 @@ class WirelessConnectTests(unittest.TestCase):
         self.assertEqual(ctx.exception.kind, "relay-python")
 
 
+class PrefsPermissionTests(unittest.TestCase):
+    def test_prefs_file_holding_the_token_is_owner_only(self):
+        import os
+        import stat
+        with TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "db.sqlite")
+            try:
+                store.set_pref("modelGateway", {"token": "rd-secret"})
+                mode = stat.S_IMODE(os.stat(store.prefs_path).st_mode)
+                self.assertEqual(mode & 0o077, 0,
+                                 f"其他本地用户可读令牌: {oct(mode)}")
+            finally:
+                store.close()
+
+
 class PairingPayloadTests(unittest.TestCase):
     def test_payload_matches_the_format_the_phone_expects(self):
         from flixcli.adb_wireless import pairing_payload
