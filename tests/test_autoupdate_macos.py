@@ -33,6 +33,27 @@ def zip_bundle(app: Path, dest: Path) -> Path:
     return dest
 
 
+class StateRecordTests(unittest.TestCase):
+    def test_stale_tag_is_dropped_when_the_bytes_changed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = make_bundle(Path(tmp), b"v1")
+            record = {"tag": "v9.9.9", "exe_sha256": "0" * 64}
+            self.assertEqual(au.effective_record(record, app), {},
+                             "磁盘字节已变，旧 tag 不能继续压制更新")
+
+    def test_matching_record_is_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = make_bundle(Path(tmp), b"v1")
+            record = {"tag": "v2.6.0", "exe_sha256": au.target_digest(app)}
+            self.assertEqual(au.effective_record(record, app), record)
+
+    def test_record_without_digest_is_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = make_bundle(Path(tmp), b"v1")
+            record = {"tag": "v2.6.0"}
+            self.assertEqual(au.effective_record(record, app), record)
+
+
 class HealthGateTests(unittest.TestCase):
     def test_health_is_the_binary_running_not_a_new_window(self):
         with tempfile.TemporaryDirectory() as tmp:

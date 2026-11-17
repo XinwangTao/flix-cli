@@ -507,6 +507,22 @@ def _acceptable(path: Path, platform: str) -> bool:
     return path.is_file()
 
 
+def effective_record(record: dict, target: str | Path) -> dict:
+    """Ignore a state record whose bytes no longer match the disk.
+
+    A manual install, a rollback or a rebuild keeps the old `tag` around; if
+    that tag is *higher* than what is installed, the updater would never offer
+    the next release. The file on disk is the fact.
+    """
+    if not record:
+        return {}
+    expected = record.get("exe_sha256")
+    if not expected:
+        return record
+    actual = target_digest(target)
+    return record if actual == expected else {}
+
+
 def detect_target(*, explicit: str | None = None,
                   platform: str | None = None) -> Path:
     """Where the installed RelayDesk lives.
@@ -977,7 +993,7 @@ def run_update(*, repo: str = REPO_DEFAULT, api_base: str = API_DEFAULT,
     """Check → download → verify → swap → restart → verify, with rollback."""
     target = detect_target(explicit=exe)
     state = load_state(state_path)
-    record = installed_record(state, target)
+    record = effective_record(installed_record(state, target), target)
     local_sha = target_digest(target)
     local_tag = record.get("tag")
     if not local_tag:
