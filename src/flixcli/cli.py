@@ -956,6 +956,31 @@ async def cmd_adb(args) -> int:
         if args.adb_cmd == "devices":
             emit({"ok": True, "devices": [d.as_dict() for d in await client.devices()]}, args.json)
             return 0
+        if args.adb_cmd == "pair-qr":
+            from .adb_wireless import (DEFAULT_RELAY_PORT, AdbWirelessError,
+                                       connect as wireless_connect,
+                                       pair as wireless_pair, pairing_payload)
+            payload, service, password = pairing_payload()
+            emit({"ok": True, "qr": payload, "service": service,
+                  "hint": "手机：无线调试 → 使用二维码配对设备 → 扫这张码"},
+                 args.json)
+            if not args.json:
+                print(payload)
+            try:
+                paired = wireless_pair(service, password,
+                                       adb_path=args.adb_path,
+                                       timeout=args.pair_timeout)
+                result = wireless_connect(
+                    adb_path=args.adb_path,
+                    relay_port=getattr(args, "relay_port", None) or DEFAULT_RELAY_PORT,
+                    timeout=getattr(args, "discover_timeout", 3.0),
+                    adb_timeout=args.timeout)
+            except AdbWirelessError as exc:
+                emit({"ok": False, "error": exc.kind, "detail": exc.detail},
+                     args.json)
+                return 3
+            emit({**result, "paired": paired["device"]}, args.json)
+            return 0
         if args.adb_cmd == "connect":
             from .adb_wireless import (DEFAULT_RELAY_PORT, AdbWirelessError,
                                        connect as wireless_connect, stop_relay)
@@ -1378,6 +1403,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="seconds to wait for each mDNS lookup")
     p_conn.add_argument("--stop-relay", action="store_true",
                         help="stop a relay started by an earlier connect")
+    p_qrpair = adb_sub.add_parser(
+        "pair-qr", help="show the official ADB pairing QR, then pair + connect")
+    p_qrpair.add_argument("--pair-timeout", type=float, default=90.0,
+                          help="seconds to wait for the phone to scan")
     p_push = adb_sub.add_parser("push", help="copy a local file to Android")
     p_push.add_argument("source")
     p_push.add_argument("destination")

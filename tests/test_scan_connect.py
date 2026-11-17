@@ -176,6 +176,44 @@ class WirelessConnectTests(unittest.TestCase):
         self.assertEqual(ctx.exception.kind, "relay-python")
 
 
+class PairingPayloadTests(unittest.TestCase):
+    def test_payload_matches_the_format_the_phone_expects(self):
+        from flixcli.adb_wireless import pairing_payload
+        payload, service, password = pairing_payload()
+        self.assertEqual(payload, f"WIFI:T:ADB;S:{service};P:{password};;")
+        self.assertTrue(service.startswith("flix-"))
+        self.assertEqual(len(password), 6)
+        self.assertNotIn("H:", payload, "官方配对码不带 host/port")
+
+    def test_each_call_gets_fresh_credentials(self):
+        from flixcli.adb_wireless import pairing_payload
+        first = pairing_payload()
+        second = pairing_payload()
+        self.assertNotEqual(first[1], second[1])
+        self.assertNotEqual(first[2], second[2])
+
+
+class AdbPairApiTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self._tmp = TemporaryDirectory()
+        self.store = Store(Path(self._tmp.name) / "db.sqlite")
+        app, _ = desktop_api.make_desktop_app(
+            self.store, {"fingerprint": "fp-me", "alias": "me"}, lambda *a: None)
+        self.client = TestClient(TestServer(app))
+        await self.client.start_server()
+
+    async def asyncTearDown(self):
+        await self.client.close()
+        self.store.close()
+        self._tmp.cleanup()
+
+    async def test_missing_credentials_is_a_bad_request(self):
+        resp = await self.client.post("/api/adb/pair", json={})
+        body = await resp.json()
+        self.assertEqual(resp.status, 400)
+        self.assertEqual(body["error"], "bad-params")
+
+
 class AdbConnectApiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self._tmp = TemporaryDirectory()

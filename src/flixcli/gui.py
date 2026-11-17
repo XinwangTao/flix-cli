@@ -1559,6 +1559,12 @@ class MainWindow(QMainWindow):
         wireless.setToolTip("自动发现手机无线调试端口，经回环中继连接（无需扫码）")
         wireless.clicked.connect(self.wireless_adb_connect)
         row.addWidget(wireless)
+        pair_qr = QPushButton("扫码配对（ADB）")
+        pair_qr.setObjectName("secondaryButton")
+        pair_qr.setCursor(Qt.PointingHandCursor)
+        pair_qr.setToolTip("显示官方 ADB 配对二维码，手机无线调试扫码后自动配对")
+        pair_qr.clicked.connect(self.adb_pair_qr)
+        row.addWidget(pair_qr)
         row.addStretch()
         box.addLayout(row)
         self.adb_list = QListWidget(); self.adb_list.setObjectName("contentList")
@@ -3390,6 +3396,40 @@ class MainWindow(QMainWindow):
         menu.addAction("手动添加设备…", self.manual_add_dialog)
         menu.addAction("显示连接二维码…", self.show_connect_qr)
         menu.exec(self.cursor().pos())
+
+    def adb_pair_qr(self):
+        """Official ADB pairing QR: the phone scans, then we pair and connect."""
+        from .adb_wireless import pairing_payload
+        from .model_gateway import qr_png
+        payload, service, password = pairing_payload()
+        try:
+            png = qr_png(payload, scale=8)
+        except Exception as exc:  # noqa: BLE001 - segno missing
+            toast_hint(self, f"二维码渲染失败：{exc}")
+            return
+        pixmap = QPixmap()
+        pixmap.loadFromData(png)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("扫码配对 ADB")
+        layout = QVBoxLayout(dialog)
+        image = QLabel()
+        image.setPixmap(pixmap)
+        image.setAlignment(Qt.AlignCenter)
+        layout.addWidget(image)
+        tip = QLabel("手机：开发者选项 → 无线调试 → 使用二维码配对设备 → 扫这张码\n"
+                     "扫完请停留在该界面，电脑会自动完成配对与连接")
+        tip.setWordWrap(True)
+        layout.addWidget(tip)
+        done = QPushButton("完成")
+        done.setObjectName("primaryBtn")
+        done.clicked.connect(dialog.accept)
+        layout.addWidget(done)
+        self.run_action(
+            lambda: self.api.post("/api/adb/pair",
+                                  {"service": service, "password": password}),
+            lambda result: toast_hint(
+                self, f"已配对并连接 {result.get('serial', 'ADB 设备')}".strip()))
+        dialog.exec()
 
     def wireless_adb_connect(self):
         """Discover the phone and connect without a QR or a typed address."""

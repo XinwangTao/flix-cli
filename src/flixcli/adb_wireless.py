@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 import select
 import shutil
 import signal
@@ -26,6 +27,7 @@ from .config import APP_DIR
 
 DEFAULT_RELAY_PORT = 40009
 BROWSE_SERVICE = "_adb-tls-connect._tcp"
+PAIRING_SERVICE = "_adb-tls-pairing._tcp"
 SYSTEM_PYTHON = "/usr/bin/python3"
 
 # The relay is a separate process (Apple python, stdlib only), so it cannot be
@@ -121,6 +123,17 @@ def parse_browse(output: str) -> str:
             if name:
                 return name
     return ""
+
+
+def parse_browse_all(output: str) -> list[str]:
+    """Every instance name from `dns-sd -B` Add lines."""
+    names: list[str] = []
+    for line in output.splitlines():
+        if re.search(r"\sAdd\s", line):
+            name = line.split()[-1].strip()
+            if name and name not in names:
+                names.append(name)
+    return names
 
 
 def parse_resolve(output: str) -> tuple[str, int] | None:
@@ -230,6 +243,58 @@ def _run_dns(args: list[str], seconds: float, ready=None) -> str:
             proc.kill()
             proc.communicate()
     return b"".join(chunks).decode("utf-8", "replace")
+
+
+def pairing_payload(service: str = "", password: str = "") -> tuple[str, str, str]:
+    """Official Android pairing QR: `WIFI:T:ADB;S:<name>;P:<secret>;;`.
+
+    The computer shows it; the phone's "Wireless debugging -> Pair device with
+    QR code" scans it, then advertises `_adb-tls-pairing._tcp` under that
+    service name so the host can run `adb pair`. No host/port goes in the QR.
+    """
+    service = service or f"flix-{secrets.token_hex(3)}"
+    password = password or f"{secrets.randbelow(900000) + 100000}"
+    return f"WIFI:T:ADB;S:{service};P:{password};;", service, password
+
+
+def wait_for_pairing(service: str, timeout: float = 90.0) -> dict:
+    """Wait for the phone to advertise the pairing service named in the QR."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        output = _run_dns(["-B", PAIRING_SERVICE, "local"], 1.5)
+        for instance in parse_browse_all(output):
+            if instance != service and not instance.startswith(service):
+                continue
+            resolved = parse_resolve(
+                _run_dns(["-L", instance, PAIRING_SERVICE, "local"], 2.0))
+            if not resolved:
+                continue
+            host, port = resolved
+            ip = parse_ipv4(_run_dns(["-G", "v4", host], 2.0))
+            if ip:
+                return {"instance": instance, "ip": ip, "port": int(port)}
+        time.sleep(0.8)
+    raise AdbWirelessError(
+        "pair-timeout",
+        "未发现配对服务：请在手机「无线调试 → 使用二维码配对设备」里扫码，"
+        "并停留在该界面直到电脑完成配对")
+
+
+def pair(service: str, password: str, adb_path: str | None = None,
+         timeout: float = 60.0) -> dict:
+    """Discover the scanned service and run `adb pair` with its one-time code."""
+    adb = adb_path or os.environ.get("ANDROID_ADB", "adb")
+    found = wait_for_pairing(service, timeout=timeout)
+    try:
+        out = subprocess.run([adb, "pair", f"{found['ip']}:{found['port']}",
+                              password],
+                             capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise AdbWirelessError("pair-failed", f"adb pair 失败: {exc}") from exc
+    text = (out.stdout or out.stderr or "").strip()
+    if out.returncode != 0 or "Successfully paired" not in text:
+        raise AdbWirelessError("pair-failed", text or f"returncode={out.returncode}")
+    return {"ok": True, "device": found, "adb": text}
 
 
 def discover(timeout: float = 3.0, adb_path: str | None = None) -> dict:

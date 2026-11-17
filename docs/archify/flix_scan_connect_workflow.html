@@ -292,8 +292,8 @@
       "lane": "adb",
       "col": 2,
       "type": "backend",
-      "label": "flix adb connect",
-      "sublabel": "dns-sd 发现 _adb-tls-connect"
+      "label": "ADB 快连",
+      "sublabel": "扫码配对(WIFI:T:ADB) 或 mDNS 发现"
     },
     {
       "id": "relay",
@@ -325,7 +325,7 @@
       "col": 2,
       "type": "messagebus",
       "label": "未发现无线调试",
-      "sublabel": "提示开无线调试并确认同网"
+      "sublabel": "未扫码/未开无线调试，给出指引"
     }
   ],
   "edges": [
@@ -412,9 +412,9 @@
       "dot": "emerald",
       "title": "ADB 不靠手工脚本",
       "items": [
-        "mDNS 发现无线调试端口",
-        "loopback 中继绕开 macOS 15 本地网络权限",
-        "连接串与失败原因在 CLI/GUI 可见"
+        "官方 WIFI:T:ADB 配对码：电脑显示、手机无线调试扫，扫完电脑自动 adb pair",
+        "未配对时走 mDNS 发现 + 回环中继（绕开 macOS 15 本地网络权限）",
+        "应用内一键无线连接，不需要扫码也能连"
       ]
     },
     {

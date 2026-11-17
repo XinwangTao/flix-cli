@@ -309,6 +309,37 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
                         model_token=(model or {}).get("token", ""))
         return web.json_response({"ok": True, "link": link, "model": model})
 
+    async def adb_pair_post(request: web.Request) -> web.Response:
+        """Wait for the scanned pairing service, `adb pair`, then connect."""
+        from .adb_wireless import (AdbWirelessError, connect as wireless_connect,
+                                   pair as wireless_pair)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        service = str(body.get("service") or "")
+        password = str(body.get("password") or "")
+        if not service or not password:
+            return web.json_response({"ok": False, "error": "bad-params"},
+                                     status=400)
+        timeout = float(body.get("timeout") or 90.0)
+        adb_path = getattr(adb_client, "adb_path", None)
+
+        def run():
+            wireless_pair(service, password, adb_path=adb_path, timeout=timeout)
+            return wireless_connect(adb_path=adb_path)
+
+        try:
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, run)
+        except AdbWirelessError as exc:
+            return web.json_response({"ok": False, "error": exc.kind,
+                                      "detail": exc.detail}, status=503)
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": "adb-pair",
+                                      "detail": str(exc)}, status=503)
+        return web.json_response(result)
+
     async def adb_connect_post(request: web.Request) -> web.Response:
         """One click: discover the phone, relay through loopback, connect.
 
@@ -582,6 +613,7 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
     app.router.add_get("/api/pair-link", pair_link_get)
     app.router.add_get("/api/adb/devices", adb_devices_get)
     app.router.add_post("/api/adb/connect", adb_connect_post)
+    app.router.add_post("/api/adb/pair", adb_pair_post)
     app.router.add_post("/api/adb/transfer", adb_transfer_post)
     app.router.add_post("/api/send-text", send_text_post)
     app.router.add_post("/api/send-files", send_files_post)
