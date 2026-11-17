@@ -124,6 +124,27 @@ class PairLinkApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(query["fp"], ["fp-me"])
         self.assertNotIn("model_base", query)
 
+    async def test_pair_link_probe_does_not_block_the_event_loop(self):
+        import asyncio
+        import time
+        from unittest import mock
+        from flixcli import model_gateway
+
+        def slow_share(_store):
+            time.sleep(0.6)  # same shape as a gateway probe that has to wait
+            return None
+
+        with mock.patch.object(model_gateway, "share_info", side_effect=slow_share):
+            pending = asyncio.create_task(self.client.get("/api/pair-link"))
+            await asyncio.sleep(0.1)
+            started = time.monotonic()
+            other = await self.client.get("/api/self")
+            elapsed = time.monotonic() - started
+            self.assertEqual(other.status, 200)
+            await pending
+        self.assertLess(elapsed, 0.3,
+                        "同步探测阻塞了事件循环，其他接口被卡住")
+
     async def test_link_carries_model_when_sharing_is_on(self):
         save_config(self.store, enabled=True, port=18993)
         body = await (await self.client.get("/api/pair-link")).json()

@@ -1084,6 +1084,8 @@ def cmd_models(args) -> int:
             changes["upstream"] = args.upstream
         if getattr(args, "allow_remote_upstream", False):
             changes["allow_remote_upstream"] = True
+        if getattr(args, "max_concurrent", None) is not None:
+            changes["max_concurrent"] = args.max_concurrent
         try:
             cfg = save_config(store, **changes)
         except ValueError as exc:
@@ -1118,6 +1120,7 @@ def cmd_models(args) -> int:
             state = "运行中" if payload["listening"] else "未运行"
             print(f"状态: {state}（{'已开启' if payload['enabled'] else '未开启'}）")
             print(f"端口: {payload['port']}  上游: {payload['upstream']}")
+            print(f"并发上限: {payload.get('max_concurrent', 4)}")
             print(f"地址: {', '.join(payload['urls'])}")
             print(f"令牌: {payload['token']}")
             stats = payload.get("stats") or {}
@@ -1477,6 +1480,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="token: mint a new token")
     p.add_argument("--allow-remote-upstream", action="store_true",
                    help="allow an upstream outside 127.0.0.1 (default: loopback only)")
+    p.add_argument("--max-concurrent", type=int, default=None,
+                   help="max in-flight requests before answering 429 (1-32, default 4)")
 
     args = ap.parse_args(_normalize_shell_argv(
         list(sys.argv[1:] if argv is None else argv)))

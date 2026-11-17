@@ -1573,6 +1573,14 @@ class MainActivity : Activity() {
             setTextColor(getColor(R.color.textMuted)); textSize = 12f
             gravity = Gravity.CENTER; setPadding(0, dp(10), 0, dp(4))
         })
+        // Readable counterpart of the code inside the QR: the desktop shows
+        // the same 4 digits when it asks its operator to approve a pair.
+        column.addView(TextView(this).apply {
+            text = "配对码：${store.ownPairKey(prefs)}"
+            setTextColor(getColor(R.color.textPrimary)); textSize = 18f
+            setTypeface(typeface, Typeface.BOLD)
+            gravity = Gravity.CENTER; setPadding(0, dp(4), 0, 0)
+        })
         AlertDialog.Builder(this, dlgTheme())
             .setTitle("我的配对二维码")
             .setView(column)
@@ -2623,9 +2631,10 @@ class MainActivity : Activity() {
         if (base.isEmpty()) {
             AlertDialog.Builder(this, dlgTheme())
                 .setTitle("模型网关")
-                .setMessage("还没有配置。\n\n在电脑 RelayDesk 点「显示连接二维码…」，" +
-                    "再用本页「扫码添加设备」扫一次，即可同时完成配对与模型配置。")
-                .setPositiveButton("好", null)
+                .setMessage("还没有配置。\n\n电脑 RelayDesk「显示连接二维码…」扫码可自动配置；" +
+                    "也可以手动填写地址与令牌（在电脑设置页「复制手机配置」里能看到）。")
+                .setPositiveButton("手动填写") { _, _ -> editModelGateway() }
+                .setNegativeButton("关闭", null)
                 .show()
             return
         }
@@ -2639,6 +2648,42 @@ class MainActivity : Activity() {
                 copyText("Base URL: $base\nAPI Key: $token\nModel: glm-5.3-flash")
             }
             .setNegativeButton("关闭", null)
+            .show()
+    }
+
+    private fun editModelGateway() {
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), dp(0))
+        }
+        val baseEdit = EditText(this).apply {
+            hint = "http://192.168.1.10:18993"
+            setText(prefs.getString("model_base", "").orEmpty())
+            setSingleLine()
+        }
+        val tokenEdit = EditText(this).apply {
+            hint = "rd-…"
+            setText(prefs.getString("model_token", "").orEmpty())
+            setSingleLine()
+        }
+        column.addView(baseEdit)
+        column.addView(tokenEdit)
+        AlertDialog.Builder(this, dlgTheme())
+            .setTitle("模型网关")
+            .setView(column)
+            .setPositiveButton("保存") { _, _ ->
+                val base = baseEdit.text.toString().trim().trimEnd('/')
+                if (base.isEmpty()) {
+                    toast("地址不能为空")
+                } else {
+                    prefs.edit().putString("model_base", base)
+                        .putString("model_token", tokenEdit.text.toString().trim())
+                        .apply()
+                    toast("已保存模型网关")
+                    refreshSettings()
+                }
+            }
+            .setNegativeButton("取消", null)
             .show()
     }
 

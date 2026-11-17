@@ -11,6 +11,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from flixcli.config import Store
+from flixcli import model_gateway
 from flixcli.model_gateway import (CONFIG_TEMPLATE, load_config, make_model_app,
                                    new_token, reset_token, save_config,
                                    stop_gateway)
@@ -110,10 +111,19 @@ class ModelGatewayTests(unittest.TestCase):
                         headers = {"x-api-key": cfg["token"]}
                         first = asyncio.create_task(client.post(
                             "/v1/messages", json={"model": "x"}, headers=headers))
-                        await asyncio.sleep(0.2)  # let it reach the upstream
+                        # Wait for the request to be accounted in flight rather
+                        # than sleeping a fixed 0.2s (flaky on a loaded CI box).
+                        for _ in range(200):
+                            if client.app[model_gateway.STATS]["active"] >= 1:
+                                break
+                            await asyncio.sleep(0.01)
+                        self.assertEqual(
+                            client.app[model_gateway.STATS]["active"], 1,
+                            "第一个请求没有进入在途状态")
                         second = await client.post(
                             "/v1/messages", json={"model": "x"}, headers=headers)
                         self.assertEqual(second.status, 429)
+                        self.assertEqual(second.headers.get("Retry-After"), "2")
                         payload = await second.json()
                         self.assertEqual(payload["error"]["type"],
                                          "overloaded_error")

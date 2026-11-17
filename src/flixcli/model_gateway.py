@@ -261,10 +261,11 @@ def _authorized(request: web.Request, token: str,
                                token.encode())
 
 
-def _error(status: int, kind: str, message: str) -> web.Response:
+def _error(status: int, kind: str, message: str,
+           headers: dict | None = None) -> web.Response:
     return web.json_response(
         {"type": "error", "error": {"type": kind, "message": message}},
-        status=status)
+        status=status, headers=headers)
 
 
 def _target_url(cfg: dict, request: web.Request) -> str:
@@ -299,7 +300,7 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
         stats["rejected"] += 1
         return _error(429, "overloaded_error",
                       f"gateway busy ({stats['active']} in flight, limit {limit}); "
-                      "retry shortly")
+                      "retry shortly", headers={"Retry-After": "2"})
     try:
         body = await asyncio.wait_for(request.read(), BODY_READ_TIMEOUT)
     except asyncio.TimeoutError:
@@ -632,6 +633,7 @@ def status_payload(store) -> dict:
     return {"ok": True, "enabled": bool(cfg["enabled"]), "port": cfg["port"],
             "upstream": cfg["upstream"], "token": cfg["token"],
             "max_body_mb": cfg["max_body_mb"],
+            "max_concurrent": cfg.get("max_concurrent", DEFAULT_MAX_CONCURRENT),
             "allow_remote_upstream": cfg["allow_remote_upstream"],
             "urls": lan_urls(cfg["port"]), "pair": pair_text(cfg),
             "listening": live.get("listening", False),

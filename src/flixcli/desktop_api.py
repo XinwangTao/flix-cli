@@ -50,7 +50,8 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
                      webrtc_hub=None,
                      adb_client: AdbClient | None = None,
                      media_manager: SessionManager | None = None,
-                     media_runtime=None) -> tuple[web.Application, Callable[[dict], None]]:
+                     media_runtime=None,
+                     scan_fn=None) -> tuple[web.Application, Callable[[dict], None]]:
     events_q: asyncio.Queue = asyncio.Queue(maxsize=256)
     shutdown_ev = asyncio.Event()
     from .pairgate import GATE as pair_gate
@@ -333,11 +334,27 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
                          "theme": settings.get("theme", "system")},
         })
 
+    async def discover_scan_post(request: web.Request) -> web.Response:
+        """One-shot LAN sweep (GUI refresh / recovery after an address move)."""
+        if scan_fn is None:
+            return web.json_response({"ok": False, "error": "scan-disabled"},
+                                     status=503)
+        try:
+            found = await scan_fn()
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+        return web.json_response({"ok": True, "found": [
+            {"fingerprint": d.get("fingerprint"), "alias": d.get("alias"),
+             "ip": d.get("ip"), "port": d.get("port")} for d in (found or [])]})
+
     async def pair_link_get(request: web.Request) -> web.Response:
         """One QR for the phone: pairing plus the model-gateway address/token."""
         from .model_gateway import share_info
         from .qrcode import pair_uri
-        model = share_info(store)
+        # share_info probes the gateway over HTTP; on the event loop that would
+        # freeze every device message and discovery reply for up to its timeout.
+        loop = asyncio.get_running_loop()
+        model = await loop.run_in_executor(None, share_info, store)
         link = pair_uri(ident["fingerprint"], channel_port,
                         store.own_pair_key(), ip=local_ip(),
                         model_base=(model or {}).get("base", ""),
@@ -663,6 +680,7 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
     app.router.add_post("/api/media/apply-answer", media_apply_answer_post)
     app.router.add_get("/api/media/{call_id}/snapshot", media_snapshot_get)
     app.router.add_post("/api/pair", pair_post)
+    app.router.add_post("/api/discover/scan", discover_scan_post)
     app.router.add_post("/api/pair/approve", pair_approve_post)
     for route in ("/api/respond-pair",
                   "/api/accept-transfer", "/api/cancel-transfer"):
@@ -709,12 +727,14 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
 
 async def serve_desktop_api(store, ident, send_text_fn, port: int,
                             channel_port: int = 8891, webrtc_hub=None,
-                            adb_client=None, media_manager=None, media_runtime=None):
+                            adb_client=None, media_manager=None, media_runtime=None,
+                            scan_fn=None):
     app, publish = make_desktop_app(store, ident, send_text_fn,
                                     api_port=port, channel_port=channel_port,
                                     webrtc_hub=webrtc_hub, adb_client=adb_client,
                                     media_manager=media_manager,
-                                    media_runtime=media_runtime)
+                                    media_runtime=media_runtime,
+                                    scan_fn=scan_fn)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", port)
