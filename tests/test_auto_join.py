@@ -11,6 +11,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from aiohttp import web
@@ -161,20 +162,24 @@ class FirstContactTests(unittest.IsolatedAsyncioTestCase):
                 "time": 1, "groupId": "", "content": "hello"}
 
     async def test_first_message_prompts_then_pairs(self):
-        resp = await self.client.post("/bubble", json=self._bubble())
-        self.assertEqual(resp.status, 403)
-        for _ in range(20):
-            await asyncio.sleep(0.01)
-            if self.gate.pending():
-                break
-        self.assertEqual([p["fingerprint"] for p in self.gate.pending()],
-                         ["official-fp"])
-        self.assertTrue(self.gate.approve("official-fp", True))
-        for _ in range(20):
-            await asyncio.sleep(0.01)
-            if self.store.is_paired("official-fp"):
-                break
-        self.assertTrue(self.store.is_paired("official-fp"))
+        async def fake_ping(*args, **kwargs):
+            return {"fingerprint": "official-fp"}
+
+        with mock.patch("flixcli.channel.ping_v2", fake_ping):
+            resp = await self.client.post("/bubble", json=self._bubble())
+            self.assertEqual(resp.status, 403)
+            for _ in range(50):
+                await asyncio.sleep(0.01)
+                if self.gate.pending():
+                    break
+            self.assertEqual([p["fingerprint"] for p in self.gate.pending()],
+                             ["official-fp"])
+            self.assertTrue(self.gate.approve("official-fp", True))
+            for _ in range(50):
+                await asyncio.sleep(0.01)
+                if self.store.is_paired("official-fp"):
+                    break
+            self.assertTrue(self.store.is_paired("official-fp"))
         resp = await self.client.post("/bubble", json=self._bubble())
         self.assertEqual(resp.status, 200)
         self.assertEqual(await resp.text(), "received bubble")
@@ -186,3 +191,49 @@ class FirstContactTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resp.status, 403)
         await asyncio.sleep(0.05)
         self.assertEqual(self.gate.pending(), [])
+
+
+class LatePairApprovalTests(unittest.IsolatedAsyncioTestCase):
+    """The ask must answer before the peer's 8 s timeout and confirm later."""
+
+    async def asyncSetUp(self):
+        from flixcli.server import make_app
+        self._tmp = tempfile.TemporaryDirectory()
+        self.store = Store(Path(self._tmp.name) / "db.sqlite")
+        self.ident = {"fingerprint": "me-fp", "alias": "me"}
+        self.store.upsert_device("late-fp", alias="phone", port=8899,
+                                 version=1, ip="127.0.0.1", os_name="android")
+        self.store.con.commit()
+        self.gate = PairGate(timeout=2.0, fast_timeout=0.05)
+        self.app = make_app(self.store, self.ident, lambda *_: None,
+                            pair_gate=self.gate)
+        self.client = TestClient(TestServer(self.app))
+        await self.client.start_server()
+
+    async def asyncTearDown(self):
+        await self.client.close()
+        self.store.close()
+        self._tmp.cleanup()
+
+    async def test_late_approval_confirms_peer(self):
+        codes = []
+        async def fake_post(ip, intent, port=8891, timeout=8.0):
+            codes.append((ip, port, intent))
+            return "{0: success}"
+
+        bad = "0000" if self.store.own_pair_key() != "0000" else "0001"
+        body = {"action": "askPairDevice", "deviceId": "late-fp",
+                "extra": {"verifyDevice": "me-fp", "verifyCode": bad}}
+        with mock.patch("flixcli.channel.post_intent", fake_post):
+            resp = await self.client.post("/intent", json=body)
+            self.assertIn("301", await resp.text())
+            self.assertTrue(self.gate.is_pending("late-fp"))
+            self.assertTrue(self.gate.approve("late-fp", True))
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                if self.store.is_paired("late-fp") and codes:
+                    break
+        self.assertTrue(self.store.is_paired("late-fp"))
+        self.assertEqual(codes[0][0], "127.0.0.1")
+        self.assertEqual(codes[0][1], 8899)
+        self.assertEqual(codes[0][2].get("action"), "confirmPairDevice")

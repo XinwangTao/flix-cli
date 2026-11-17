@@ -19,7 +19,7 @@ from typing import Callable
 
 from aiohttp import web
 
-from . import __version__, local_ip
+from . import __version__, build_id, local_ip
 from .adb import AdbClient, AdbError
 from .channel import PeerError, post_intent, post_json
 from .media_session import SessionError, SessionManager
@@ -307,6 +307,7 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
                        "devices": []}
         return web.json_response({
             "version": __version__,
+            "build": build_id(),
             "self": {"id": ident["fingerprint"], "alias": ident["alias"],
                      "deviceModel": ident.get("deviceModel", "Windows"),
                      "ip": local_ip(), "port": channel_port, "online": True},

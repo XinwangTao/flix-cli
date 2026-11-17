@@ -151,7 +151,16 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
         fp = dev.get("fingerprint")
         if not fp or fp == ident["fingerprint"]:
             return
-        if devices.get(fp) == dev:
+
+        def _key(row: dict) -> tuple:
+            # `source`/`from` differ between an announce and a scan probe;
+            # comparing them caused a redundant upsert and log line on every
+            # sweep for a device that had not moved.
+            return (row.get("ip"), row.get("port"), row.get("alias"),
+                    row.get("deviceModel"), row.get("os"), row.get("version"))
+
+        old_dev = devices.get(fp)
+        if old_dev is not None and _key(old_dev) == _key(dev):
             return
         old_ip = store.device_ip(fp)[0]
         new_ip = dev.get("ip", "")
@@ -361,26 +370,37 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
         # the peer's configuration. First pass runs right after startup so a
         # freshly opened desktop is visible within the 10 s acceptance window.
         from .discovery import scan_lan
+        import random
+        # Active discovery is a fallback, not a heartbeat. Sweep quickly at
+        # startup, then back off geometrically; a hit means peers are healthy
+        # and another sweep is unnecessary for a long while.
+        delay = 5.0
+        cap = 300.0 if not bound else 900.0
         try:
             await asyncio.sleep(2)
             while True:
                 try:
                     found = await scan_lan(on_device, ident, device_port)
                     if found:
+                        delay = 120.0 if not bound else cap
                         names = ", ".join(
                             f"{d.get('alias') or d['fingerprint'][:8]}"
                             f"@{d.get('ip')}:{d.get('port')}" for d in found)
                         print(f"[scan] discovered {names}", file=sys.stderr,
                               flush=True)
+                    else:
+                        delay = min(delay * 2, cap)
                 except Exception as exc:  # one bad sweep must not kill the loop
                     print(f"[scan] {exc}", file=sys.stderr, flush=True)
-                await asyncio.sleep(60 if not bound else 300)
+                    delay = min(delay * 2, cap)
+                # Jitter keeps several desktops from sweeping in lockstep.
+                await asyncio.sleep(delay * random.uniform(0.9, 1.1))
         except asyncio.CancelledError:
             pass
 
     if announce:
         tasks.append(asyncio.create_task(scan_loop()))
-        print("[flixd] active LAN scan every 60s (300s when multicast is bound)",
+        print("[flixd] active LAN scan with backoff (first sweep after 2s)",
               file=sys.stderr, flush=True)
 
     async def agent_outbox_loop() -> None:

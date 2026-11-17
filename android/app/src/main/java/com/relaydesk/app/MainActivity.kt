@@ -2232,6 +2232,10 @@ class MainActivity : Activity() {
                         pairButton.visibility = View.GONE
                         toast("已配对 $msg")
                         resyncGroupsTo(peer.optString("fingerprint"))
+                    } else if (code == 301) {
+                        // The desktop asks its operator; confirmation arrives
+                        // later as confirmPairDevice, not in this reply.
+                        toast("已请求配对，等待对方确认")
                     } else toast("配对被拒：$msg")
                 }
             } catch (e: Exception) {

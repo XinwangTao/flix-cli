@@ -28,6 +28,21 @@ if __version__ in ("0.0.0+source", "0.1.0"):
     except Exception:  # pragma: no cover - best effort only
         pass
 
+def build_id() -> str:
+    """Opaque marker for *this* build, stable across processes.
+
+    A version string is not enough to decide whether a running daemon came
+    from the current binary: both a pre-fix and a post-fix build can call
+    themselves 2.4.0. The GUI compares this marker before reusing a daemon.
+    """
+    target = sys.executable if getattr(sys, "frozen", False) else __file__
+    try:
+        st = os.stat(target)
+    except OSError:
+        return "unknown"
+    return f"{int(st.st_mtime)}:{st.st_size}"
+
+
 MULTICAST_GROUP = "224.0.0.168"      # [IDA pending: DiscoverManager] / [RT capture]
 DEVICE_PORT = 8891                    # TCP+UDP device channel
 WEB_PORT_DEFAULT = 8892
