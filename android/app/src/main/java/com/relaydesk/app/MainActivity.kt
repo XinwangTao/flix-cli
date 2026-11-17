@@ -2766,7 +2766,7 @@ class MainActivity : Activity() {
     private fun promptUpdateIfReady() {
         val tag = UpdateManager.downloadedTag(this) ?: return
         AlertDialog.Builder(this, dlgTheme())
-            .setTitle("发现新版本 v$tag")
+            .setTitle("发现新版本 v${tag.removePrefix("v")}")
             .setMessage("安装包已下载并通过 sha256 校验。安装需要系统确认，" +
                 "聊天与配对数据会保留。")
             .setPositiveButton("安装") { _, _ -> UpdateManager.installDownloaded(this) }

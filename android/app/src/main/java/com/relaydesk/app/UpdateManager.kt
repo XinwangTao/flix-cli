@@ -12,7 +12,6 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
 import android.provider.Settings
-import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -38,8 +37,6 @@ object UpdateManager {
     private const val CH_UPDATES = "relaydesk_updates"
     private const val NOTIF_AVAILABLE = 2001
     private const val NOTIF_DOWNLOADED = 2002
-    private const val API =
-        "https://api.github.com/repos/XinwangTao/flix-cli/releases/latest"
     private const val THROTTLE_MS = 6 * 3600_000L
     private const val MAX_APK_BYTES = 200L * 1024 * 1024
 
@@ -68,65 +65,67 @@ object UpdateManager {
     }
 
     private fun check(context: Context, prefs: SharedPreferences) {
-        val release = httpJson(API)
-        android.util.Log.i("RD_UPDATE", "release=${release?.optString("tag_name")} " +
-            "draft=${release?.optBoolean("draft")} pre=${release?.optBoolean("prerelease")}")
-        if (release == null) return
-        if (release.optBoolean("draft") || release.optBoolean("prerelease")) return
-        val tag = release.optString("tag_name").removePrefix("v")
-        android.util.Log.i("RD_UPDATE", "tag=$tag local=${BuildConfig.VERSION_NAME} " +
-            "newer=${isNewer(tag, BuildConfig.VERSION_NAME)}")
-        if (tag.isEmpty() || !isNewer(tag, BuildConfig.VERSION_NAME)) return
+        val tag = latestTag()
+        android.util.Log.i("RD_UPDATE", "tag=$tag local=${BuildConfig.VERSION_NAME}")
+        if (tag.isNullOrEmpty() || !isNewer(tag, BuildConfig.VERSION_NAME)) return
         if (prefs.getString(KEY_DOWNLOADED, "") == tag) return
         if (prefs.getString(KEY_PROMPTED, "") == tag) return
-        val asset = pickApk(release) ?: return
-        val sha = assetSha(release, asset) ?: return
+        val apkName = "RelayDesk-$tag-android.apk"
+        val apkUrl = "https://github.com/XinwangTao/flix-cli/releases/download/$tag/$apkName"
+        val sha = httpText("$apkUrl.sha256")?.trim()?.substringBefore(' ')
+            ?.lowercase()?.ifEmpty { null } ?: return
+        android.util.Log.i("RD_UPDATE", "update $tag sha=${sha.take(8)}")
         prefs.edit().putString(KEY_PROMPTED, tag).apply()
         val wifi = isWifi(context)
-        notify(context, NOTIF_AVAILABLE, "发现新版本 v$tag",
+        notify(context, NOTIF_AVAILABLE, "发现新版本 v${tag.removePrefix("v")}",
             if (wifi) "正在 Wi-Fi 下下载…" else "连接 Wi-Fi 后自动下载", install = false)
         if (!wifi) return
-        if (download(context, prefs, tag, asset, sha)) {
+        if (download(context, prefs, tag, apkUrl, sha)) {
             prefs.edit().putString(KEY_DOWNLOADED, tag).apply()
-            notify(context, NOTIF_DOWNLOADED, "新版本 v$tag 已下载",
+            notify(context, NOTIF_DOWNLOADED, "新版本 v${tag.removePrefix("v")} 已下载",
                 "点按进入系统安装", install = true)
         }
     }
 
-    private fun pickApk(release: JSONObject): JSONObject? {
-        val assets = release.optJSONArray("assets") ?: return null
-        for (i in 0 until assets.length()) {
-            val asset = assets.optJSONObject(i) ?: continue
-            if (asset.optString("name").endsWith("-android.apk")) return asset
+    /**
+     * Resolve the latest stable release tag without the GitHub API.
+     *
+     * The anonymous API is limited to 60 requests/hour and was already 403
+     * ("rate limit exceeded") on the test phone. `/releases/latest` redirects
+     * to the newest non-draft, non-prerelease tag and has no such limit.
+     */
+    private fun latestTag(): String? = runCatching {
+        val conn = (URL("https://github.com/XinwangTao/flix-cli/releases/latest")
+            .openConnection() as HttpURLConnection).apply {
+            connectTimeout = 10_000
+            readTimeout = 15_000
+            instanceFollowRedirects = true
+            setRequestProperty("User-Agent", "RelayDesk/${BuildConfig.VERSION_NAME}")
         }
-        return null
-    }
-
-    private fun assetSha(release: JSONObject, asset: JSONObject): String? {
-        val digest = asset.optString("digest")
-        if (digest.startsWith("sha256:")) return digest.substringAfter(':')
-        val name = asset.optString("name")
-        val assets = release.optJSONArray("assets") ?: return null
-        for (i in 0 until assets.length()) {
-            val a = assets.optJSONObject(i) ?: continue
-            if (a.optString("name") == "$name.sha256") {
-                val text = httpText(a.optString("browser_download_url")) ?: return null
-                return text.trim().substringBefore(' ').ifEmpty { null }
+        try {
+            if (conn.responseCode != 200) {
+                android.util.Log.w("RD_UPDATE", "latest http ${conn.responseCode}")
+                null
+            } else {
+                val finalUrl = conn.url.toString()
+                val tag = finalUrl.substringAfter("/releases/tag/", "")
+                if (tag.isEmpty()) null
+                else java.net.URLDecoder.decode(tag, "UTF-8")
             }
+        } finally {
+            conn.disconnect()
         }
-        return null
-    }
+    }.onFailure {
+        android.util.Log.w("RD_UPDATE", "latest failed", it)
+    }.getOrNull()
 
     private fun download(context: Context, prefs: SharedPreferences, tag: String,
-                         asset: JSONObject, sha: String): Boolean {
-        val size = asset.optLong("size", -1L)
-        if (size <= 0 || size > MAX_APK_BYTES) return false
+                         url: String, sha: String): Boolean {
         val dir = File(context.cacheDir, "updates").apply { mkdirs() }
         val apk = File(dir, "RelayDesk-$tag.apk")
-        android.util.Log.i("RD_UPDATE", "download ${asset.optString("name")} " +
-            "size=$size sha=${sha.take(8)}")
+        android.util.Log.i("RD_UPDATE", "download $tag sha=${sha.take(8)}")
         return runCatching {
-            val conn = (URL(asset.optString("browser_download_url"))
+            val conn = (URL(url)
                 .openConnection() as HttpURLConnection).apply {
                 connectTimeout = 15_000
                 readTimeout = 60_000
@@ -135,9 +134,11 @@ object UpdateManager {
             }
             conn.inputStream.use { input -> apk.outputStream().use { input.copyTo(it) } }
             conn.disconnect()
-            val actual = sha256(apk)
-            if (actual != sha.lowercase()) {
-                android.util.Log.w("RD_UPDATE", "sha mismatch $actual")
+            if (apk.length() > MAX_APK_BYTES) {
+                apk.delete()
+                false
+            } else if (sha256(apk) != sha.lowercase()) {
+                android.util.Log.w("RD_UPDATE", "sha mismatch")
                 apk.delete()
                 false
             } else {
@@ -202,9 +203,6 @@ object UpdateManager {
             .build())
     }
 
-    private fun httpJson(url: String): JSONObject? =
-        httpText(url)?.let { runCatching { JSONObject(it) }.getOrNull() }
-
     private fun httpText(url: String): String? = runCatching {
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             connectTimeout = 10_000
@@ -257,5 +255,6 @@ object UpdateManager {
     }
 
     private fun parts(v: String): List<Int> =
-        v.substringBefore('-').split('.').map { it.toIntOrNull() ?: 0 }
+        v.removePrefix("v").substringBefore('-').split('.')
+            .map { it.toIntOrNull() ?: 0 }
 }
