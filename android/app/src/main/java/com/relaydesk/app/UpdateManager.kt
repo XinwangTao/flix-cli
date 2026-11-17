@@ -197,8 +197,12 @@ object UpdateManager {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val path = prefs.getString(KEY_APK_PATH, null) ?: return
         val apk = File(path)
+        val signerOk = sameSigner(context, apk)
+        android.util.Log.i("RD_UPDATE", "install path=$path exists=${apk.exists()} " +
+            "signerOk=$signerOk canInstall=" +
+            "${context.packageManager.canRequestPackageInstalls()}")
         if (!apk.exists()) return
-        if (!sameSigner(context, apk)) {
+        if (!signerOk) {
             android.widget.Toast.makeText(context,
                 "此版本与已安装应用签名不一致，无法自动覆盖安装；" +
                     "下个由新密钥签名的版本才能自动更新。",
@@ -231,7 +235,10 @@ object UpdateManager {
                 val pending = PendingIntent.getBroadcast(context, id, intent,
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE)
                 session.commit(pending.intentSender)
+                android.util.Log.i("RD_UPDATE", "install session=$id committed")
             }
+        }.onFailure {
+            android.util.Log.w("RD_UPDATE", "install session failed", it)
         }
     }
 
@@ -258,7 +265,10 @@ object UpdateManager {
         val local = pm.getPackageInfo(context.packageName,
             android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES).signingInfo
         val r = certs(remote)
-        r.isNotEmpty() && r == certs(local)
+        val l = certs(local)
+        android.util.Log.i("RD_UPDATE", "signers remote=${r.size}:${r.firstOrNull()?.take(12)} " +
+            "local=${l.size}:${l.firstOrNull()?.take(12)}")
+        r.isNotEmpty() && r == l
     }.getOrDefault(false)
 
     private fun notify(context: Context, id: Int, title: String, body: String,
