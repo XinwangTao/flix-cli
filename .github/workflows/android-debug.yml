@@ -31,6 +31,16 @@ jobs:
         with:
           gradle-version: "8.9"
 
+      # A fresh runner would otherwise generate a new debug keystore on every
+      # run, so each APK had a different signature: the phone needed an
+      # uninstall/reinstall (wiping data and changing its UID) every time.
+      # Caching the keystore makes consecutive builds update-compatible.
+      - name: Cache debug keystore
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: android-debug-keystore-v1
+
       - name: Build debug APK
         working-directory: android
         run: gradle assembleDebug --no-daemon
