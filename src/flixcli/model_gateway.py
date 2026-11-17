@@ -301,16 +301,22 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
         return _error(429, "overloaded_error",
                       f"gateway busy ({stats['active']} in flight, limit {limit}); "
                       "retry shortly", headers={"Retry-After": "2"})
+    # Reserve the slot before the next await: reading the body suspends this
+    # coroutine, and two requests could otherwise both pass the guard at 0.
+    stats["active"] += 1
     try:
         body = await asyncio.wait_for(request.read(), BODY_READ_TIMEOUT)
     except asyncio.TimeoutError:
+        stats["active"] -= 1
         stats["failed"] += 1
         return _error(408, "timeout_error", "request body read timed out")
+    except BaseException:
+        stats["active"] -= 1
+        raise
     headers = {h: request.headers[h] for h in FORWARD_HEADERS
                if h in request.headers}
     url = _target_url(cfg, request)
     stats["requests"] += 1
-    stats["active"] += 1
     stats["last"] = int(time.time())
     stream = None  # set once response headers are on the wire
     try:

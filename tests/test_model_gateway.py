@@ -136,6 +136,44 @@ class ModelGatewayTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_limit_holds_when_requests_arrive_together(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as tmp:
+                gate = asyncio.Event()
+
+                async def slow(request):
+                    await gate.wait()
+                    return web.json_response({"type": "message"})
+
+                upstream_app = web.Application()
+                upstream_app.router.add_post("/v1/messages", slow)
+                upstream = TestServer(upstream_app)
+                await upstream.start_server()
+                try:
+                    cfg = self._cfg(tmp, str(upstream.make_url("")).rstrip("/"))
+                    cfg["max_concurrent"] = 1
+                    client = TestClient(TestServer(make_model_app(None, cfg)))
+                    await client.start_server()
+                    try:
+                        headers = {"x-api-key": cfg["token"]}
+                        tasks = [asyncio.create_task(client.post(
+                            "/v1/messages", json={"model": "x"},
+                            headers=headers)) for _ in range(4)]
+                        await asyncio.sleep(0.2)
+                        gate.set()
+                        responses = await asyncio.gather(*tasks)
+                        codes = [r.status for r in responses]
+                        # Without reserving the slot before the body read, all
+                        # four pass the guard and the cap does nothing.
+                        self.assertEqual(codes.count(200), 1, codes)
+                        self.assertEqual(codes.count(429), 3, codes)
+                    finally:
+                        await client.close()
+                finally:
+                    await upstream.close()
+
+        asyncio.run(run())
+
     def test_concurrency_default_is_clamped(self):
         self.assertEqual(CONFIG_TEMPLATE["max_concurrent"], 4)
         with tempfile.TemporaryDirectory() as tmp:
