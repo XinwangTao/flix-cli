@@ -21,9 +21,11 @@ import contextlib
 import hashlib
 import json
 import os
+import platform as host
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -43,6 +45,10 @@ API_DEFAULT = "https://api.github.com"
 MIRRORS = ("https://gh-proxy.com/", "https://ghfast.top/")
 
 EXE_NAME = "RelayDesk.exe"
+# macOS ships a bundle, not a single binary: the updater's "target" is the
+# .app directory and the thing to hash/verify is the Mach-O inside it.
+APP_NAME = "RelayDesk.app"
+APP_INNER = ("Contents", "MacOS", "RelayDesk")
 STATE_PATH = APP_DIR / "update_state.json"
 LOG_PATH = APP_DIR / "update.log"
 LOCK_PATH = APP_DIR / "update.lock"
@@ -64,6 +70,23 @@ _PLATFORM_ASSET = {
 _FULL_ASSET = {
     "win32": r"win(?:64|32)?[-_.].*full.*\.zip$",
 }
+
+
+def platform_asset_pattern(platform: str | None = None,
+                           machine: str | None = None) -> str:
+    """Which release asset belongs to *this* host.
+
+    macOS publishes one zip per architecture. The generic `macos.*.zip` pattern
+    happily picks the arm64 build on an Intel machine, which installs an app
+    that cannot execute — only the post-install health check would notice.
+    """
+    platform = platform or sys.platform
+    machine = (machine or host.machine()).lower()
+    if platform == "darwin":
+        arch = (r"arm64|aarch64" if machine in ("arm64", "aarch64")
+                else r"x86_64|amd64|intel")
+        return rf"(?:macos|osx|darwin).*(?:{arch}).*\.zip$"
+    return _PLATFORM_ASSET.get(platform, r"\.zip$")
 
 
 def preferred_asset_pattern(record: dict | None) -> str | None:
@@ -220,7 +243,7 @@ def pick_release(releases: list[Release], *, include_prerelease: bool = False) -
 
 
 def pick_asset(release: Release, *, pattern: str | None = None) -> Asset:
-    pattern = pattern or _PLATFORM_ASSET.get(sys.platform, r"\.zip$")
+    pattern = pattern or platform_asset_pattern()
     regex = re.compile(pattern, re.IGNORECASE)
     # Sorted so the same release always yields the same asset across runs.
     for asset in sorted(release.assets, key=lambda a: a.name):
@@ -238,6 +261,32 @@ def sha256_file(path: str | Path) -> str:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def is_app_bundle(path: str | Path) -> bool:
+    """True for a bundle, including renamed backups (`...prev-<stamp>`)."""
+    path = Path(path)
+    return path.is_dir() and (path.suffix == ".app"
+                              or bundle_executable(path).is_file())
+
+
+def bundle_executable(bundle: str | Path) -> Path:
+    path = Path(bundle)
+    for part in APP_INNER:
+        path = path / part
+    return path
+
+
+def target_digest(target: str | Path) -> str:
+    """Identity of an installed target, file or bundle.
+
+    A directory cannot be hashed directly, and hashing every file in a bundle
+    would change on unrelated metadata; the Mach-O inside is what executes.
+    """
+    if is_app_bundle(target):
+        inner = bundle_executable(target)
+        return sha256_file(inner) if inner.is_file() else ""
+    return sha256_file(target)
 
 
 def _download_once(url: str, dest: Path, offset: int, *, timeout: float) -> int:
@@ -303,6 +352,43 @@ class Payload:
     path: Path         # exe file, or the extracted tree root
 
 
+def _restore_zip_symlinks(archive: str | Path, workdir: Path) -> None:
+    """Recreate symlinks that `extractall` turned into tiny text files.
+
+    PyInstaller bundles lean on them (`Contents/Frameworks/Python` ->
+    `Python.framework/...`); as regular files the loader reports
+    "slice is not valid mach-o file" and the app dies at startup.
+    """
+    with zipfile.ZipFile(archive) as zf:
+        for info in zf.infolist():
+            mode = info.external_attr >> 16
+            if not stat.S_ISLNK(mode):
+                continue
+            destination = workdir / info.filename
+            target = zf.read(info).decode("utf-8", "replace")
+            with contextlib.suppress(OSError):
+                destination.unlink()
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with contextlib.suppress(OSError):
+                destination.symlink_to(target)
+
+
+def _ensure_bundle_executables(root: Path) -> None:
+    """zipfile extracts contents but does not restore POSIX modes.
+
+    Without this the Mach-O inside Contents/MacOS lands as 644 and the
+    freshly installed app cannot launch (seen on a real v2.5.2 install).
+    """
+    for sub in ("Contents/MacOS", "Contents/Frameworks"):
+        folder = root / sub
+        if not folder.is_dir():
+            continue
+        for path in folder.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                with contextlib.suppress(OSError):
+                    path.chmod(path.stat().st_mode | 0o111)
+
+
 def extract_payload(archive: str | Path, workdir: str | Path, *,
                     exe_name: str = EXE_NAME) -> Payload:
     """Unpack and decide whether the zip is one exe or a directory tree.
@@ -318,6 +404,18 @@ def extract_payload(archive: str | Path, workdir: str | Path, *,
             raise UpdateError("bad-archive", f"zip 损坏: {bad}", EXIT_INSTALL)
         names = [info.filename for info in zf.infolist() if not info.is_dir()]
         zf.extractall(workdir)
+    # macOS release zips wrap the whole bundle (`ditto --keepParent`).
+    apps = sorted({name.split("/", 1)[0] for name in names
+                   if name.split("/", 1)[0].endswith(".app")})
+    if apps:
+        root = workdir / apps[0]
+        _restore_zip_symlinks(archive, workdir)
+        _ensure_bundle_executables(root)
+        if not bundle_executable(root).is_file():
+            raise UpdateError("no-payload",
+                              f"zip 内 {apps[0]} 缺少 Contents/MacOS/RelayDesk",
+                              EXIT_INSTALL)
+        return Payload("app", root)
     target = exe_name.lower()
     matches = [n for n in names if Path(n).name.lower() == target]
     if not matches:
@@ -333,6 +431,8 @@ def validate_payload(payload: Payload, *, min_bytes: int = 1 << 20) -> None:
     """Cheap pre-flight: a truncated or HTML-error download must not replace
     a working exe. PE magic covers Windows; the size floor covers both."""
     exe = payload.path if payload.kind == "exe" else payload.path / EXE_NAME
+    if payload.kind == "app":
+        exe = bundle_executable(payload.path)
     if not exe.is_file():
         raise UpdateError("bad-payload", f"缺少 {exe.name}", EXIT_INSTALL)
     size = exe.stat().st_size
@@ -340,9 +440,18 @@ def validate_payload(payload: Payload, *, min_bytes: int = 1 << 20) -> None:
         raise UpdateError("bad-payload", f"{exe.name} 只有 {size} 字节，疑似下载被截断",
                           EXIT_INSTALL)
     with exe.open("rb") as fh:
-        magic = fh.read(2)
-    if sys.platform == "win32" and magic != b"MZ":
+        magic = fh.read(4)
+    if sys.platform == "win32" and magic[:2] != b"MZ":
         raise UpdateError("bad-payload", f"{exe.name} 不是 PE 文件 (magic={magic!r})",
+                          EXIT_INSTALL)
+    if payload.kind == "app" and magic not in (b"\xcf\xfa\xed\xfe",
+                                               b"\xce\xfa\xed\xfe",
+                                               b"\xca\xfe\xba\xbe"):
+        raise UpdateError("bad-payload",
+                          f"{exe.name} 不是 Mach-O 文件 (magic={magic!r})",
+                          EXIT_INSTALL)
+    if payload.kind == "app" and not os.access(exe, os.X_OK):
+        raise UpdateError("bad-payload", f"{exe.name} 没有可执行权限",
                           EXIT_INSTALL)
 
 
@@ -384,8 +493,26 @@ def remember_install(state: dict, exe: str | Path, *, tag: str, asset: str,
 
 # ---------------------------------------------------------------- target
 
-def detect_target(*, explicit: str | None = None, platform: str | None = None) -> Path:
-    """Where the installed RelayDesk.exe lives.
+def _bundle_of(executable: str | Path) -> Path | None:
+    """The .app that contains this executable, if any."""
+    for parent in Path(executable).resolve().parents:
+        if parent.suffix == ".app":
+            return parent
+    return None
+
+
+def _acceptable(path: Path, platform: str) -> bool:
+    if platform == "darwin" and path.suffix == ".app":
+        return path.is_dir() and bundle_executable(path).is_file()
+    return path.is_file()
+
+
+def detect_target(*, explicit: str | None = None,
+                  platform: str | None = None) -> Path:
+    """Where the installed RelayDesk lives.
+
+    Windows/Linux: the RelayDesk.exe (or script) itself. macOS: the .app
+    bundle, because that is what an update replaces.
 
     Order matters: an explicit path wins, then the binary we are running inside
     (frozen build), then whatever is actually running, then the two places
@@ -394,14 +521,28 @@ def detect_target(*, explicit: str | None = None, platform: str | None = None) -
     platform = platform or sys.platform
     if explicit:
         path = Path(explicit).expanduser()
-        if not path.is_file():
+        if not _acceptable(path, platform):
             raise UpdateError("no-target", f"找不到 {path}", EXIT_ENV)
         return path
     env = os.environ.get("RELAYDESK_EXE")
-    if env and Path(env).is_file():
+    if env and _acceptable(Path(env), platform):
         return Path(env)
-    if getattr(sys, "frozen", False) and Path(sys.executable).name.lower() == EXE_NAME.lower():
-        return Path(sys.executable)
+    if getattr(sys, "frozen", False):
+        if platform == "darwin":
+            bundle = _bundle_of(sys.executable)
+            if bundle is not None:
+                return bundle
+        elif Path(sys.executable).name.lower() == EXE_NAME.lower():
+            return Path(sys.executable)
+    if platform == "darwin":
+        candidates = [Path.cwd() / "dist" / APP_NAME,
+                      Path("/Applications") / APP_NAME,
+                      Path.home() / "Applications" / APP_NAME]
+        for candidate in candidates:
+            if _acceptable(candidate, platform):
+                return candidate
+        raise UpdateError("no-target", f"找不到 {APP_NAME}，请用 --exe 指定",
+                          EXIT_ENV)
     for instance in list_instances(exe_name=EXE_NAME):
         if instance.get("exe"):
             return Path(instance["exe"])
@@ -640,13 +781,108 @@ def swap_tree(current_dir: str | Path, payload_root: str | Path, *,
     return backups
 
 
+def swap_app_bundle(current: str | Path, new: str | Path, *,
+                    stamp: str | None = None) -> Path:
+    """Replace an .app directory, keeping the old bundle beside it.
+
+    The payload is copied next to the target first (staging lives on another
+    filesystem, and `os.replace` cannot cross devices), then the two renames
+    are atomic on the same volume.
+    """
+    current, new = Path(current), Path(new)
+    stamp = stamp or time.strftime("%Y%m%d-%H%M%S")
+    backup = current.with_name(f"{current.name}.prev-{stamp}")
+    staged = current.with_name(f".{current.name}.incoming-{stamp}")
+    if backup.exists():
+        shutil.rmtree(backup)
+    shutil.rmtree(staged, ignore_errors=True)
+    try:
+        shutil.copytree(new, staged, symlinks=True)
+        os.replace(current, backup)
+        os.replace(staged, current)
+    except OSError:
+        shutil.rmtree(staged, ignore_errors=True)
+        if not current.exists() and backup.exists():
+            with contextlib.suppress(OSError):
+                os.replace(backup, current)
+        raise
+    return backup
+
+
+def list_app_instances(bundle: str | Path) -> list[dict]:
+    """Processes running the Mach-O inside this bundle."""
+    inner = str(bundle_executable(bundle))
+    try:
+        completed = subprocess.run(["pgrep", "-f", inner], capture_output=True,
+                                   text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    found = []
+    for token in (completed.stdout or "").split():
+        if token.isdigit() and int(token) != os.getpid():
+            found.append({"pid": int(token), "exe": inner, "args": ""})
+    return found
+
+
+def stop_app_instances(instances: list[dict], *, timeout: float = 12.0) -> list[int]:
+    """Graceful quit, then SIGKILL for anything that ignored it."""
+    import signal
+    stopped: list[int] = []
+    for item in instances:
+        with contextlib.suppress(OSError):
+            os.kill(int(item["pid"]), signal.SIGTERM)
+            stopped.append(int(item["pid"]))
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not any(_pid_alive(str(item["pid"])) for item in instances):
+            break
+        time.sleep(0.2)
+    for item in instances:
+        if _pid_alive(str(item["pid"])):
+            with contextlib.suppress(OSError):
+                os.kill(int(item["pid"]), signal.SIGKILL)
+    return stopped
+
+
+def start_app(bundle: str | Path) -> subprocess.Popen | None:
+    """Launch through LaunchServices, the way the Dock would."""
+    try:
+        return subprocess.Popen(["open", "-a", str(bundle)],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, close_fds=True)
+    except OSError:
+        return None
+
+
+def wait_app_healthy(bundle: str | Path, previous: set[int], *,
+                     timeout: float = 60.0) -> bool:
+    """The update is only good if the new bundle actually runs."""
+    deadline = time.monotonic() + timeout
+    inner = bundle_executable(bundle)
+    while time.monotonic() < deadline:
+        running = {item["pid"] for item in list_app_instances(bundle)}
+        fresh = running - previous
+        if fresh and inner.is_file():
+            probe = subprocess.run([str(inner), "--version"], capture_output=True,
+                                   text=True, timeout=20)
+            if probe.returncode == 0:
+                return True
+        time.sleep(0.5)
+    return False
+
+
 def prune_backups(folder: str | Path, keep: int = BACKUP_KEEP) -> list[str]:
     removed: list[str] = []
-    backups = sorted(Path(folder).glob(f"{EXE_NAME}.prev-*"),
-                     key=lambda p: p.stat().st_mtime, reverse=True)
+    patterns = (f"{EXE_NAME}.prev-*", f"{APP_NAME}.prev-*")
+    backups = sorted(
+        [p for pattern in patterns for p in Path(folder).glob(pattern)],
+        key=lambda p: p.stat().st_mtime, reverse=True)
     for stale in backups[keep:]:
         with contextlib.suppress(OSError):
-            stale.unlink()
+            if stale.is_dir():
+                shutil.rmtree(stale, ignore_errors=True)
+            else:
+                stale.unlink()
             removed.append(str(stale))
     return removed
 
@@ -721,7 +957,7 @@ def run_update(*, repo: str = REPO_DEFAULT, api_base: str = API_DEFAULT,
     target = detect_target(explicit=exe)
     state = load_state(state_path)
     record = installed_record(state, target)
-    local_sha = sha256_file(target)
+    local_sha = target_digest(target)
     local_tag = record.get("tag")
     if not local_tag:
         local_tag = installed_version or _probe_version(target)
@@ -785,8 +1021,14 @@ def run_update(*, repo: str = REPO_DEFAULT, api_base: str = API_DEFAULT,
                      path=log_path, echo=echo)
             return result
 
-        instances = list_instances(exe=target) if sys.platform == "win32" else []
-        managed = managed_instances(instances)
+        if sys.platform == "win32":
+            instances = list_instances(exe=target)
+            managed = managed_instances(instances)
+        elif is_app_bundle(target):
+            instances = list_app_instances(target)
+            managed = instances
+        else:
+            instances, managed = [], []
         skipped = [i for i in instances if i not in managed]
         stamp = time.strftime("%Y%m%d-%H%M%S")
         result.update({"layout": payload.kind, "stopped": [i["pid"] for i in managed],
@@ -795,24 +1037,39 @@ def run_update(*, repo: str = REPO_DEFAULT, api_base: str = API_DEFAULT,
                  f"managed={len(managed)} left_running={len(skipped)}",
                  path=log_path, echo=echo)
         if managed:
-            stop_instances(managed)
+            if sys.platform == "win32":
+                stop_instances(managed)
+            else:
+                stop_app_instances(managed)
 
         backups: list[Path] = []
-        if payload.kind == "exe":
+        if payload.kind == "app":
+            backups.append(swap_app_bundle(target, payload.path, stamp=stamp))
+        elif payload.kind == "exe":
             backups.append(swap_exe(target, payload.path, stamp=stamp))
         else:
             backups.extend(swap_tree(target.parent, payload.path, stamp=stamp))
         result["backups"] = [str(b) for b in backups]
-        new_sha = sha256_file(target)
+        new_sha = target_digest(target)
 
         restarted: list[dict] = []
+        previous_pids: set[int] = set()
         if restart and managed:
-            for instance in managed:
-                process = start_instance(target, instance.get("args") or "")
-                restarted.append({"process": process, "args": instance.get("args") or "",
+            if is_app_bundle(target):
+                previous_pids = {int(item["pid"]) for item in managed}
+                restarted.append({"process": start_app(target), "args": "",
                                   "started": time.monotonic(), "grace": 5.0})
+            else:
+                for instance in managed:
+                    process = start_instance(target, instance.get("args") or "")
+                    restarted.append({"process": process,
+                                      "args": instance.get("args") or "",
+                                      "started": time.monotonic(), "grace": 5.0})
         result["restarted"] = [r["process"].pid for r in restarted if r["process"]]
-        healthy = wait_healthy(restarted, timeout=wait_s)
+        if is_app_bundle(target) and previous_pids:
+            healthy = wait_app_healthy(target, previous_pids, timeout=wait_s)
+        else:
+            healthy = wait_healthy(restarted, timeout=wait_s)
 
         if not healthy:
             log_line("unhealthy -> rollback", path=log_path, echo=echo)
@@ -821,8 +1078,11 @@ def run_update(*, repo: str = REPO_DEFAULT, api_base: str = API_DEFAULT,
                     with contextlib.suppress(OSError):
                         item["process"].kill()
             _restore(backups, target)
-            for instance in managed:
-                start_instance(target, instance.get("args") or "")
+            if is_app_bundle(target):
+                start_app(target)
+            else:
+                for instance in managed:
+                    start_instance(target, instance.get("args") or "")
             return {"ok": False, "error": "unhealthy-rollback", "exe": str(target),
                     "backups": [str(b) for b in backups],
                     "restored": local_tag or "unknown"}
@@ -854,12 +1114,18 @@ def _restore(backups: list[Path], target: Path) -> None:
                 os.replace(backup, target)
             continue
         original = backup.with_name(backup.name.rsplit(".prev-", 1)[0])
+        if backup.is_dir():
+            # A bundle: the failed install still occupies the path, and a
+            # directory cannot be replaced while it is non-empty.
+            shutil.rmtree(original, ignore_errors=True)
         with contextlib.suppress(OSError):
             os.replace(backup, original)
 
 
 def _probe_version(exe: Path) -> str | None:
     """Best effort: a windowed build prints nowhere, so None is normal."""
+    if is_app_bundle(exe):
+        exe = bundle_executable(exe)
     try:
         completed = subprocess.run([str(exe), "--version"], capture_output=True,
                                    text=True, encoding="utf-8", errors="replace",

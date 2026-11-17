@@ -58,6 +58,13 @@
 - 说明：Android「无线调试 → 使用二维码配对设备」是**电脑显示、手机扫**，载荷必须是
   `WIFI:T:ADB;S:<一次性服务名>;P:<6位码>;;`（见上一条 `flix adb pair-qr`）。
 
+### 新增（macOS 自动更新）
+- `flix update` 支持 macOS `.app`：能识别 bundle 为目标、按 CPU 架构选资产（Intel 取
+  `x86_64`、Apple Silicon 取 `arm64`，此前会误选另一架构）、整包原子替换并保留备份。
+- zip 解包时还原**可执行位**与**符号链接**：PyInstaller 的 `Contents/Frameworks/Python`
+  等链接若被解成普通文件，新装应用会在启动时报 "slice is not valid mach-o file"。
+- 更新前停止正在运行的实例，更新后 `open -a` 拉起并用 `--version` 验收，不健康则回滚。
+
 ### 新增（模型网关加固）
 - 并发上限：默认 4 个在途请求，超出直接 `429 overloaded_error`（带 `Retry-After: 2`），且不
   缓冲请求体，避免一个持有令牌的客户端打满本机 cc-switch；`flix models start --max-concurrent`
