@@ -2616,6 +2616,50 @@ class MainActivity : Activity() {
         settingsBody.addView(row)
     }
 
+    /** Shows the model gateway handed over by the desktop pairing QR. */
+    private fun showModelGatewayDialog() {
+        val base = prefs.getString("model_base", "").orEmpty()
+        val token = prefs.getString("model_token", "").orEmpty()
+        if (base.isEmpty()) {
+            AlertDialog.Builder(this, dlgTheme())
+                .setTitle("模型网关")
+                .setMessage("还没有配置。\n\n在电脑 RelayDesk 点「显示连接二维码…」，" +
+                    "再用本页「扫码添加设备」扫一次，即可同时完成配对与模型配置。")
+                .setPositiveButton("好", null)
+                .show()
+            return
+        }
+        val masked = if (token.length > 12) token.take(6) + "…" + token.takeLast(4) else token
+        AlertDialog.Builder(this, dlgTheme())
+            .setTitle("模型网关")
+            .setMessage("地址：$base\n令牌：$masked\n\n" +
+                "模型：glm-5.3-flash / step-5-preview / step-3.7-flash / deepseek-v4-flash")
+            .setPositiveButton("测试连通") { _, _ -> testModelGateway(base, token) }
+            .setNeutralButton("复制配置") { _, _ ->
+                copyText("Base URL: $base\nAPI Key: $token\nModel: glm-5.3-flash")
+            }
+            .setNegativeButton("关闭", null)
+            .show()
+    }
+
+    private fun testModelGateway(base: String, token: String) {
+        Thread {
+            val result = runCatching {
+                val conn = java.net.URL(base.trimEnd('/') + "/health")
+                    .openConnection() as java.net.HttpURLConnection
+                conn.connectTimeout = 4000
+                conn.readTimeout = 8000
+                conn.setRequestProperty("x-api-key", token)
+                val code = conn.responseCode
+                val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+                val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                conn.disconnect()
+                if (code in 200..299) "网关可达（HTTP $code）" else "网关返回 HTTP $code"
+            }.getOrElse { "连接失败：${it.message ?: it.javaClass.simpleName}" }
+            mainHandler.post { toast(result) }
+        }.start()
+    }
+
     /** Rebuilt on every open so port / IME / alias are never stale. */
     private fun refreshSettings() {
         settingsBody.removeAllViews()
@@ -2624,6 +2668,10 @@ class MainActivity : Activity() {
         addRow("名称", alias) { editAliasDialog() }
         addRow("设备号", fingerprint.take(8)) { copyText(fingerprint) }
         addRow("配对二维码", "查看 ›") { showQrDialog() }
+
+        addSection("模型网关")
+        val gatewayBase = prefs.getString("model_base", "").orEmpty()
+        addRow("网关地址", gatewayBase.ifEmpty { "未配置" }) { showModelGatewayDialog() }
 
         addSection("通道")
         addRow("后台接收", if (Runtime.serviceRunning) "运行中" else "未运行")

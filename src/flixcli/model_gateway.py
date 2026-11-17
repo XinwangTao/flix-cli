@@ -37,6 +37,8 @@ DEFAULT_PORT = 18993
 DEFAULT_UPSTREAM = "http://127.0.0.1:15721"
 DEFAULT_MAX_BODY_MB = 32
 MAX_BODY_MB_CAP = 128
+DEFAULT_MAX_CONCURRENT = 4
+MAX_CONCURRENT_CAP = 32
 BODY_READ_TIMEOUT = 30.0
 
 CONFIG_TEMPLATE = {
@@ -45,6 +47,9 @@ CONFIG_TEMPLATE = {
     "upstream": DEFAULT_UPSTREAM,
     "token": "",
     "max_body_mb": DEFAULT_MAX_BODY_MB,
+    # One shared token means one phone (or anyone who copied it) can saturate
+    # the local cc-switch; cap what a single client can occupy.
+    "max_concurrent": DEFAULT_MAX_CONCURRENT,
     # Off by default: a reachable gateway that can be pointed anywhere is an
     # SSRF pivot for anyone holding the token.
     "allow_remote_upstream": False,
@@ -114,6 +119,11 @@ def _merged(raw: dict | None) -> dict:
     except (TypeError, ValueError):
         mib = DEFAULT_MAX_BODY_MB
     cfg["max_body_mb"] = min(MAX_BODY_MB_CAP, max(1, mib))
+    try:
+        slots = int(cfg["max_concurrent"])
+    except (TypeError, ValueError):
+        slots = DEFAULT_MAX_CONCURRENT
+    cfg["max_concurrent"] = min(MAX_CONCURRENT_CAP, max(1, slots))
     cfg["allow_remote_upstream"] = bool(cfg["allow_remote_upstream"])
     return cfg
 
@@ -282,6 +292,14 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
         return _error(401, "authentication_error",
                       "invalid gateway token; set x-api-key to the token "
                       "shown in RelayDesk settings")
+    limit = int(cfg.get("max_concurrent") or DEFAULT_MAX_CONCURRENT)
+    if stats["active"] >= limit:
+        # Checked before reading the body: a flood must not cost us a 32 MB
+        # buffer per request. 429 keeps the Anthropic error shape.
+        stats["rejected"] += 1
+        return _error(429, "overloaded_error",
+                      f"gateway busy ({stats['active']} in flight, limit {limit}); "
+                      "retry shortly")
     try:
         body = await asyncio.wait_for(request.read(), BODY_READ_TIMEOUT)
     except asyncio.TimeoutError:

@@ -88,6 +88,56 @@ class ModelGatewayTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_concurrency_limit_answers_429(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as tmp:
+                gate = asyncio.Event()
+
+                async def slow(request):
+                    await gate.wait()
+                    return web.json_response({"type": "message"})
+
+                upstream_app = web.Application()
+                upstream_app.router.add_post("/v1/messages", slow)
+                upstream = TestServer(upstream_app)
+                await upstream.start_server()
+                try:
+                    cfg = self._cfg(tmp, str(upstream.make_url("")).rstrip("/"))
+                    cfg["max_concurrent"] = 1
+                    client = TestClient(TestServer(make_model_app(None, cfg)))
+                    await client.start_server()
+                    try:
+                        headers = {"x-api-key": cfg["token"]}
+                        first = asyncio.create_task(client.post(
+                            "/v1/messages", json={"model": "x"}, headers=headers))
+                        await asyncio.sleep(0.2)  # let it reach the upstream
+                        second = await client.post(
+                            "/v1/messages", json={"model": "x"}, headers=headers)
+                        self.assertEqual(second.status, 429)
+                        payload = await second.json()
+                        self.assertEqual(payload["error"]["type"],
+                                         "overloaded_error")
+                        gate.set()
+                        self.assertEqual((await first).status, 200)
+                    finally:
+                        await client.close()
+                finally:
+                    await upstream.close()
+
+        asyncio.run(run())
+
+    def test_concurrency_default_is_clamped(self):
+        self.assertEqual(CONFIG_TEMPLATE["max_concurrent"], 4)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "db.sqlite")
+            try:
+                cfg = save_config(store, max_concurrent=999)
+                self.assertEqual(cfg["max_concurrent"], 32)
+                cfg = save_config(store, max_concurrent=0)
+                self.assertEqual(cfg["max_concurrent"], 1)
+            finally:
+                store.close()
+
     def test_forwards_body_and_returns_upstream_json(self):
         async def run():
             with tempfile.TemporaryDirectory() as tmp:

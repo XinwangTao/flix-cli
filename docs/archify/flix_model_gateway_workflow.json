@@ -108,6 +108,14 @@
       "type": "frontend",
       "label": "开启共享",
       "sublabel": "GUI 开关 / CLI"
+    },
+    {
+      "id": "busy",
+      "lane": "exceptions",
+      "col": 3,
+      "type": "messagebus",
+      "label": "429 并发上限",
+      "sublabel": "在途请求已达上限"
     }
   ],
   "edges": [
@@ -160,6 +168,13 @@
       "label": "连接失败",
       "variant": "security",
       "role": "error"
+    },
+    {
+      "from": "auth",
+      "to": "busy",
+      "label": "并发已满",
+      "variant": "security",
+      "role": "error"
     }
   ],
   "cards": [
@@ -187,7 +202,8 @@
       "items": [
         "令牌不符直接 401，不打到上游",
         "上游不可达返回 502 并记日志",
-        "GUI 显示运行状态与当前连接数"
+        "GUI 显示运行状态与当前连接数",
+        "并发超过 4 个在途请求直接 429（不缓冲请求体）"
       ]
     }
   ]
