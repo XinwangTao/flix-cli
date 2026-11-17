@@ -810,28 +810,38 @@ def swap_app_bundle(current: str | Path, new: str | Path, *,
 
 
 def list_app_instances(bundle: str | Path) -> list[dict]:
-    """Processes running the Mach-O inside this bundle."""
+    """Processes whose argv[0] is exactly this bundle's executable.
+
+    Substring matching (`pgrep -f`) also catches shells and editors that
+    merely mention the path; the updater stops what it returns, so exactness
+    matters more than convenience.
+    """
     inner = str(bundle_executable(bundle))
     try:
-        completed = subprocess.run(["pgrep", "-f", inner], capture_output=True,
-                                   text=True, timeout=5)
+        completed = subprocess.run(["ps", "-axo", "pid=,command="],
+                                   capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
         return []
     found = []
-    for token in (completed.stdout or "").split():
-        if token.isdigit() and int(token) != os.getpid():
-            found.append({"pid": int(token), "exe": inner, "args": ""})
+    for line in (completed.stdout or "").splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        pid = int(parts[0])
+        command = parts[1]
+        argv0, _, rest = command.partition(" ")
+        if argv0 != inner or pid == os.getpid():
+            continue
+        found.append({"pid": pid, "exe": inner, "args": rest.strip()})
     return found
 
 
-def stop_app_instances(instances: list[dict], *, timeout: float = 12.0) -> list[int]:
-    """Graceful quit, then SIGKILL for anything that ignored it."""
+def stop_app_instances(instances: list[dict], *, timeout: float = 12.0) -> list[dict]:
+    """Graceful quit, then SIGKILL; returns anything that survived."""
     import signal
-    stopped: list[int] = []
     for item in instances:
         with contextlib.suppress(OSError):
             os.kill(int(item["pid"]), signal.SIGTERM)
-            stopped.append(int(item["pid"]))
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if not any(_pid_alive(str(item["pid"])) for item in instances):
@@ -841,7 +851,8 @@ def stop_app_instances(instances: list[dict], *, timeout: float = 12.0) -> list[
         if _pid_alive(str(item["pid"])):
             with contextlib.suppress(OSError):
                 os.kill(int(item["pid"]), signal.SIGKILL)
-    return stopped
+    time.sleep(0.3)
+    return [item for item in instances if _pid_alive(str(item["pid"]))]
 
 
 def start_app(bundle: str | Path) -> subprocess.Popen | None:
@@ -854,19 +865,27 @@ def start_app(bundle: str | Path) -> subprocess.Popen | None:
         return None
 
 
-def wait_app_healthy(bundle: str | Path, previous: set[int], *,
-                     timeout: float = 60.0) -> bool:
-    """The update is only good if the new bundle actually runs."""
-    deadline = time.monotonic() + timeout
+def wait_app_healthy(bundle: str | Path, previous: set[int] | None = None, *,
+                     timeout: float = 60.0, expected: str | None = None) -> bool:
+    """The newly installed build must execute.
+
+    Waiting for a *new GUI process* is the wrong gate: `open -a` on a bundle
+    whose old instance still lives merely activates that instance, so a good
+    swap looked like a failure and was rolled back (2026-11-17). Executing the
+    Mach-O is the fact the update actually has to guarantee.
+    """
     inner = bundle_executable(bundle)
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        running = {item["pid"] for item in list_app_instances(bundle)}
-        fresh = running - previous
-        if fresh and inner.is_file():
-            probe = subprocess.run([str(inner), "--version"], capture_output=True,
-                                   text=True, timeout=20)
-            if probe.returncode == 0:
-                return True
+        if inner.is_file():
+            try:
+                probe = subprocess.run([str(inner), "--version"],
+                                       capture_output=True, text=True, timeout=20)
+                text = (probe.stdout or "") + (probe.stderr or "")
+                if probe.returncode == 0 and (not expected or expected in text):
+                    return True
+            except (OSError, subprocess.SubprocessError):
+                pass
         time.sleep(0.5)
     return False
 
@@ -1040,7 +1059,15 @@ def run_update(*, repo: str = REPO_DEFAULT, api_base: str = API_DEFAULT,
             if sys.platform == "win32":
                 stop_instances(managed)
             else:
-                stop_app_instances(managed)
+                survivors = stop_app_instances(managed)
+                if survivors:
+                    # Swapping under a live instance is how the 2026-11-17
+                    # rollback loop started; refuse instead.
+                    raise UpdateError(
+                        "instances-running",
+                        "仍在运行的实例未退出: "
+                        + ", ".join(str(item["pid"]) for item in survivors),
+                        EXIT_INSTALL)
 
         backups: list[Path] = []
         if payload.kind == "app":
@@ -1053,10 +1080,8 @@ def run_update(*, repo: str = REPO_DEFAULT, api_base: str = API_DEFAULT,
         new_sha = target_digest(target)
 
         restarted: list[dict] = []
-        previous_pids: set[int] = set()
         if restart and managed:
             if is_app_bundle(target):
-                previous_pids = {int(item["pid"]) for item in managed}
                 restarted.append({"process": start_app(target), "args": "",
                                   "started": time.monotonic(), "grace": 5.0})
             else:
@@ -1066,8 +1091,9 @@ def run_update(*, repo: str = REPO_DEFAULT, api_base: str = API_DEFAULT,
                                       "args": instance.get("args") or "",
                                       "started": time.monotonic(), "grace": 5.0})
         result["restarted"] = [r["process"].pid for r in restarted if r["process"]]
-        if is_app_bundle(target) and previous_pids:
-            healthy = wait_app_healthy(target, previous_pids, timeout=wait_s)
+        if is_app_bundle(target):
+            healthy = wait_app_healthy(target, timeout=wait_s,
+                                       expected=release.version)
         else:
             healthy = wait_healthy(restarted, timeout=wait_s)
 
