@@ -1206,7 +1206,7 @@ class MainWindow(QMainWindow):
         refresh.setIconSize(QSize(15, 15))
         refresh.setIcon(icon("refresh", PALETTES[self.theme]["icon"], 15))
         refresh.setCursor(Qt.PointingHandCursor)
-        refresh.clicked.connect(lambda: (self.refresh(), toast_hint(self, "已刷新")))
+        refresh.clicked.connect(self.refresh_and_scan)
         add = QPushButton()
         add.setObjectName("roundBtn")
         add.setToolTip("新建群组 / 添加设备")
@@ -1295,7 +1295,7 @@ class MainWindow(QMainWindow):
         self.start_daemon_button = QPushButton("启动本机服务")
         self.start_daemon_button.setObjectName("primaryBtn")
         self.start_daemon_button.setCursor(Qt.PointingHandCursor)
-        self.start_daemon_button.clicked.connect(self.start_local_daemon)
+        self.start_daemon_button.clicked.connect(lambda: self.start_local_daemon())
         retry = QPushButton("重试连接")
         retry.setObjectName("secondaryButton")
         retry.setCursor(Qt.PointingHandCursor)
@@ -1311,19 +1311,30 @@ class MainWindow(QMainWindow):
         box.addStretch()
         return page
 
-    def start_local_daemon(self):
+    def start_local_daemon(self, force: bool = False):
         """Start the background service, preferring the official port 8891.
 
         The official Flix app sends to the fixed discovery/channel port 8891;
         an instance parked on 18991 can be discovered but cannot receive its
         messages. Fall back to 18991 only when 8891 is already owned.
         """
+        force = force or getattr(self, "_force_start", False)
+        self._force_start = False
         import subprocess
+        import time
         from .config import APP_DIR
-        if not self._stop_stale_daemons():
-            # A daemon from this exact build is already running; just attach.
-            self.retry_connection()
-            return
+        if not force:
+            # A daemon launched moments ago may still be binding its API port.
+            # Spawning a second one here used to park it on 18991 permanently.
+            for _ in range(30):
+                if LocalApi.discover(self.api_port) is not None:
+                    self.retry_connection()
+                    return
+                time.sleep(0.1)
+            if not self._stop_stale_daemons():
+                # A daemon from this exact build is already running; attach.
+                self.retry_connection()
+                return
         log_dir = APP_DIR
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = open(log_dir / "flixd-gui-started.log", "ab")
@@ -1451,6 +1462,31 @@ class MainWindow(QMainWindow):
         finally:
             probe.close()
 
+    def _heal_device_port(self, self_port: int) -> bool:
+        """Move a daemon parked off 8891 back to the official port once."""
+        # Only the known fallback port is healed. A user who chose a custom
+        # --device-port intentionally must not be moved, and test payloads
+        # (e.g. an API port in self.port) must not trigger a restart.
+        if (self_port != 18991
+                or getattr(self, "_port_heal_attempted", False)
+                or not self._port_free(8891)):
+            return False
+        self._port_heal_attempted = True
+        self.statusBar().showMessage(
+            "8891 已空闲，正在重启本机服务以恢复官方 Flix 互通…", 8000)
+        stale_api = int(self.api_port) if self.api_port else 0
+        if stale_api:
+            self._terminate_api_daemon(stale_api)
+        import time
+        for _ in range(40):
+            if self._port_free(8891) and (not stale_api
+                                          or self._port_free(stale_api)):
+                break
+            time.sleep(0.1)
+        self._force_start = True
+        self.start_local_daemon()
+        return True
+
     def retry_connection(self):
         found = LocalApi.discover(self.api_port)
         if found is None:
@@ -1467,26 +1503,21 @@ class MainWindow(QMainWindow):
         device_port = 0
         if isinstance(overview, dict):
             device_port = int((overview.get("self") or {}).get("port") or 0)
-        if (device_port and device_port != 8891 and self._port_free(8891)
-                and not getattr(self, "_port_heal_attempted", False)):
-            self._port_heal_attempted = True
-            stale_api = int(found.base.rsplit(":", 1)[-1])
-            self.statusBar().showMessage(
-                "8891 已空闲，正在重启本机服务以恢复官方 Flix 互通…", 8000)
-            self._terminate_api_daemon(stale_api)
-            import time
-            for _ in range(40):
-                if self._port_free(8891):
-                    break
-                time.sleep(0.1)
-            self.start_local_daemon()
+        if self._heal_device_port(device_port):
             return
         self.api = found
         self.api_port = found.base.rsplit(":", 1)[-1]
         self.api_port = int(self.api_port)
         self.offline_mode = False
         self.start_daemon_button.setEnabled(True)
-        self.statusBar().showMessage(f"已连接本机服务 :{self.api_port}")
+        self_port = 0
+        if isinstance(overview, dict):
+            self_port = int((overview.get("self") or {}).get("port") or 0)
+        if self_port and self_port != 8891:
+            self.statusBar().showMessage(
+                f"设备端口 {self_port}：官方 Flix 互通不可用（8891 被占用）", 10000)
+        else:
+            self.statusBar().showMessage(f"已连接本机服务 :{self.api_port}")
         self.refresh()
 
     def _build_header(self):
@@ -2635,6 +2666,28 @@ class MainWindow(QMainWindow):
 
     # ---------- data refresh ----------
 
+    def refresh_and_scan(self) -> None:
+        """Refresh locally, then ask the daemon for one LAN sweep."""
+        self.refresh()
+        if getattr(self, "api", None) is None:
+            return
+        worker = getattr(self, "scan_worker", None)
+        if worker is not None and worker.isRunning():
+            return
+        self.scan_worker = ApiThread(lambda: self.api.post("/api/discover/scan", {}))
+        self.scan_worker.result.connect(self._scan_done)
+        self.scan_worker.failed.connect(
+            lambda msg: self.statusBar().showMessage(f"扫描失败：{msg}", 5000))
+        self.scan_worker.start()
+
+    def _scan_done(self, result) -> None:
+        found = result.get("found") if isinstance(result, dict) else None
+        if found:
+            self.statusBar().showMessage(f"扫描发现 {len(found)} 台设备", 5000)
+        else:
+            self.statusBar().showMessage("扫描完成，未发现新设备", 4000)
+        self.refresh()
+
     def refresh(self):
         self._sync_contrast_state()
         if getattr(self, "offline_mode", False):
@@ -2649,6 +2702,9 @@ class MainWindow(QMainWindow):
     def apply_overview(self, payload: dict):
         self.payload = payload
         self.self_id = (payload.get("self") or {}).get("id", "")
+        self_port = int((payload.get("self") or {}).get("port") or 0)
+        if self._heal_device_port(self_port):
+            return
         self.maybe_prompt_pair_requests(payload.get("pendingPairs") or [])
         self.notify_new_bubbles(payload.get("bubbles") or [])
         self.connection_dot.setProperty("online", True)
@@ -2666,6 +2722,9 @@ class MainWindow(QMainWindow):
             f"设备通道端口：{(payload.get('self') or {}).get('port', '未设置')}\n"
             f"下载目录：{(payload.get('settings') or {}).get('saveDir') or '系统 Downloads'}\n"
             f"活动媒体会话：{len((payload.get('media') or {}).get('sessions', []))}")
+        if (payload.get("self") or {}).get("port") not in (None, 8891):
+            self.settings_text.setText(
+                self.settings_text.text() + "\n⚠ 未占用 8891，官方 Flix 互通不可用")
         self.populate_sidebar()
         self.populate_transfers()
         self.populate_adb()
@@ -2695,8 +2754,10 @@ class MainWindow(QMainWindow):
         ip = request.get("ip") or "未知地址"
         box = QMessageBox(self)
         box.setWindowTitle("配对请求")
-        box.setText(f"「{alias}」（{ip}）请求与本机配对。\n"
-                    f"对方未携带本机配对码，是否允许？")
+        code = request.get("code")
+        detail = (f"对方验证码：{code}\n请与手机屏幕上的配对码核对后允许。"
+                  if code else "对方未携带验证码，是否允许？")
+        box.setText(f"「{alias}」（{ip}）请求与本机配对。\n{detail}")
         allow = box.addButton("允许", QMessageBox.AcceptRole)
         box.addButton("拒绝", QMessageBox.RejectRole)
         box.setModal(False)

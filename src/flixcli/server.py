@@ -577,7 +577,8 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
                 device_id = str(device_id or "")
                 if not device_id or not pair_gate.open(
                         device_id, {"ip": remote or "", "port": device_port,
-                                    "reason": "code-mismatch"}):
+                                    "reason": "code-mismatch",
+                                    "code": supplied}):
                     return web.Response(text="{301: pair Device Null}")
                 approved = await pair_gate.wait(device_id, pair_gate.fast_timeout)
                 if approved is True:

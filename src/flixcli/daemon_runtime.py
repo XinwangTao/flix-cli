@@ -253,13 +253,21 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
                                                   signal_hub=hub,
                                                   media_manager=media_manager,
                                                   media_runtime=media_runtime)
+    async def scan_now() -> list[dict]:
+        """On-demand LAN sweep; shares the same identity check as discovery."""
+        from .discovery import scan_lan
+        return await scan_lan(
+            on_device, ident, device_port,
+            ports=tuple(dict.fromkeys((DEVICE_PORT, 18991, device_port))))
+
     api_runner, api_publish = await serve_desktop_api(store, ident, send_text,
                                                       api_port,
                                                       channel_port=device_port,
                                                       webrtc_hub=hub,
                                                       adb_client=adb_client,
                                                       media_manager=media_manager,
-                                                      media_runtime=media_runtime)
+                                                      media_runtime=media_runtime,
+                                                      scan_fn=scan_now)
 
     web_runner = None
     if web_port:
@@ -363,50 +371,28 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
     tasks.append(asyncio.create_task(announce_loop()))
     print("[flixd] periodic announce every 30s", file=sys.stderr, flush=True)
 
-    async def scan_loop() -> None:
-        # Passive discovery has two blind spots: another process may own UDP
-        # 8891, and official clients only announce at startup. A bounded TCP
-        # sweep (ping_v2 on the channel ports) covers both without touching
-        # the peer's configuration. First pass runs right after startup so a
-        # freshly opened desktop is visible within the 10 s acceptance window.
-        from .discovery import scan_lan
-        import random
-        # Active discovery is a fallback, not a heartbeat. Sweep quickly at
-        # startup, then back off geometrically; a hit means peers are healthy
-        # and another sweep is unnecessary for a long while.
-        delay = 5.0
-        # Keep the bound cap at 5 min: phones change address/port when the
-        # official app and RelayDesk swap 8891, and a 15-min blind window made
-        # a reachable peer look offline. The sweep itself is cheap.
-        cap = 300.0
+    async def startup_scan() -> None:
+        # Official clients announce only at startup, so a peer that booted
+        # before us is invisible until a sweep. One sweep is enough; later
+        # peers announce, and the GUI can ask for another via the API.
         try:
             await asyncio.sleep(2)
-            while True:
-                try:
-                    found = await scan_lan(
-                        on_device, ident, device_port,
-                        ports=tuple(dict.fromkeys(
-                            (DEVICE_PORT, 18991, device_port))))
-                    if found:
-                        delay = 120.0 if not bound else cap
-                        names = ", ".join(
-                            f"{d.get('alias') or d['fingerprint'][:8]}"
-                            f"@{d.get('ip')}:{d.get('port')}" for d in found)
-                        print(f"[scan] discovered {names}", file=sys.stderr,
-                              flush=True)
-                    else:
-                        delay = min(delay * 2, cap)
-                except Exception as exc:  # one bad sweep must not kill the loop
-                    print(f"[scan] {exc}", file=sys.stderr, flush=True)
-                    delay = min(delay * 2, cap)
-                # Jitter keeps several desktops from sweeping in lockstep.
-                await asyncio.sleep(delay * random.uniform(0.9, 1.1))
-        except asyncio.CancelledError:
-            pass
+            found = await scan_now()
+            if found:
+                names = ", ".join(
+                    f"{d.get('alias') or d['fingerprint'][:8]}"
+                    f"@{d.get('ip')}:{d.get('port')}" for d in found)
+                print(f"[scan] discovered {names}", file=sys.stderr, flush=True)
+        except Exception as exc:
+            print(f"[scan] {exc}", file=sys.stderr, flush=True)
 
     if announce:
-        tasks.append(asyncio.create_task(scan_loop()))
-        print("[flixd] active LAN scan with backoff (first sweep after 2s)",
+        # One sweep repairs peers that were already running before us (the
+        # official client announces only at startup). New peers announce, and
+        # the GUI can request another sweep via POST /api/discover/scan, so a
+        # permanent scheduler would only add noise and stale-window bugs.
+        tasks.append(asyncio.create_task(startup_scan()))
+        print("[flixd] startup LAN scan; on-demand via /api/discover/scan",
               file=sys.stderr, flush=True)
 
     async def agent_outbox_loop() -> None:

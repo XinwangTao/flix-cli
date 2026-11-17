@@ -99,8 +99,13 @@ class PendingPairApiTests(unittest.IsolatedAsyncioTestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.store = Store(Path(self._tmp.name) / "db.sqlite")
         self.ident = {"fingerprint": "me-fp", "alias": "me"}
+
+        async def fake_scan():
+            return [{"fingerprint": "scan-fp", "alias": "SCAN",
+                     "ip": "192.0.2.7", "port": 8891}]
+
         app, _publish = desktop_api.make_desktop_app(
-            self.store, self.ident, lambda *args: None)
+            self.store, self.ident, lambda *args: None, scan_fn=fake_scan)
         self.client = TestClient(TestServer(app))
         await self.client.start_server()
 
@@ -124,6 +129,13 @@ class PendingPairApiTests(unittest.IsolatedAsyncioTestCase):
             "/api/pair/approve", json={"fingerprint": "pending-fp", "accept": True})
         self.assertEqual(resp.status, 200)
         self.assertIs(await task, True)
+
+    async def test_scan_endpoint_returns_found(self):
+        resp = await self.client.post("/api/discover/scan", json={})
+        body = await resp.json()
+        self.assertEqual(resp.status, 200)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["found"][0]["fingerprint"], "scan-fp")
 
     async def test_approve_unknown_is_404(self):
         resp = await self.client.post(
@@ -228,6 +240,7 @@ class LatePairApprovalTests(unittest.IsolatedAsyncioTestCase):
             resp = await self.client.post("/intent", json=body)
             self.assertIn("301", await resp.text())
             self.assertTrue(self.gate.is_pending("late-fp"))
+            self.assertEqual(self.gate.pending()[0].get("code"), bad)
             self.assertTrue(self.gate.approve("late-fp", True))
             for _ in range(100):
                 await asyncio.sleep(0.01)
