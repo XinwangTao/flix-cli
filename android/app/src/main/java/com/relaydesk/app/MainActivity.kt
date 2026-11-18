@@ -222,6 +222,9 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         UpdateManager.resumePendingInstall(this)
+        // Returning to the foreground is the only reliable moment to heal a
+        // service the system stopped while the process was frozen.
+        if (!Runtime.serviceRunning) runCatching { RelayService.start(this) }
     }
 
     override fun onStop() {

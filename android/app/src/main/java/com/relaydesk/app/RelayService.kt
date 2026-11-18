@@ -57,7 +57,7 @@ class RelayService : Service() {
         createChannels()
         // Must be foreground within 5s of startForegroundService.
         startForeground(NOTIF_SERVICE, serviceNotification("正在启动…"),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
         Runtime.service = this
 
         val wifi = applicationContext.getSystemService(WifiManager::class.java)
@@ -85,6 +85,10 @@ class RelayService : Service() {
         worker?.scheduleWithFixedDelay({ probeDevices() }, 10, 60, TimeUnit.SECONDS)
         worker?.scheduleWithFixedDelay({ discovery?.announce(times = 2) },
             30, 30, TimeUnit.SECONDS)
+        // The listening socket can survive while its accept loop is dead (seen
+        // after the process was frozen and thawed): the port shows LISTEN but
+        // every connection times out, so peers silently stop discovering us.
+        worker?.scheduleWithFixedDelay({ verifyChannelAlive() }, 15, 30, TimeUnit.SECONDS)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -145,6 +149,37 @@ class RelayService : Service() {
         } else {
             discovery = d
             d.announce()
+        }
+    }
+
+    /**
+     * Restart the channel when its accept loop is dead but the socket is not.
+     *
+     * After the process is frozen and thawed (screen off, app swiped away),
+     * the port keeps showing LISTEN while every connect times out — peers then
+     * silently stop discovering this device until the app is restarted.
+     */
+    private fun verifyChannelAlive() {
+        val port = Runtime.servicePort
+        val alive = port > 0 && runCatching {
+            java.net.Socket().use { sock ->
+                sock.connect(java.net.InetSocketAddress("127.0.0.1", port), 1500)
+            }
+            true
+        }.getOrDefault(false)
+        if (alive) return
+        Runtime.emit("error", "设备通道失联，正在重启…")
+        runCatching { discovery?.stop() }
+        discovery = null
+        runCatching { server?.stop() }
+        server = null
+        val newPort = startChannel()
+        Runtime.servicePort = newPort ?: 0
+        if (newPort == null) {
+            updateServiceNotification("设备通道不可用")
+        } else {
+            startDiscovery(newPort)
+            updateServiceNotification("设备通道 :$newPort · 后台接收已开启")
         }
     }
 
