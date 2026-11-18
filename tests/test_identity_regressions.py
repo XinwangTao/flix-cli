@@ -3,13 +3,19 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from flixcli import gui
 from flixcli.config import Store
 from flixcli.routing import resolve_target
+
+try:  # the unit-test job does not install the GUI extra
+    from flixcli import gui
+except Exception:  # noqa: BLE001
+    gui = None
 
 
 class BuildIdentityTests(unittest.TestCase):
     def test_app_build_is_a_value(self):
+        if gui is None:
+            self.skipTest("PySide6 not installed")
         self.assertIsInstance(gui.APP_BUILD, str)
         self.assertNotEqual(gui.APP_BUILD, "")
 
