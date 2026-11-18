@@ -44,7 +44,11 @@ from . import is_port_text
 from .icons import icon, logo_icon, logo_pixmap
 from .presence import is_online
 from . import __version__ as APP_VERSION
-from . import build_id as APP_BUILD
+from . import build_id as _build_id
+# Compare values, not the function object: importing `build_id`
+# directly made every build check false, so the window never
+# accepted its own daemon and sat on the offline page.
+APP_BUILD = _build_id()
 
 
 if sys.platform == "darwin":
