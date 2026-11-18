@@ -102,6 +102,13 @@ class MainActivity : Activity() {
     private var groupDialog: AlertDialog? = null
     private var groupDialogGid: String? = null
     private var pairDialog: AlertDialog? = null
+    private var updatePromptShowing = false
+    private val updateReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context?,
+                               intent: android.content.Intent?) {
+            promptUpdateIfReady()
+        }
+    }
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
@@ -183,16 +190,26 @@ class MainActivity : Activity() {
         buildUi()
         restoreAfterRecreate()
         RelayService.start(this)
+        UpdateManager.maybeCheck(this)
         if (android.os.Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 7)
         }
         handleDeepLink(intent)
+        promptUpdateIfReady()
     }
 
     override fun onStart() {
         super.onStart()
+        val updateFilter = android.content.IntentFilter(UpdateManager.ACTION_UPDATE_READY)
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(updateReceiver, updateFilter,
+                android.content.Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(updateReceiver, updateFilter)
+        }
         Runtime.addListener(listener)
         Runtime.foregroundPeer = currentPeer?.optString("fingerprint")
         Runtime.foregroundGroup = currentGroup?.optString("id")
@@ -202,7 +219,16 @@ class MainActivity : Activity() {
         mainHandler.postDelayed({ refreshServiceState() }, 600)
     }
 
+    override fun onResume() {
+        super.onResume()
+        UpdateManager.resumePendingInstall(this)
+        // Returning to the foreground is the only reliable moment to heal a
+        // service the system stopped while the process was frozen.
+        if (!Runtime.serviceRunning) runCatching { RelayService.start(this) }
+    }
+
     override fun onStop() {
+        runCatching { unregisterReceiver(updateReceiver) }
         Runtime.removeListener(listener)
         Runtime.foregroundPeer = null
         Runtime.foregroundGroup = null
@@ -220,6 +246,15 @@ class MainActivity : Activity() {
     /** Notification taps arrive as `peer` (or `group`) extras and open that chat. */
     private fun handleDeepLink(intent: Intent?) {
         if (intent == null) return
+        if (intent.getBooleanExtra("install_update", false)) {
+            intent.removeExtra("install_update")
+            UpdateManager.installDownloaded(this)
+            return
+        }
+        if (intent.getBooleanExtra("check_update", false)) {
+            intent.removeExtra("check_update")
+            UpdateManager.maybeCheck(this, force = true)
+        }
         val peer = intent.getStringExtra("peer")?.takeIf { it.isNotEmpty() }
         val group = intent.getStringExtra("group")?.takeIf { it.isNotEmpty() }
         if (peer == null && group == null) return
@@ -2744,8 +2779,47 @@ class MainActivity : Activity() {
         addRow("主题", if (lightTheme) "浅色" else "深色") { switchTheme(!lightTheme) }
 
         addSection("关于")
+        addRow("检查更新", "检查 ›") {
+            toast("正在检查更新…")
+            UpdateManager.maybeCheck(this, force = true) { status ->
+                toast(updateStatusText(status))
+            }
+        }
         addRow("版本", versionName())
         addRow("连接方式", "局域网直连 · 无需账号")
+    }
+
+    private fun promptUpdateIfReady() {
+        if (updatePromptShowing) return
+        val tag = UpdateManager.downloadedTag(this) ?: return
+        updatePromptShowing = true
+        AlertDialog.Builder(this, dlgTheme())
+            .setTitle("发现新版本 v${tag.removePrefix("v")}")
+            .setMessage("安装包已下载并通过 sha256 校验。安装需要系统确认，" +
+                "聊天与配对数据会保留。")
+            .setPositiveButton("安装") { _, _ ->
+                updatePromptShowing = false
+                UpdateManager.installDownloaded(this)
+            }
+            .setNegativeButton("稍后") { _, _ -> updatePromptShowing = false }
+            .setOnDismissListener { updatePromptShowing = false }
+            .show()
+    }
+
+    private fun updateStatusText(status: String): String = when {
+        status == "throttled" -> "刚刚已检查过，请稍后再试"
+        status.startsWith("latest:") ->
+            "已是最新版本 v${status.substringAfter(':')}"
+        status.startsWith("downloaded:") ->
+            "新版本 v${status.substringAfter(':')} 已下载，点按安装"
+        status.startsWith("available:") ->
+            "发现新版本 v${status.substringAfter(':')}，连接 Wi-Fi 后自动下载"
+        status.startsWith("pending:") ->
+            "新版本 v${status.substringAfter(':')} 等待下载（请连 Wi-Fi）"
+        status == "error:github" -> "检查失败：无法连接 GitHub"
+        status == "error:sha" -> "检查失败：缺少 sha256 校验文件"
+        status == "error:download" -> "下载失败，请稍后重试"
+        else -> "检查失败：$status"
     }
 
     private fun editAliasDialog() {
