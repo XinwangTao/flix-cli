@@ -25,6 +25,7 @@ import platform as host
 import re
 import shutil
 import socket
+import ssl
 import stat
 import subprocess
 import sys
@@ -43,6 +44,29 @@ API_DEFAULT = "https://api.github.com"
 # Downloads from github.com are usable here (~1 MB/s) but stall on some
 # networks; these prefixes are tried only after a direct attempt fails.
 MIRRORS = ("https://gh-proxy.com/", "https://ghfast.top/")
+
+def _ssl_context() -> ssl.SSLContext:
+    """A context that works inside the frozen app.
+
+    PyInstaller's Python may not find the system CA bundle, which surfaced as
+    CERTIFICATE_VERIFY_FAILED while the venv/system Python worked. Load
+    certifi when bundled, then the macOS/Linux system bundle explicitly.
+    """
+    ctx = ssl.create_default_context()
+    try:
+        import certifi
+        ctx.load_verify_locations(certifi.where())
+    except Exception:
+        for path in ("/etc/ssl/cert.pem", "/usr/local/etc/openssl/cert.pem"):
+            try:
+                ctx.load_verify_locations(path)
+                break
+            except Exception:
+                continue
+    return ctx
+
+
+SSL_CONTEXT = _ssl_context()
 
 EXE_NAME = "RelayDesk.exe"
 # macOS ships a bundle, not a single binary: the updater's "target" is the
@@ -202,7 +226,7 @@ def _open(url: str, *, token: str | None = None, timeout: float = 20.0):
         "User-Agent": f"flixcli-autoupdate/{sys.platform}",
         **({"Authorization": f"Bearer {token}"} if token else {}),
     })
-    return urllib.request.urlopen(request, timeout=timeout)
+    return urllib.request.urlopen(request, timeout=timeout, context=SSL_CONTEXT)
 
 
 def fetch_releases(repo: str = REPO_DEFAULT, *, api_base: str = API_DEFAULT,
@@ -295,7 +319,7 @@ def _download_once(url: str, dest: Path, offset: int, *, timeout: float) -> int:
     if offset:
         headers["Range"] = f"bytes={offset}-"
     request = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with urllib.request.urlopen(request, timeout=timeout, context=SSL_CONTEXT) as response:
         mode = "ab"
         if offset and response.status != 206:
             mode, offset = "wb", 0
