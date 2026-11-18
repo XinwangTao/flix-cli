@@ -161,11 +161,20 @@ class RelayService : Service() {
      */
     private fun verifyChannelAlive() {
         val port = Runtime.servicePort
+        // A bare TCP connect is not a health check: with a dead accept loop the
+        // kernel still completes the handshake, so the probe would pass while
+        // every real peer times out. The request has to reach the handler.
         val alive = port > 0 && runCatching {
             java.net.Socket().use { sock ->
                 sock.connect(java.net.InetSocketAddress("127.0.0.1", port), 1500)
+                sock.soTimeout = 2000
+                val out = sock.getOutputStream()
+                out.write("GET /healthz-probe HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n"
+                    .toByteArray())
+                out.flush()
+                val reply = sock.getInputStream().read()
+                reply >= 0
             }
-            true
         }.getOrDefault(false)
         if (alive) return
         Runtime.emit("error", "设备通道失联，正在重启…")
