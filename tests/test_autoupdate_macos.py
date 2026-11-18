@@ -180,3 +180,39 @@ class BundleSwapTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UpdateLockOwnerTests(unittest.TestCase):
+    def _lock(self, tmp: str, pid: int) -> Path:
+        lock = Path(tmp) / "update.lock"
+        lock.write_text(f"{pid} 2026-01-01T00:00:00\n", encoding="utf-8")
+        return lock
+
+    def test_dead_owner_pid_is_reclaimed(self):
+        import os
+        import subprocess
+        import sys
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        dead = proc.pid
+        with tempfile.TemporaryDirectory() as tmp:
+            lock = self._lock(tmp, dead)
+            with au.UpdateLock(lock):
+                self.assertIn(str(os.getpid()), lock.read_text(encoding="utf-8"))
+
+    def test_live_owner_pid_stays_busy(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            lock = self._lock(tmp, os.getpid())
+            with self.assertRaises(au.UpdateError):
+                with au.UpdateLock(lock):
+                    pass
+
+    def test_old_lock_is_reclaimed(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            lock = self._lock(tmp, os.getpid())
+            old = 1_600_000_000
+            os.utime(lock, (old, old))
+            with au.UpdateLock(lock):
+                self.assertIn(str(os.getpid()), lock.read_text(encoding="utf-8"))

@@ -653,6 +653,23 @@ def stop_instances(instances: list[dict], *, timeout: float = 12.0) -> list[int]
     return [int(p) for p in pids]
 
 
+def _lock_owner_alive(pid: int) -> bool:
+    """Whether the PID that wrote update.lock still exists."""
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        return _pid_alive(str(pid))
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
 def _pid_alive(pid: str) -> bool:
     try:
         completed = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
@@ -920,9 +937,19 @@ class UpdateLock:
 
     def __enter__(self) -> "UpdateLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        if self.path.exists() and time.time() - self.path.stat().st_mtime > self.stale_after:
-            with contextlib.suppress(OSError):
-                self.path.unlink()
+        if self.path.exists():
+            # An updater that crashed leaves the lock behind. Age alone kept
+            # the app blocked for up to 45 minutes; check the owner PID too.
+            stale = time.time() - self.path.stat().st_mtime > self.stale_after
+            if not stale:
+                try:
+                    owner = int(self.path.read_text(encoding="utf-8").split()[0])
+                except (OSError, ValueError, IndexError):
+                    owner = 0
+                stale = not _lock_owner_alive(owner)
+            if stale:
+                with contextlib.suppress(OSError):
+                    self.path.unlink()
         try:
             fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
