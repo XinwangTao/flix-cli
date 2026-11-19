@@ -33,6 +33,7 @@ if APP_DIR.parent.name.lower() == "flixcli":
     APP_DIR = APP_DIR.parent
 DB_PATH = APP_DIR / "db.sqlite"
 PREFS_PATH = APP_DIR / "shared_preferences.json"
+AUTO_CONNECT_PREF = "autoConnect"
 
 
 def ensure_dirs() -> None:
@@ -628,6 +629,42 @@ class Store:
     def set_pref(self, key: str, value) -> None:
         def apply(p: dict) -> dict:
             p[key] = value
+            return p
+        self.update_prefs(apply)
+
+    # -- auto-connect (discovery -> pairing without a human in the loop) -----
+    # Stored as {"enabled": bool, "devices": {fingerprint: bool}}; a per-device
+    # entry overrides the global switch, mirroring official Flix's
+    # auto_accept_rules feature='auto_connect' column. Default is on: two
+    # RelayDesk instances on the same LAN should connect without any input,
+    # and identity is still proven by ping_v2 before the pair is written.
+    def auto_connect_enabled(self, fingerprint: str = "") -> bool:
+        raw = self.prefs().get(AUTO_CONNECT_PREF)
+        if isinstance(raw, dict):
+            devices = raw.get("devices")
+            if (fingerprint and isinstance(devices, dict)
+                    and fingerprint in devices):
+                return bool(devices[fingerprint])
+            if "enabled" in raw:
+                return bool(raw["enabled"])
+            return True
+        if isinstance(raw, bool):
+            return raw
+        return True
+
+    def set_auto_connect(self, enabled: bool,
+                         fingerprint: str = "") -> None:
+        def apply(p: dict) -> dict:
+            raw = p.get(AUTO_CONNECT_PREF)
+            conf = dict(raw) if isinstance(raw, dict) else {}
+            if fingerprint:
+                devices = conf.get("devices")
+                devices = dict(devices) if isinstance(devices, dict) else {}
+                devices[fingerprint] = bool(enabled)
+                conf["devices"] = devices
+            else:
+                conf["enabled"] = bool(enabled)
+            p[AUTO_CONNECT_PREF] = conf
             return p
         self.update_prefs(apply)
 

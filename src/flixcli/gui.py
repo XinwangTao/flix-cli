@@ -242,8 +242,8 @@ class LocalApi:
     def get(self, path: str):
         return self._request(path)
 
-    def post(self, path: str, payload: dict):
-        return self._request(path, payload)
+    def post(self, path: str, payload: dict, timeout: int = 30):
+        return self._request(path, payload, timeout)
 
     def bytes(self, path: str) -> bytes:
         try:
@@ -253,12 +253,13 @@ class LocalApi:
         except (OSError, urllib.error.URLError) as exc:
             raise ApiError(str(exc)) from exc
 
-    def _request(self, path: str, payload: dict | None = None):
+    def _request(self, path: str, payload: dict | None = None,
+                 timeout: int = 30):
         try:
             data = json.dumps(payload).encode("utf-8") if payload is not None else None
             req = urllib.request.Request(self.base + path, data=data,
                                          headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=30) as response:  # nosec B310
+            with urllib.request.urlopen(req, timeout=timeout) as response:  # nosec B310
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             try:
@@ -1802,6 +1803,13 @@ class MainWindow(QMainWindow):
         self.auto_update_check.toggled.connect(
             lambda on: self._save_prefs(auto_update=bool(on)))
         card_box.addWidget(self.auto_update_check)
+        # Auto-connect: discovery -> pairing with no prompt. Identity is still
+        # proven by ping_v2 at the source address before either side pairs.
+        self.auto_connect_check = QCheckBox(
+            "自动连接：发现同网段新设备就直接配对，不再弹确认")
+        self.auto_connect_check.setChecked(self._auto_connect_on())
+        self.auto_connect_check.toggled.connect(self.set_auto_connect)
+        card_box.addWidget(self.auto_connect_check)
 
         # Phone model sharing: one Anthropic endpoint on the LAN, forwarded to
         # the local cc-switch proxy. The token is the only secret we hold.
@@ -1978,6 +1986,14 @@ class MainWindow(QMainWindow):
         self._refresh_model_status()
         QTimer.singleShot(1500, self._refresh_model_status)
 
+    def auto_start_model_gateway(self):
+        """Bring an enabled gateway back on boot instead of waiting for a click."""
+        from .model_gateway import port_open
+        cfg = self._model_cfg()
+        if cfg.get("enabled") and not port_open(cfg["port"]):
+            self._spawn_model_gateway()
+        self._refresh_model_status()
+
     def toggle_model_gateway(self, on: bool):
         from .model_gateway import save_config
         with self._model_store() as store:
@@ -2054,6 +2070,45 @@ class MainWindow(QMainWindow):
         available through "复制手机配置".
         """
         self.show_connect_qr()
+
+    # The switch has to live where the daemon reads it: the GUI keeps window
+    # preferences in ~/.relaydesk_gui.json, while Store.auto_connect_enabled()
+    # reads %APPDATA%/flixcli/shared_preferences.json. Writing the GUI file
+    # left the daemon auto-pairing after the user turned it off.
+    def _auto_connect_on(self) -> bool:
+        try:
+            with self._model_store() as store:
+                return store.auto_connect_enabled()
+        except Exception:  # noqa: BLE001 - a broken store must not blow up the UI
+            return True
+
+    def _device_auto_connect_on(self, fingerprint: str) -> bool:
+        try:
+            with self._model_store() as store:
+                return store.auto_connect_enabled(fingerprint)
+        except Exception:  # noqa: BLE001
+            return True
+
+    def set_device_auto_connect(self, fingerprint: str, on: bool):
+        try:
+            with self._model_store() as store:
+                store.set_auto_connect(bool(on), fingerprint)
+        except Exception as error:  # noqa: BLE001
+            self.statusBar().showMessage(f"保存失败：{error}", 6000)
+            return
+        self.statusBar().showMessage(
+            "这台设备自动连接已" + ("开启" if on else "关闭"), 4000)
+
+    def set_auto_connect(self, on: bool):
+        try:
+            with self._model_store() as store:
+                store.set_auto_connect(bool(on))
+        except Exception as error:  # noqa: BLE001
+            self.statusBar().showMessage(f"保存失败：{error}", 6000)
+            return
+        # Paired and discovered devices only get another look on the next
+        # discovery event; nudge the daemon so a fresh switch takes effect now.
+        self.refresh()
 
     def _load_prefs(self) -> dict:
         try:
@@ -3510,6 +3565,11 @@ class MainWindow(QMainWindow):
             action = menu.addAction("已配对 · 无需再配" if paired else "与这台设备配对",
                                     self.pair_selected_device)
             action.setEnabled(not paired)
+            auto = menu.addAction("自动连接：这台设备免确认")
+            auto.setCheckable(True)
+            auto.setChecked(self._device_auto_connect_on(key))
+            auto.toggled.connect(
+                lambda on, fp=key: self.set_device_auto_connect(fp, on))
             menu.addSeparator()
         menu.addAction("刷新会话", self.refresh)
         menu.addAction("查看传输任务", lambda: self.set_mode("transfers"))
@@ -3525,8 +3585,11 @@ class MainWindow(QMainWindow):
             return
         label = device.get("alias") or key[:8]
         self.statusBar().showMessage(f"正在向 {label} 发起配对，请在对方设备上确认…", 8000)
+        # The daemon waits up to PAIR_TIMEOUT (32s) for a peer that may only
+        # answer from a notification; a 30s client timeout would report
+        # failure while the pair still succeeded a moment later.
         self.run_action(
-            lambda: self.api.post("/api/pair", {"to": key}),
+            lambda: self.api.post("/api/pair", {"to": key}, timeout=45),
             lambda _result: self.statusBar().showMessage(f"已与 {label} 配对", 6000))
 
     # ---------- group management ----------
@@ -4107,6 +4170,10 @@ def main(argv: list[str] | None = None, *, api_port: int = 8898) -> int:
     # delay first paint, and tests that construct MainWindow directly stay
     # offline (the check only lives here, not in __init__).
     QTimer.singleShot(3000, window.auto_check_updates)
+    # Sharing switched on in a previous run must come back by itself: a
+    # restart used to leave the gateway down until the user toggled the box,
+    # and the peer's "cannot connect" then had no visible cause.
+    QTimer.singleShot(6000, window.auto_start_model_gateway)
     # A window with no material used to fail silently. Set RELAYDESK_GLASS_DIAG
     # to a file path to dump why; only diagnostics, never product behaviour.
     diag = os.environ.get("RELAYDESK_GLASS_DIAG")

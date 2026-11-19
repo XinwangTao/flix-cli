@@ -39,6 +39,9 @@ class PairingHardeningTests(unittest.IsolatedAsyncioTestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name)
         self.store = _store(self.root)
+        # These tests pin the operator-gated flow; auto-connect has its own
+        # suite (tests/test_auto_connect.py).
+        self.store.set_auto_connect(False)
         self.gate = PairGate(timeout=1.0)
         self.client = TestClient(TestServer(make_app(
             self.store, ME, lambda *_: None, pair_gate=self.gate)))

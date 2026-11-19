@@ -96,16 +96,24 @@ async def ping_v2(ip: str, ident: dict, port: int = DEVICE_PORT,
         raise PeerError("unreachable", f"{url}: {e}")
 
 
+# The peer may have nobody at the screen: a backgrounded ask is answered from
+# a notification (Android budget 25s), so the default has to outlive that.
+# A peer that rejects outright still answers in milliseconds.
+PAIR_TIMEOUT = 32.0
+
+
 async def pair_device(ip: str, my_fp: str, peer_fp: str, peer_code: str,
-                      port: int = DEVICE_PORT, timeout: float = 6.0,
-                      action: str = model.ACTION_ASK_PAIR) -> tuple[int, str]:
+                      port: int = DEVICE_PORT, timeout: float = PAIR_TIMEOUT,
+                      action: str = model.ACTION_ASK_PAIR,
+                      auto: bool = False) -> tuple[int, str]:
     """Pairing handshake over /intent. Returns (code, message); 0 = success.
 
     Official replies are Dart map toString (`{0: success}`,
     `{301: pair Device Null}`, `{302: device not match ...}`).
     """
     url = f"http://{ip}:{port}/intent"
-    body = dumps(model.pair_intent(my_fp, peer_fp, peer_code, action=action))
+    body = dumps(model.pair_intent(my_fp, peer_fp, peer_code, action=action,
+                                   auto=auto))
     try:
         async with aiohttp.ClientSession() as s:
             async with s.post(url, data=body,

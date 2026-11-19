@@ -96,6 +96,38 @@ def _record_peer_ip(store, fingerprint: str, ip: str) -> None:
     store.con.commit()
 
 
+async def _peer_answered_at(fingerprint: str, ip: str, ports,
+                            ident: dict, device_port: int) -> bool:
+    """Does `fingerprint` really answer /ping_v2 at `ip` on any candidate port?
+
+    Auto-connect writes a pair without asking a human, so the pairing decision
+    must rest on proof of identity rather than on a claim in the intent body:
+    the fingerprint is public on the wire and anyone could send it.
+    """
+    from .channel import ping_v2
+    tried: list[int] = []
+    for port in ports:
+        try:
+            port = int(port or 0)
+        except (TypeError, ValueError):
+            continue
+        if port and 0 < port < 65536 and port not in tried:
+            tried.append(port)
+    if not tried:
+        return False
+
+    async def probe(port: int) -> bool:
+        try:
+            modal = await ping_v2(ip, ident, port=port,
+                                  device_port=device_port, timeout=2.0)
+        except Exception:
+            return False
+        return modal.get("fingerprint") == fingerprint
+
+    results = await asyncio.gather(*(probe(port) for port in tried))
+    return any(results)
+
+
 def _trusted_sender(store, sender, remote) -> bool:
     """Pairing alone is not identity: the fingerprint is public on the wire.
 
@@ -507,6 +539,37 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
             return remote, stored_port
         return None
 
+    async def _auto_pair_verified(device_id: str, remote: str,
+                                  ports) -> None:
+        """Pair a discovered peer after /ping_v2 proves it at `remote`.
+
+        Runs as a task: the ask has already returned 301, and the peer learns
+        the decision from the confirmPairDevice we send here - the same
+        asynchronous shape the official flow uses.
+        """
+        if store.is_paired(device_id):
+            return
+        if not await _peer_answered_at(device_id, remote, ports,
+                                       ident, device_port):
+            print(f"[pair] auto-connect {device_id[:8]} not verifiable at "
+                  f"{remote}", file=sys.stderr, flush=True)
+            return
+        store.add_pair(device_id, store.own_pair_key())
+        _record_peer_ip(store, device_id, remote)
+        publish("pairChanged", {"fingerprint": device_id, "action": "auto"})
+        endpoint = await _resolve_peer(device_id, remote)
+        if endpoint:
+            ip, port = endpoint
+            from .channel import post_intent
+            intent = model.pair_intent(
+                ident["fingerprint"], ident["fingerprint"],
+                store.own_pair_key(), action=model.ACTION_CONFIRM_PAIR,
+                accept=True)
+            with contextlib.suppress(Exception):
+                await post_intent(ip, intent, port=port)
+        print(f"[pair] auto-connected {device_id[:8]} at {remote}",
+              file=sys.stderr, flush=True)
+
     async def _settle_pair_later(device_id: str, remote: str | None) -> None:
         """Deliver a late operator approval after the ask already returned.
 
@@ -555,6 +618,9 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
         accept = extra.get("accept", True)
         if isinstance(accept, str):
             accept = accept.lower() == "true"
+        # Our own extension (model.pair_intent(auto=True)); official clients
+        # never send it, so their ask keeps the operator prompt.
+        auto_ask = extra.get("auto") is True
         remote = request.remote
         if intent.get("action") == model.ACTION_ASK_PAIR:
             if not isinstance(verify_device, str) or not verify_device:
@@ -570,11 +636,29 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
                                          "reason": "declined"})
                 return web.Response(text="{0: success}")
             if not own_key or not hmac.compare_digest(supplied, own_key):
+                device_id = str(device_id or "")
+                # Auto-connect: our own peers mark the ask with extra.auto.
+                # Official clients never send it, so their one-tap flow keeps
+                # the operator prompt below. With the trust switch on, a peer
+                # we already discovered at exactly this address is paired
+                # once /ping_v2 proves the fingerprint answers there; the
+                # proof runs in the background so the ask never waits on it.
+                if (auto_ask and device_id and remote
+                        and store.auto_connect_enabled(device_id)):
+                    known_ip = _device_ip(store, device_id)
+                    if known_ip and known_ip == remote:
+                        row = store.con.execute(
+                            "SELECT COALESCE(port, 0) FROM persistence_devices"
+                            " WHERE fingerprint=?", (device_id,)).fetchone()
+                        asyncio.get_running_loop().create_task(
+                            _auto_pair_verified(
+                                device_id, remote,
+                                (row[0] if row else 0, device_port)))
+                        return web.Response(text="{301: pair Device Null}")
                 # A one-tap phone flow cannot know OUR key (it only knows its
                 # own). Ask the operator, but do not outlive the caller's HTTP
                 # timeout: wait briefly for a quick answer, otherwise reply
                 # now and deliver the approval as confirmPairDevice later.
-                device_id = str(device_id or "")
                 if not device_id or not pair_gate.open(
                         device_id, {"ip": remote or "", "port": device_port,
                                     "reason": "code-mismatch",

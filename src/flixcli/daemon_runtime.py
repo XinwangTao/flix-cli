@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # The daemon runs inside the windowed exe (no console). Windows gives every
@@ -17,7 +18,7 @@ from . import DEVICE_PORT, is_port_text, local_ip, model
 from .adb import AdbClient
 from .media_session import SessionManager
 from .media_transport import MediaRuntime
-from .channel import PeerError, ping_v2, post_bubble, post_intent
+from .channel import PeerError, pair_device, ping_v2, post_bubble, post_intent
 from .desktop_api import serve_desktop_api
 from .discovery import Discovery
 from .server import serve_channel
@@ -161,6 +162,10 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
 
         old_dev = devices.get(fp)
         if old_dev is not None and _key(old_dev) == _key(dev):
+            # Still worth a look: a peer that refused the last auto-connect
+            # ask (or was offline) only gets retried on the next event for
+            # this device, and an unchanged announce IS that event.
+            _maybe_auto_connect(dev)
             return
         old_ip = store.device_ip(fp)[0]
         new_ip = dev.get("ip", "")
@@ -188,6 +193,75 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
                          "payload": list(devices.values())})
         print(f"[discover] {dev.get('alias')} ({fp[:8]}) at "
               f"{dev.get('ip')}:{dev.get('port')}", file=sys.stderr, flush=True)
+        _maybe_auto_connect(dev)
+
+    # -- auto-connect ------------------------------------------------------
+    # A discovered peer that is not paired yet gets one askPairDevice with
+    # extra.auto=true. Both ends of our own build answer it by proving the
+    # source identity (ping_v2) and writing the pair, so two machines on the
+    # same LAN connect with no click at all. Retries are spaced out: a peer
+    # that keeps refusing (auto-connect off there) must not be hammered.
+    AUTO_PAIR_RETRY_S = 180.0
+    auto_pair_seen: dict[str, float] = {}
+    auto_pair_busy: set[str] = set()
+
+    async def _auto_pair(dev: dict) -> None:
+        fp = dev.get("fingerprint") or ""
+        ip = dev.get("ip") or ""
+        if not fp or not ip or store.is_paired(fp):
+            return
+        port = int(dev.get("port") or DEVICE_PORT)
+        auto_pair_busy.add(fp)
+        try:
+            code, message = await pair_device(ip, ident["fingerprint"], fp, "",
+                                              port=port, auto=True)
+        except Exception as error:  # noqa: BLE001 - network best effort
+            print(f"[pair] auto-connect {fp[:8]} unreachable: {error}",
+                  file=sys.stderr, flush=True)
+            return
+        finally:
+            auto_pair_busy.discard(fp)
+        if code != 0:
+            print(f"[pair] auto-connect {fp[:8]} refused: {message}",
+                  file=sys.stderr, flush=True)
+            return
+        # `{0: success}` only says the peer accepted someone; announces are
+        # unsigned, so prove the fingerprint really answers at that address
+        # before the pair is written on our side too.
+        try:
+            modal = await ping_v2(ip, ident, port=port,
+                                  device_port=device_port, timeout=3.0)
+        except Exception as error:  # noqa: BLE001
+            print(f"[pair] auto-connect {fp[:8]} unverifiable: {error}",
+                  file=sys.stderr, flush=True)
+            return
+        if modal.get("fingerprint") != fp:
+            print(f"[pair] auto-connect {fp[:8]} identity mismatch at {ip}",
+                  file=sys.stderr, flush=True)
+            return
+        store.add_pair(fp, store.own_pair_key())
+        if api_publish:
+            api_publish({"type": "pairChanged",
+                         "payload": {"fingerprint": fp, "auto": True}})
+        print(f"[pair] auto-connected {dev.get('alias')} ({fp[:8]})",
+              file=sys.stderr, flush=True)
+
+    def _maybe_auto_connect(dev: dict) -> None:
+        fp = dev.get("fingerprint") or ""
+        if not fp or not dev.get("ip") or store.is_paired(fp):
+            return
+        if not store.auto_connect_enabled(fp):
+            return
+        if fp in auto_pair_busy:
+            return
+        now = time.monotonic()
+        if now - auto_pair_seen.get(fp, 0.0) < AUTO_PAIR_RETRY_S:
+            return
+        auto_pair_seen[fp] = now
+        try:
+            asyncio.get_running_loop().create_task(_auto_pair(dev))
+        except RuntimeError:  # callback outside the loop (tests/CLI one-shot)
+            auto_pair_seen.pop(fp, None)
 
     def resolve(to: str) -> tuple[str | None, int, str]:
         """fingerprint (exact/prefix) or ip[:port] -> (ip, port, fingerprint)."""
