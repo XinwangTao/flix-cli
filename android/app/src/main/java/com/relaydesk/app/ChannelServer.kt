@@ -28,6 +28,11 @@ class ChannelServer(
         get() = store.ownPairKey(
             context.getSharedPreferences("relaydesk", Context.MODE_PRIVATE))
 
+    /** Trust switch: discovery -> pair with no confirmation. Default on. */
+    private fun autoConnectOn(): Boolean =
+        context.getSharedPreferences("relaydesk", Context.MODE_PRIVATE)
+            .getBoolean("auto_connect", true)
+
     private val UUID_RE = Regex(
         "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
@@ -174,10 +179,17 @@ class ChannelServer(
                 }
                 val peer = intent.optString("deviceId")
                 val code = extra.optString("verifyCode")
+                // Auto-connect: no prompt when the trust switch is on and the
+                // request really comes from the address we discovered for that
+                // fingerprint (the fingerprint alone is public on the wire).
+                val remote = session.remoteIpAddress ?: ""
+                val autoOk = autoConnectOn() && peer.isNotEmpty() &&
+                    remote.isNotEmpty() && store.deviceIp(peer) == remote
                 if (verify.isEmpty()) text(Response.Status.OK, "{301: pair Device Null}")
                 else if (verify != ownFp) text(Response.Status.OK,
                     "{302: device not match}")
-                else if (!accept || !confirmPair(peer, code)) {
+                else if (!accept) text(Response.Status.OK, "{301: pair Device Null}")
+                else if (!autoOk && !confirmPair(peer, code)) {
                     // No visible Activity (or the user declined): default reject.
                     text(Response.Status.OK, "{301: pair Device Null}")
                 } else {

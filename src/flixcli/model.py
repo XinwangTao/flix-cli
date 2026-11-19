@@ -219,10 +219,16 @@ def confirm_receive_intent(from_fp: str, bubble_id: str) -> dict:
 
 
 def pair_intent(from_fp: str, peer_fp: str, peer_code: str,
-                action: str = ACTION_ASK_PAIR, accept: bool = True) -> dict:
+                action: str = ACTION_ASK_PAIR, accept: bool = True,
+                auto: bool = False) -> dict:
     extra = {"verifyDevice": peer_fp, "verifyCode": str(peer_code)}
     if action == ACTION_CONFIRM_PAIR:
         extra["accept"] = bool(accept)
+    if auto:
+        # Our own extension: "I could not know your 4-digit key, pair me
+        # without a prompt if auto-connect is on". Official clients ignore an
+        # unknown extra key; our peers answer without opening the pair gate.
+        extra["auto"] = True
     return {
         "deviceId": from_fp,
         "bubbleId": "",

@@ -216,6 +216,9 @@ class LatePairApprovalTests(unittest.IsolatedAsyncioTestCase):
         self.store.upsert_device("late-fp", alias="phone", port=8899,
                                  version=1, ip="127.0.0.1", os_name="android")
         self.store.con.commit()
+        # Late approval is the operator-gated path; auto-connect is covered
+        # separately and would pair without asking.
+        self.store.set_auto_connect(False)
         self.gate = PairGate(timeout=2.0, fast_timeout=0.05)
         self.app = make_app(self.store, self.ident, lambda *_: None,
                             pair_gate=self.gate)

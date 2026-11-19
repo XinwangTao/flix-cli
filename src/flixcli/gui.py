@@ -1802,6 +1802,13 @@ class MainWindow(QMainWindow):
         self.auto_update_check.toggled.connect(
             lambda on: self._save_prefs(auto_update=bool(on)))
         card_box.addWidget(self.auto_update_check)
+        # Auto-connect: discovery -> pairing with no prompt. Identity is still
+        # proven by ping_v2 at the source address before either side pairs.
+        self.auto_connect_check = QCheckBox(
+            "自动连接：发现同网段新设备就直接配对，不再弹确认")
+        self.auto_connect_check.setChecked(self._auto_connect_on())
+        self.auto_connect_check.toggled.connect(self.set_auto_connect)
+        card_box.addWidget(self.auto_connect_check)
 
         # Phone model sharing: one Anthropic endpoint on the LAN, forwarded to
         # the local cc-switch proxy. The token is the only secret we hold.
@@ -1978,6 +1985,14 @@ class MainWindow(QMainWindow):
         self._refresh_model_status()
         QTimer.singleShot(1500, self._refresh_model_status)
 
+    def auto_start_model_gateway(self):
+        """Bring an enabled gateway back on boot instead of waiting for a click."""
+        from .model_gateway import port_open
+        cfg = self._model_cfg()
+        if cfg.get("enabled") and not port_open(cfg["port"]):
+            self._spawn_model_gateway()
+        self._refresh_model_status()
+
     def toggle_model_gateway(self, on: bool):
         from .model_gateway import save_config
         with self._model_store() as store:
@@ -2054,6 +2069,33 @@ class MainWindow(QMainWindow):
         available through "复制手机配置".
         """
         self.show_connect_qr()
+
+    def _auto_connect_on(self) -> bool:
+        raw = self._load_prefs().get("autoConnect")
+        if isinstance(raw, dict):
+            return bool(raw.get("enabled", True))
+        if isinstance(raw, bool):
+            return raw
+        return True
+
+    def set_device_auto_connect(self, fingerprint: str, on: bool):
+        data = self._load_prefs()
+        conf = data.get("autoConnect")
+        conf = dict(conf) if isinstance(conf, dict) else {}
+        devices = conf.get("devices")
+        devices = dict(devices) if isinstance(devices, dict) else {}
+        devices[fingerprint] = bool(on)
+        conf["devices"] = devices
+        self._save_prefs(autoConnect=conf)
+        self.statusBar().showMessage(
+            "这台设备自动连接已" + ("开启" if on else "关闭"), 4000)
+
+    def set_auto_connect(self, on: bool):
+        data = self._load_prefs()
+        conf = data.get("autoConnect")
+        conf = dict(conf) if isinstance(conf, dict) else {}
+        conf["enabled"] = bool(on)
+        self._save_prefs(autoConnect=conf)
 
     def _load_prefs(self) -> dict:
         try:
@@ -3510,6 +3552,14 @@ class MainWindow(QMainWindow):
             action = menu.addAction("已配对 · 无需再配" if paired else "与这台设备配对",
                                     self.pair_selected_device)
             action.setEnabled(not paired)
+            conf = self._load_prefs().get("autoConnect")
+            conf = conf if isinstance(conf, dict) else {}
+            per = conf.get("devices") if isinstance(conf.get("devices"), dict) else {}
+            auto = menu.addAction("自动连接：这台设备免确认")
+            auto.setCheckable(True)
+            auto.setChecked(bool(per.get(key, conf.get("enabled", True))))
+            auto.toggled.connect(
+                lambda on, fp=key: self.set_device_auto_connect(fp, on))
             menu.addSeparator()
         menu.addAction("刷新会话", self.refresh)
         menu.addAction("查看传输任务", lambda: self.set_mode("transfers"))
@@ -4107,6 +4157,10 @@ def main(argv: list[str] | None = None, *, api_port: int = 8898) -> int:
     # delay first paint, and tests that construct MainWindow directly stay
     # offline (the check only lives here, not in __init__).
     QTimer.singleShot(3000, window.auto_check_updates)
+    # Sharing switched on in a previous run must come back by itself: a
+    # restart used to leave the gateway down until the user toggled the box,
+    # and the peer's "cannot connect" then had no visible cause.
+    QTimer.singleShot(6000, window.auto_start_model_gateway)
     # A window with no material used to fail silently. Set RELAYDESK_GLASS_DIAG
     # to a file path to dump why; only diagnostics, never product behaviour.
     diag = os.environ.get("RELAYDESK_GLASS_DIAG")
