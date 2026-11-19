@@ -252,6 +252,68 @@ class InterfaceAndVersionTests(unittest.TestCase):
         for ip in ("198.18.0.1", "100.64.0.1", "169.254.1.1", "127.0.0.1"):
             self.assertTrue(is_virtual_ip(ip), ip)
 
+    def test_vmware_and_hyperv_adapters_are_not_lan_interfaces(self):
+        import flixcli
+
+        names = {15: "VMware Network Adapter VMnet1 VMware Virtual Ethernet",
+                 24: "vEthernet (Default Switch) Hyper-V Virtual Ethernet",
+                 4: "WLAN Intel(R) Wi-Fi 6E AX211",
+                 18: "以太网 Realtek PCIe GbE Family Controller"}
+        orig_names, orig_rows = flixcli._win_adapter_names, flixcli._win_ipv4_rows
+        flixcli._win_adapter_names = lambda: names
+        flixcli._win_ipv4_rows = lambda: [
+            ("192.168.73.1", "255.255.255.0", 15),
+            ("172.18.80.1", "255.255.240.0", 24),
+            ("192.168.237.7", "255.255.254.0", 4),
+            ("192.168.50.1", "255.255.255.0", 18),
+        ]
+        flixcli._ADAPTER_CACHE = (0.0, {})
+        try:
+            excluded = dict(flixcli.virtual_interfaces())
+            self.assertIn("192.168.73.1", excluded)
+            self.assertIn("172.18.80.1", excluded)
+            self.assertNotIn("192.168.237.7", excluded)
+            self.assertNotIn("192.168.50.1", excluded)
+        finally:
+            flixcli._win_adapter_names = orig_names
+            flixcli._win_ipv4_rows = orig_rows
+            flixcli._ADAPTER_CACHE = (0.0, {})
+
+    def test_interface_choice_sticks_instead_of_chasing_the_route(self):
+        import flixcli
+
+        orig_names, orig_rows = flixcli._win_adapter_names, flixcli._win_ipv4_rows
+        orig_routed, orig_gw, orig_last = (flixcli._routed_ip,
+                                           flixcli._gateway_ifindexes,
+                                           flixcli._last_iface)
+        orig_override = flixcli._local_ip_override
+        names = {4: "WLAN Intel(R) Wi-Fi 6E AX211",
+                 15: "VMware Network Adapter VMnet1 VMware Virtual"}
+        flixcli._win_adapter_names = lambda: names
+        flixcli._win_ipv4_rows = lambda: [
+            ("192.168.73.1", "255.255.255.0", 15),
+            ("192.168.237.7", "255.255.254.0", 4),
+        ]
+        flixcli._gateway_ifindexes = lambda: {4}
+        flixcli._local_ip_override = ""
+        flixcli._ADAPTER_CACHE = (0.0, {})
+        flixcli._last_iface = ""
+        try:
+            flixcli._routed_ip = lambda: "192.168.237.7"
+            self.assertEqual(flixcli.default_iface_ip(), "192.168.237.7")
+            # Wi-Fi blinks and the OS now routes through VMware: the announce
+            # must not move onto a link no phone shares.
+            flixcli._routed_ip = lambda: "192.168.73.1"
+            self.assertEqual(flixcli.default_iface_ip(), "192.168.237.7")
+        finally:
+            flixcli._win_adapter_names = orig_names
+            flixcli._win_ipv4_rows = orig_rows
+            flixcli._routed_ip = orig_routed
+            flixcli._gateway_ifindexes = orig_gw
+            flixcli._last_iface = orig_last
+            flixcli._local_ip_override = orig_override
+            flixcli._ADAPTER_CACHE = (0.0, {})
+
     def test_tun_is_skipped_even_with_a_slash_30_mask(self):
         import flixcli
 

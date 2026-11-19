@@ -27,7 +27,10 @@ class RelayService : Service() {
     companion object {
         const val CH_SERVICE = "relaydesk_service"
         const val CH_MESSAGES = "relaydesk_messages"
+        const val CH_PAIR = "relaydesk_pair"
         const val ACTION_REFRESH = "com.relaydesk.app.REFRESH"
+        const val ACTION_PAIR_ACCEPT = "com.relaydesk.app.PAIR_ACCEPT"
+        const val ACTION_PAIR_REJECT = "com.relaydesk.app.PAIR_REJECT"
         private const val NOTIF_SERVICE = 1
         private const val NOTIF_SUMMARY = 1000
         private const val FALLBACK_PORT = 18991
@@ -47,6 +50,7 @@ class RelayService : Service() {
     private var discovery: Discovery? = null
     private var multicastLock: WifiManager.MulticastLock? = null
     private var worker: ScheduledExecutorService? = null
+    @Volatile private var pairPrompt: Runtime.PairPrompt? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -58,6 +62,10 @@ class RelayService : Service() {
         startForeground(NOTIF_SERVICE, serviceNotification("正在启动…"),
             ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         Runtime.service = this
+        // Pairing must not depend on the Activity being on screen: with the app
+        // backgrounded (or the phone in a pocket) the request becomes a
+        // notification with accept/reject instead of a silent rejection.
+        Runtime.backgroundPairPrompter = ::promptPairInNotification
 
         val wifi = applicationContext.getSystemService(WifiManager::class.java)
         multicastLock = wifi.createMulticastLock("relaydesk").apply {
@@ -85,8 +93,17 @@ class RelayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_REFRESH) discovery?.announce()
+        when (intent?.action) {
+            ACTION_REFRESH -> discovery?.announce()
+            ACTION_PAIR_ACCEPT -> answerPair(true)
+            ACTION_PAIR_REJECT -> answerPair(false)
+        }
         return START_STICKY
+    }
+
+    private fun answerPair(ok: Boolean) {
+        Runtime.answerPair(ok)
+        hidePairNotification()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -96,6 +113,7 @@ class RelayService : Service() {
         discovery?.stop()
         runCatching { server?.stop() }
         multicastLock?.takeIf { it.isHeld }?.release()
+        Runtime.backgroundPairPrompter = null
         Runtime.serviceRunning = false
         Runtime.servicePort = 0
         Runtime.service = null
@@ -254,6 +272,11 @@ class RelayService : Service() {
             NotificationManager.IMPORTANCE_HIGH).apply {
             description = "收到文本、文件与配对提示"
         })
+        nm.createNotificationChannel(NotificationChannel(CH_PAIR, "配对请求",
+            NotificationManager.IMPORTANCE_HIGH).apply {
+            description = "有设备请求配对时弹出接受/拒绝"
+            setShowBadge(true)
+        })
     }
 
     private fun openIntent(peer: String? = null, group: String? = null): PendingIntent {
@@ -324,6 +347,68 @@ class RelayService : Service() {
             .build()
         nm.notify(NOTIF_SUMMARY, summary)
     }
+
+    /**
+     * Pairing prompt for a request that arrives while the Activity is not
+     * visible: blocks the HTTP handler (its own thread) until the user taps
+     * accept/reject, then clears the notification.
+     */
+    private fun promptPairInNotification(peer: String, code: String,
+                                         timeoutMs: Long): Boolean {
+        if (!notificationsAllowed()) return false
+        val accepted = Runtime.awaitBackgroundPair(peer, code, timeoutMs) { prompt ->
+            pairPrompt = prompt
+            showPairNotification(prompt)
+        }
+        hidePairNotification()
+        return accepted
+    }
+
+    private fun pairAction(accept: Boolean, id: Int): PendingIntent {
+        val intent = Intent(this, RelayService::class.java).apply {
+            action = if (accept) ACTION_PAIR_ACCEPT else ACTION_PAIR_REJECT
+        }
+        return PendingIntent.getService(this, id + if (accept) 0 else 1, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    }
+
+    private fun showPairNotification(prompt: Runtime.PairPrompt) {
+        if (!notificationsAllowed()) return
+        val nm = getSystemService(NotificationManager::class.java)
+        if (!nm.areNotificationsEnabled()) return
+        val name = store.device(prompt.peer)?.optString("alias")
+            ?.takeIf { it.isNotEmpty() } ?: prompt.peer.take(8)
+        val code = prompt.code.ifEmpty { "—" }
+        val id = pairId(prompt.peer)
+        val text = "「$name」请求与这台设备配对。\n验证码：$code\n" +
+            "请与对方核对后再接受（${Runtime.PAIR_BACKGROUND_TIMEOUT_MS / 1000} 秒内有效）"
+        val notification = Notification.Builder(this, CH_PAIR)
+            .setSmallIcon(android.R.drawable.stat_notify_chat)
+            .setContentTitle("配对请求")
+            .setContentText("「$name」请求配对，验证码 $code")
+            .setStyle(Notification.BigTextStyle().bigText(text))
+            .setPriority(Notification.PRIORITY_HIGH)
+            .setCategory(Notification.CATEGORY_MESSAGE)
+            .setOngoing(true)
+            .setAutoCancel(false)
+            .setContentIntent(openIntent(prompt.peer))
+            .addAction(Notification.Action(0, "拒绝", pairAction(false, id)))
+            .addAction(Notification.Action(0, "接受", pairAction(true, id)))
+            .build()
+        runCatching { nm.notify(id, notification) }
+    }
+
+    private fun hidePairNotification() {
+        val prompt = pairPrompt
+        pairPrompt = null
+        if (prompt == null) return
+        runCatching {
+            getSystemService(NotificationManager::class.java)
+                .cancel(pairId(prompt.peer))
+        }
+    }
+
+    private fun pairId(peer: String): Int = 300 + (peer.hashCode() and 0x0FFFFFFF)
 
     private fun peerId(peer: String): Int = 100 + (peer.hashCode() and 0x0FFFFFFF)
 

@@ -53,7 +53,16 @@ announce，因此 flixd 每 60s 对库内设备做一次 `/ping_v2` 探活并刷
 时间戳，设备自然显示离线，重启后不会再把历史设备画成绿点。
 
 `flix netcheck [--json]` 是只读诊断：选中网卡、组播 join（临时端口，不抢占运行中的 8891）、
-8891 占用、防火墙配置、库内设备端口可达性。对端设备通道不通时，把
+8891 占用、防火墙配置、库内设备端口可达性。
+
+虚拟适配器按 `GetAdaptersAddresses` 的 FriendlyName/Description 整类排除（VMware、
+VirtualBox、Hyper-V/vEthernet、Wi-Fi Direct、Bluetooth PAN、Wintun/Sangfor VPN、Clash
+一类隧道），`netcheck` 会把它们列为 `skipped` 并带名字：这些网卡上没有任何对端，
+而 VMware 的 VMnet1（192.168.73.1/24，无网关）在 Wi-Fi 闪断时会抢走组播路由，announce
+打到那里等于本机从别人的设备列表里消失。选中的网卡还会被钉住，只有它真的消失
+（拔网线/断网）才重新挑，不再每次轮询重猜。要手工钉死：`--multicast-if` /
+`FLIX_MULTICAST_IF`，或写 `shared_preferences.json` 的 `multicast_if`（GUI 启动的
+daemon 没有命令行参数，靠这一项）。对端设备通道不通时，把
 `scripts/fix_firewall.ps1` 交给**对端**管理员，在其机器上以管理员 PowerShell 执行
 （默认放行 `dist\flixd.exe`，`-Remove` 撤销）；flixd/RelayDesk 不会自动执行它，也不会改动远端。
 

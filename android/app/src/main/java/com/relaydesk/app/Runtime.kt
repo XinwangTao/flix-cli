@@ -54,12 +54,29 @@ object Runtime {
 
     @Volatile private var pendingPair: PairPrompt? = null
 
+    /** How long a pairing request may wait while the Activity is not visible. */
+    const val PAIR_BACKGROUND_TIMEOUT_MS = 25_000L
+
     /**
-     * Blocks the HTTP handler briefly while the user decides. With no visible
-     * Activity this returns false immediately (default reject).
+     * Set by RelayService: shows the notification prompt instead of rejecting
+     * a request that arrives with the app backgrounded or the screen off.
+     */
+    @Volatile var backgroundPairPrompter: ((String, String, Long) -> Boolean)? = null
+
+    /**
+     * Blocks the HTTP handler briefly while the user decides.
+     *
+     * With no visible Activity the request used to fail instantly, which is
+     * what "没法配对" looks like from the desktop: the phone silently answered
+     * 301 pair Device Null while the user was staring at a dialog-free screen.
+     * It now falls back to a heads-up notification with real accept/reject
+     * actions (RelayService wires backgroundPairPrompter).
      */
     fun requestPair(peer: String, code: String, timeoutMs: Long = 6000): Boolean {
-        if (!hasListener()) return false
+        if (!hasListener()) {
+            return backgroundPairPrompter?.invoke(peer, code,
+                PAIR_BACKGROUND_TIMEOUT_MS) ?: false
+        }
         val prompt = PairPrompt(peer, code)
         pendingPair = prompt
         emit("pairRequest", prompt)
@@ -68,6 +85,17 @@ object Runtime {
         // The sender has already given up; retract any dialog the user can
         // no longer answer into a real pairing.
         if (!accepted && !prompt.isAnswered) emit("pairTimeout", prompt)
+        return accepted
+    }
+
+    /** Blocking wait for the notification path; the caller shows the prompt. */
+    fun awaitBackgroundPair(peer: String, code: String, timeoutMs: Long,
+                            show: (PairPrompt) -> Unit): Boolean {
+        val prompt = PairPrompt(peer, code)
+        pendingPair = prompt
+        runCatching { show(prompt) }
+        val accepted = prompt.await(timeoutMs)
+        if (pendingPair === prompt) pendingPair = null
         return accepted
     }
 

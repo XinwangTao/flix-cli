@@ -18,7 +18,8 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-from . import DEVICE_PORT, __version__, is_port_text, local_ip
+from . import (DEVICE_PORT, __version__, is_port_text, local_ip,
+                   virtual_interfaces)
 from .adb import AdbClient, AdbError
 from .channel import PeerError, post_bubble, post_intent, post_json
 from .config import APP_DIR, Store, load_or_create_identity
@@ -592,16 +593,25 @@ async def cmd_netcheck(args) -> int:
                 "seenAt": row.get("seenAt"),
             })
 
+        # Name the adapters we refuse to announce on: on a host with VMware or
+        # a VPN client the picked interface often looks wrong until the user
+        # sees which one was skipped and why.
+        excluded = [{"ip": ip, "adapter": name}
+                    for ip, name in virtual_interfaces() if ip != iface]
         payload = {"interface": iface, "localIp": local_ip(),
                    "group": f"{MULTICAST_GROUP}:{DEVICE_PORT}",
                    "multicastJoin": join, "udpPort": udp_port,
                    "presenceTtlMs": PRESENCE_TTL_MS,
+                   "excludedInterfaces": excluded,
                    "firewall": firewall, "peers": peers}
         if args.json:
             emit(payload, True)
         else:
             print(f"[netcheck] interface   {iface or 'none'}  "
                   f"local {payload['localIp']}")
+            for row in excluded[:4]:
+                print(f"[netcheck] skipped     {row['ip']}  "
+                      f"{row['adapter'] or 'virtual adapter'}")
             state = "ok" if join["ok"] else "FAILED: " + str(join.get("error", ""))
             print(f"[netcheck] multicast   {payload['group']}  join={state}")
             held = ("held by a process (normal when flixd is running)"
