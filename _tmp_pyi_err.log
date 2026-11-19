@@ -1,0 +1,132 @@
+139 WARNING: Assuming this is not an Anaconda environment or an additional venv/pipenv/... environment manager is being used on top, because the conda-meta folder F:\projects\flix-cli\.venv\conda-meta does not exist.
+153 INFO: PyInstaller: 6.22.3, contrib hooks: 2026.9
+154 INFO: Python: 3.11.7 (conda)
+193 INFO: Platform: Windows-10-10.0.26200-SP0
+194 INFO: Python environment: F:\projects\flix-cli\.venv
+195 INFO: wrote build_pending\RelayDesk.spec
+205 INFO: Module search paths (PYTHONPATH):
+['F:\\projects\\flix-cli',
+ 'F:\\ANACONDA\\1\\python311.zip',
+ 'F:\\ANACONDA\\1\\DLLs',
+ 'F:\\ANACONDA\\1\\Lib',
+ 'F:\\ANACONDA\\1',
+ 'F:\\projects\\flix-cli\\.venv',
+ 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages',
+ 'F:\\projects\\flix-cli\\src',
+ 'F:\\projects\\flix-cli\\scripts',
+ 'F:\\projects\\flix-cli\\src']
+109 WARNING: Assuming this is not an Anaconda environment or an additional venv/pipenv/... environment manager is being used on top, because the conda-meta folder F:\projects\flix-cli\.venv\conda-meta does not exist.
+608 INFO: checking Analysis
+609 INFO: Building Analysis because Analysis-00.toc is non existent
+609 INFO: Looking for Python shared library...
+609 INFO: Using Python shared library: F:\ANACONDA\1\python311.dll
+610 INFO: Running Analysis Analysis-00.toc
+610 INFO: Target bytecode optimization level: 0
+610 INFO: Initializing module dependency graph...
+612 INFO: Initializing module graph hook caches...
+626 INFO: Analyzing modules for base_library.zip ...
+116 WARNING: Assuming this is not an Anaconda environment or an additional venv/pipenv/... environment manager is being used on top, because the conda-meta folder F:\projects\flix-cli\.venv\conda-meta does not exist.
+107 WARNING: Assuming this is not an Anaconda environment or an additional venv/pipenv/... environment manager is being used on top, because the conda-meta folder F:\projects\flix-cli\.venv\conda-meta does not exist.
+104 WARNING: Assuming this is not an Anaconda environment or an additional venv/pipenv/... environment manager is being used on top, because the conda-meta folder F:\projects\flix-cli\.venv\conda-meta does not exist.
+1702 INFO: Processing standard module hook 'hook-heapq.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'
+1760 INFO: Processing standard module hook 'hook-encodings.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'
+115 WARNING: Assuming this is not an Anaconda environment or an additional venv/pipenv/... environment manager is being used on top, because the conda-meta folder F:\projects\flix-cli\.venv\conda-meta does not exist.
+3223 INFO: Processing standard module hook 'hook-math.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'
+3376 INFO: Processing standard module hook 'hook-pickle.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'
+5844 INFO: Caching module dependency graph...
+5921 INFO: Analyzing F:\projects\flix-cli\scripts\launch_relaydesk.py
+6138 INFO: Processing standard module hook 'hook-_ctypes.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'
+6191 INFO: Processing standard module hook 'hook-sqlite3.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'
+127 WARNING: Assuming this is not an Anaconda environment or an additional venv/pipenv/... environment manager is being used on top, because the conda-meta folder F:\projects\flix-cli\.venv\conda-meta does not exist.
+6631 INFO: Processing standard module hook 'hook-platform.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'
+7550 INFO: Processing standard module hook 'hook-PySide6.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'
+7818 INFO: Processing standard module hook 'hook-shiboken6.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'
+8036 INFO: Processing standard module hook 'hook-PySide6.QtNetwork.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'
+14622 INFO: Processing standard module hook 'hook-PySide6.QtCore.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'
+21546 INFO: Processing standard module hook 'hook-PySide6.QtGui.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'
+56774 INFO: Processing standard module hook 'hook-PySide6.QtWidgets.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'
+62919 INFO: Processing standard module hook 'hook-PySide6.QtSvg.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'
+64399 INFO: Processing standard module hook 'hook-multiprocessing.util.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'
+64524 INFO: Processing standard module hook 'hook-xml.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'
+65643 INFO: Processing pre-safe-import-module hook 'hook-typing_extensions.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+65644 INFO: SetuptoolsInfo: initializing cached setuptools info...
+351 WARNING: Assuming this is not an Anaconda environment or an additional venv/pipenv/... environment manager is being used on top, because the conda-meta folder F:\projects\flix-cli\.venv\conda-meta does not exist.
+67358 INFO: Processing pre-safe-import-module hook 'hook-backports.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+68553 INFO: Processing standard module hook 'hook-webbrowser.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'
+68563 INFO: Processing pre-safe-import-module hook 'hook-importlib_metadata.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+69025 INFO: Processing standard module hook 'hook-cryptography.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+116 WARNING: Assuming this is not an Anaconda environment or an additional venv/pipenv/... environment manager is being used on top, because the conda-meta folder F:\projects\flix-cli\.venv\conda-meta does not exist.
+131 WARNING: Assuming this is not an Anaconda environment or an additional venv/pipenv/... environment manager is being used on top, because the conda-meta folder F:\projects\flix-cli\.venv\conda-meta does not exist.
+71177 INFO: hook-cryptography: cryptography does not seem to be using dynamically linked OpenSSL.
+71416 INFO: Processing standard module hook 'hook-av.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+138 WARNING: Assuming this is not an Anaconda environment or an additional venv/pipenv/... environment manager is being used on top, because the conda-meta folder F:\projects\flix-cli\.venv\conda-meta does not exist.
+71943 INFO: Processing standard module hook 'hook-numpy.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'
+72889 INFO: Processing standard module hook 'hook-difflib.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'
+73889 INFO: Processing standard module hook 'hook-sysconfig.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'
+79077 INFO: Processing standard module hook 'hook-dns.rdata.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+117 WARNING: Assuming this is not an Anaconda environment or an additional venv/pipenv/... environment manager is being used on top, because the conda-meta folder F:\projects\flix-cli\.venv\conda-meta does not exist.
+80509 INFO: Processing module hooks (post-graph stage)...
+80864 INFO: Performing binary vs. data reclassification (154 entries)
+81037 INFO: Looking for ctypes DLLs
+81221 WARNING: Ignoring /usr/lib/libobjc.A.dylib imported from F:\projects\flix-cli\src\flixcli\desktop_capture.py - only basenames are supported with ctypes imports!
+81221 WARNING: Ignoring /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation imported from F:\projects\flix-cli\src\flixcli\desktop_capture.py - only basenames are supported with ctypes imports!
+81222 WARNING: Ignoring /System/Library/Frameworks/CoreGraphics.framework/CoreGraphics imported from F:\projects\flix-cli\src\flixcli\desktop_capture.py - only basenames are supported with ctypes imports!
+81845 INFO: Analyzing run-time hooks ...
+81849 INFO: Including run-time hook 'pyi_rth_inspect.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+81855 INFO: Including run-time hook 'pyi_rth_pkgutil.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+81857 INFO: Including run-time hook 'pyi_rth_multiprocessing.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+81859 INFO: Including run-time hook 'pyi_rth_cryptography_openssl.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\rthooks'
+81860 INFO: Including run-time hook 'pyi_rth_pyside6.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+81861 INFO: Processing pre-find-module-path hook 'hook-_pyi_rth_utils.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks\\pre_find_module_path'
+81864 INFO: Processing standard module hook 'hook-_pyi_rth_utils.py' from 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PyInstaller\\hooks'
+81889 INFO: Creating base_library.zip...
+81913 INFO: Looking for dynamic libraries
+82839 INFO: Extra DLL search directories (AddDllDirectory): ['F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\shiboken6', 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\av.libs', 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\google_crc32c\\extra-dll', 'F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\numpy.libs']
+82840 INFO: Extra DLL search directories (PATH): ['F:\\projects\\flix-cli\\.venv\\Lib\\site-packages\\PySide6']
+91345 INFO: Warnings written to F:\projects\flix-cli\build_pending\RelayDesk\warn-RelayDesk.txt
+91468 INFO: Graph cross-reference written to F:\projects\flix-cli\build_pending\RelayDesk\xref-RelayDesk.html
+91513 INFO: checking PYZ
+91513 INFO: Building PYZ because PYZ-00.toc is non existent
+91513 INFO: Building PYZ (ZlibArchive) F:\projects\flix-cli\build_pending\RelayDesk\PYZ-00.pyz
+92371 INFO: Building PYZ (ZlibArchive) F:\projects\flix-cli\build_pending\RelayDesk\PYZ-00.pyz completed successfully.
+92396 INFO: checking PKG
+92397 INFO: Building PKG because PKG-00.toc is non existent
+92397 INFO: Building PKG (CArchive) RelayDesk.pkg
+132152 INFO: Building PKG (CArchive) RelayDesk.pkg completed successfully.
+132163 INFO: Bootloader F:\projects\flix-cli\.venv\Lib\site-packages\PyInstaller\bootloader\Windows-64bit-intel\runw.exe
+132163 INFO: checking EXE
+132163 INFO: Building EXE because EXE-00.toc is non existent
+132164 INFO: Building EXE from EXE-00.toc
+132165 INFO: Copying bootloader EXE to F:\projects\flix-cli\dist_pending\RelayDesk.exe
+132170 INFO: Copying icon to EXE
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "F:\projects\flix-cli\.venv\Lib\site-packages\PyInstaller\__main__.py", line 321, in <module>
+    run()
+  File "F:\projects\flix-cli\.venv\Lib\site-packages\PyInstaller\__main__.py", line 215, in run
+    run_build(pyi_config, spec_file, **vars(args))
+  File "F:\projects\flix-cli\.venv\Lib\site-packages\PyInstaller\__main__.py", line 70, in run_build
+    PyInstaller.building.build_main.main(pyi_config, spec_file, **kwargs)
+  File "F:\projects\flix-cli\.venv\Lib\site-packages\PyInstaller\building\build_main.py", line 1275, in main
+    build(specfile, distpath, workpath, clean_build)
+  File "F:\projects\flix-cli\.venv\Lib\site-packages\PyInstaller\building\build_main.py", line 1213, in build
+    exec(code, spec_namespace)
+  File "build_pending\RelayDesk.spec", line 19, in <module>
+    exe = EXE(
+          ^^^^
+  File "F:\projects\flix-cli\.venv\Lib\site-packages\PyInstaller\building\api.py", line 675, in __init__
+    self.__postinit__()
+  File "F:\projects\flix-cli\.venv\Lib\site-packages\PyInstaller\building\datastruct.py", line 184, in __postinit__
+    self.assemble()
+  File "F:\projects\flix-cli\.venv\Lib\site-packages\PyInstaller\building\api.py", line 788, in assemble
+    self._retry_operation(icon.CopyIcons, build_name, self.icon)
+  File "F:\projects\flix-cli\.venv\Lib\site-packages\PyInstaller\building\api.py", line 1058, in _retry_operation
+    return func(*args)
+           ^^^^^^^^^^^
+  File "F:\projects\flix-cli\.venv\Lib\site-packages\PyInstaller\utils\win32\icon.py", line 206, in CopyIcons
+    srcpath = normalize_icon_type(srcpath, ("exe", "ico"), "ico", config.CONF["workpath"])
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "F:\projects\flix-cli\.venv\Lib\site-packages\PyInstaller\building\icon.py", line 34, in normalize_icon_type
+    raise FileNotFoundError(f"Icon input file {icon_path} not found")
+FileNotFoundError: Icon input file F:\projects\flix-cli\build_pending\assets/relaydesk.ico not found

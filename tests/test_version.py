@@ -22,3 +22,18 @@ class VersionConsistencyTests(unittest.TestCase):
 
     def test_not_the_stale_placeholder(self):
         self.assertNotEqual(__version__, "0.1.0")
+
+    def test_android_version_follows_pyproject(self):
+        """A hardcoded versionCode 2 shipped in every APK.
+
+        Android refuses to install a lower versionCode over an installed higher
+        one (INSTALL_FAILED_VERSION_DOWNGRADE), so the phone downloaded release
+        v2.6.4 over its 20601 build and the install silently never landed. The
+        gradle file must derive both values from pyproject instead.
+        """
+        gradle = (ROOT / "android" / "app" / "build.gradle.kts").read_text(
+            encoding="utf-8")
+        self.assertNotIn("versionCode = 2" + chr(10), gradle)
+        self.assertNotRegex(gradle, r'versionName = "2\.3\.0"')
+        self.assertIn("../pyproject.toml", gradle)
+        self.assertIn("verMajor * 10000", gradle)

@@ -1,0 +1,3 @@
+[2026-11-04T01:17:41.752Z] [INFO] [path-detector] isRunningFromDMG() → %s, appPath=%s [false,"F:\\Program Files\\Tencent\\Marvis\\Application\\1.60.3200.327\\resources\\app.asar"]
+[2026-11-04T01:17:41.875Z] [INFO] [source-receiver] process.argv 中未找到 --install-source 参数
+[2026-11-04T01:17:41.876Z] [INFO] [source-receiver] [deprecated] process.argv 中未找到 --channel 参数

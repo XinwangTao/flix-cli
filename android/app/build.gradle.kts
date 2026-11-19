@@ -3,6 +3,17 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// Single source of truth: the Python package version. The literal 2 / "2.3.0"
+// this used to hardcode meant every release APK shipped versionCode 2, which
+// Android refuses to install over an already newer build
+// (INSTALL_FAILED_VERSION_DOWNGRADE) - the phone's updater downloaded v2.6.4
+// and could never apply it (installed build was versionCode 20601).
+val appVersion: String = Regex("""^version\s*=\s*"([^"]+)"""", RegexOption.MULTILINE)
+    .find(rootProject.file("../pyproject.toml").readText())
+    ?.groupValues?.get(1)
+    ?: error("version not found in pyproject.toml")
+val (verMajor, verMinor, verPatch) = appVersion.split(".").map { it.toInt() }
+
 android {
     namespace = "com.relaydesk.app"
     compileSdk = 34
@@ -11,8 +22,8 @@ android {
         applicationId = "com.relaydesk.app"
         minSdk = 29
         targetSdk = 34
-        versionCode = 2
-        versionName = "2.3.0"
+        versionCode = verMajor * 10000 + verMinor * 100 + verPatch
+        versionName = appVersion
     }
 
     buildTypes {
