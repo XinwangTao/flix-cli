@@ -96,6 +96,23 @@ class AutoPairServerTests(unittest.IsolatedAsyncioTestCase):
                 await self._tick()
         self.assertFalse(self.store.is_paired("peer-fp"))
 
+    async def test_official_ask_without_the_auto_flag_still_prompts(self):
+        """Official clients never send extra.auto: their one-tap flow keeps
+        the operator prompt even while our auto-connect switch is on."""
+        async def fake_ping(*args, **kwargs):
+            return {"fingerprint": "peer-fp"}
+
+        with mock.patch("flixcli.channel.ping_v2", fake_ping):
+            resp = await self.client.post("/intent", json=_ask(auto=False))
+        self.assertEqual(await resp.text(), "{301: pair Device Null}")
+        for _ in range(50):
+            await self._tick()
+            if self.gate.pending():
+                break
+        self.assertEqual([p["fingerprint"] for p in self.gate.pending()],
+                         ["peer-fp"])
+        self.assertFalse(self.store.is_paired("peer-fp"))
+
     async def test_switch_off_keeps_the_gate(self):
         self.store.set_auto_connect(False)
         async def fake_ping(*args, **kwargs):

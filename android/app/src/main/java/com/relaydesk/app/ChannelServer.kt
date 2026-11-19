@@ -33,6 +33,15 @@ class ChannelServer(
         context.getSharedPreferences("relaydesk", Context.MODE_PRIVATE)
             .getBoolean("auto_connect", true)
 
+    /** Does [fp] really answer /ping_v2 on the port we discovered for it? */
+    private fun peerAnswersAt(fp: String, ip: String): Boolean = try {
+        val peerPort = store.device(fp)?.optInt("port")?.takeIf { it > 0 } ?: 8891
+        ChannelClient.pingV2(ip, peerPort, ownFp, alias, port, timeoutMs = 3000)
+            .optString("fingerprint") == fp
+    } catch (_: Exception) {
+        false
+    }
+
     private val UUID_RE = Regex(
         "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
@@ -179,12 +188,17 @@ class ChannelServer(
                 }
                 val peer = intent.optString("deviceId")
                 val code = extra.optString("verifyCode")
+                // Our own peers mark an auto-connect ask with extra.auto;
+                // official clients never send it and keep the prompt.
+                val autoAsk = extra.opt("auto") == true || extra.optString("auto") == "true"
                 // Auto-connect: no prompt when the trust switch is on and the
-                // request really comes from the address we discovered for that
-                // fingerprint (the fingerprint alone is public on the wire).
+                // requester proves it is the fingerprint we discovered at this
+                // address - announce datagrams are unsigned, so the claim
+                // alone must not be trusted (see flixcli server.py).
                 val remote = session.remoteIpAddress ?: ""
-                val autoOk = autoConnectOn() && peer.isNotEmpty() &&
-                    remote.isNotEmpty() && store.deviceIp(peer) == remote
+                val autoOk = autoAsk && autoConnectOn() && peer.isNotEmpty() &&
+                    remote.isNotEmpty() && store.deviceIp(peer) == remote &&
+                    peerAnswersAt(peer, remote)
                 if (verify.isEmpty()) text(Response.Status.OK, "{301: pair Device Null}")
                 else if (verify != ownFp) text(Response.Status.OK,
                     "{302: device not match}")

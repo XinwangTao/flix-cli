@@ -242,8 +242,8 @@ class LocalApi:
     def get(self, path: str):
         return self._request(path)
 
-    def post(self, path: str, payload: dict):
-        return self._request(path, payload)
+    def post(self, path: str, payload: dict, timeout: int = 30):
+        return self._request(path, payload, timeout)
 
     def bytes(self, path: str) -> bytes:
         try:
@@ -253,12 +253,13 @@ class LocalApi:
         except (OSError, urllib.error.URLError) as exc:
             raise ApiError(str(exc)) from exc
 
-    def _request(self, path: str, payload: dict | None = None):
+    def _request(self, path: str, payload: dict | None = None,
+                 timeout: int = 30):
         try:
             data = json.dumps(payload).encode("utf-8") if payload is not None else None
             req = urllib.request.Request(self.base + path, data=data,
                                          headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=30) as response:  # nosec B310
+            with urllib.request.urlopen(req, timeout=timeout) as response:  # nosec B310
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             try:
@@ -2070,32 +2071,44 @@ class MainWindow(QMainWindow):
         """
         self.show_connect_qr()
 
+    # The switch has to live where the daemon reads it: the GUI keeps window
+    # preferences in ~/.relaydesk_gui.json, while Store.auto_connect_enabled()
+    # reads %APPDATA%/flixcli/shared_preferences.json. Writing the GUI file
+    # left the daemon auto-pairing after the user turned it off.
     def _auto_connect_on(self) -> bool:
-        raw = self._load_prefs().get("autoConnect")
-        if isinstance(raw, dict):
-            return bool(raw.get("enabled", True))
-        if isinstance(raw, bool):
-            return raw
-        return True
+        try:
+            with self._model_store() as store:
+                return store.auto_connect_enabled()
+        except Exception:  # noqa: BLE001 - a broken store must not blow up the UI
+            return True
+
+    def _device_auto_connect_on(self, fingerprint: str) -> bool:
+        try:
+            with self._model_store() as store:
+                return store.auto_connect_enabled(fingerprint)
+        except Exception:  # noqa: BLE001
+            return True
 
     def set_device_auto_connect(self, fingerprint: str, on: bool):
-        data = self._load_prefs()
-        conf = data.get("autoConnect")
-        conf = dict(conf) if isinstance(conf, dict) else {}
-        devices = conf.get("devices")
-        devices = dict(devices) if isinstance(devices, dict) else {}
-        devices[fingerprint] = bool(on)
-        conf["devices"] = devices
-        self._save_prefs(autoConnect=conf)
+        try:
+            with self._model_store() as store:
+                store.set_auto_connect(bool(on), fingerprint)
+        except Exception as error:  # noqa: BLE001
+            self.statusBar().showMessage(f"保存失败：{error}", 6000)
+            return
         self.statusBar().showMessage(
             "这台设备自动连接已" + ("开启" if on else "关闭"), 4000)
 
     def set_auto_connect(self, on: bool):
-        data = self._load_prefs()
-        conf = data.get("autoConnect")
-        conf = dict(conf) if isinstance(conf, dict) else {}
-        conf["enabled"] = bool(on)
-        self._save_prefs(autoConnect=conf)
+        try:
+            with self._model_store() as store:
+                store.set_auto_connect(bool(on))
+        except Exception as error:  # noqa: BLE001
+            self.statusBar().showMessage(f"保存失败：{error}", 6000)
+            return
+        # Paired and discovered devices only get another look on the next
+        # discovery event; nudge the daemon so a fresh switch takes effect now.
+        self.refresh()
 
     def _load_prefs(self) -> dict:
         try:
@@ -3552,12 +3565,9 @@ class MainWindow(QMainWindow):
             action = menu.addAction("已配对 · 无需再配" if paired else "与这台设备配对",
                                     self.pair_selected_device)
             action.setEnabled(not paired)
-            conf = self._load_prefs().get("autoConnect")
-            conf = conf if isinstance(conf, dict) else {}
-            per = conf.get("devices") if isinstance(conf.get("devices"), dict) else {}
             auto = menu.addAction("自动连接：这台设备免确认")
             auto.setCheckable(True)
-            auto.setChecked(bool(per.get(key, conf.get("enabled", True))))
+            auto.setChecked(self._device_auto_connect_on(key))
             auto.toggled.connect(
                 lambda on, fp=key: self.set_device_auto_connect(fp, on))
             menu.addSeparator()
@@ -3575,8 +3585,11 @@ class MainWindow(QMainWindow):
             return
         label = device.get("alias") or key[:8]
         self.statusBar().showMessage(f"正在向 {label} 发起配对，请在对方设备上确认…", 8000)
+        # The daemon waits up to PAIR_TIMEOUT (32s) for a peer that may only
+        # answer from a notification; a 30s client timeout would report
+        # failure while the pair still succeeded a moment later.
         self.run_action(
-            lambda: self.api.post("/api/pair", {"to": key}),
+            lambda: self.api.post("/api/pair", {"to": key}, timeout=45),
             lambda _result: self.statusBar().showMessage(f"已与 {label} 配对", 6000))
 
     # ---------- group management ----------

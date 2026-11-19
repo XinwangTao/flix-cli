@@ -162,6 +162,10 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
 
         old_dev = devices.get(fp)
         if old_dev is not None and _key(old_dev) == _key(dev):
+            # Still worth a look: a peer that refused the last auto-connect
+            # ask (or was offline) only gets retried on the next event for
+            # this device, and an unchanged announce IS that event.
+            _maybe_auto_connect(dev)
             return
         old_ip = store.device_ip(fp)[0]
         new_ip = dev.get("ip", "")
@@ -219,6 +223,20 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
             auto_pair_busy.discard(fp)
         if code != 0:
             print(f"[pair] auto-connect {fp[:8]} refused: {message}",
+                  file=sys.stderr, flush=True)
+            return
+        # `{0: success}` only says the peer accepted someone; announces are
+        # unsigned, so prove the fingerprint really answers at that address
+        # before the pair is written on our side too.
+        try:
+            modal = await ping_v2(ip, ident, port=port,
+                                  device_port=device_port, timeout=3.0)
+        except Exception as error:  # noqa: BLE001
+            print(f"[pair] auto-connect {fp[:8]} unverifiable: {error}",
+                  file=sys.stderr, flush=True)
+            return
+        if modal.get("fingerprint") != fp:
+            print(f"[pair] auto-connect {fp[:8]} identity mismatch at {ip}",
                   file=sys.stderr, flush=True)
             return
         store.add_pair(fp, store.own_pair_key())

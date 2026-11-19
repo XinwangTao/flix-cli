@@ -618,6 +618,9 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
         accept = extra.get("accept", True)
         if isinstance(accept, str):
             accept = accept.lower() == "true"
+        # Our own extension (model.pair_intent(auto=True)); official clients
+        # never send it, so their ask keeps the operator prompt.
+        auto_ask = extra.get("auto") is True
         remote = request.remote
         if intent.get("action") == model.ACTION_ASK_PAIR:
             if not isinstance(verify_device, str) or not verify_device:
@@ -634,12 +637,14 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
                 return web.Response(text="{0: success}")
             if not own_key or not hmac.compare_digest(supplied, own_key):
                 device_id = str(device_id or "")
-                # Auto-connect: with the trust switch on, a peer we already
-                # discovered at exactly this address is paired once /ping_v2
-                # proves the fingerprint answers there. The proof runs in the
-                # background - the ask never waits on it, because an
-                # unreachable candidate must not eat the caller's HTTP budget.
-                if device_id and remote and store.auto_connect_enabled(device_id):
+                # Auto-connect: our own peers mark the ask with extra.auto.
+                # Official clients never send it, so their one-tap flow keeps
+                # the operator prompt below. With the trust switch on, a peer
+                # we already discovered at exactly this address is paired
+                # once /ping_v2 proves the fingerprint answers there; the
+                # proof runs in the background so the ask never waits on it.
+                if (auto_ask and device_id and remote
+                        and store.auto_connect_enabled(device_id)):
                     known_ip = _device_ip(store, device_id)
                     if known_ip and known_ip == remote:
                         row = store.con.execute(
