@@ -1,0 +1,459 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RelayDesk 主动发现与官方 Flix 互通",
+    "locale": "zh-CN",
+    "level": "L1",
+    "status": "已确认",
+    "date": "2026-11-20",
+    "quality_profile": "showcase"
+  },
+  "scope": {
+    "in": "主动扫描发现任意版本设备；本机官方 Flix 注册；双向收发文本",
+    "out": "文件/群聊/WebRTC 与官方互通；改变官方协议本身的语义"
+  },
+  "canvas": {
+    "width": 1240,
+    "height": 720
+  },
+  "lanes": [
+    {
+      "id": "daemon",
+      "label": "RelayDesk 守护进程"
+    },
+    {
+      "id": "peer",
+      "label": "LAN / 官方 Flix 设备"
+    },
+    {
+      "id": "msg",
+      "label": "消息收发"
+    },
+    {
+      "id": "exits",
+      "label": "失败与边界"
+    }
+  ],
+  "bands": [
+    {
+      "lane": "daemon",
+      "y": 64,
+      "h": 140
+    },
+    {
+      "lane": "peer",
+      "y": 224,
+      "h": 140
+    },
+    {
+      "lane": "msg",
+      "y": 384,
+      "h": 140
+    },
+    {
+      "lane": "exits",
+      "y": 544,
+      "h": 130
+    }
+  ],
+  "mainPath": [
+    "start",
+    "scan",
+    "identify",
+    "merge",
+    "send",
+    "recv"
+  ],
+  "nodes": [
+    {
+      "id": "start",
+      "lane": "daemon",
+      "type": "start",
+      "status": "changed",
+      "x": 60,
+      "y": 96,
+      "w": 190,
+      "h": 78,
+      "label": "启动守护进程",
+      "sublabel": "18991 设备 · 8898 API · 不抢 8891"
+    },
+    {
+      "id": "scan",
+      "lane": "daemon",
+      "type": "process",
+      "status": "changed",
+      "x": 290,
+      "y": 96,
+      "w": 220,
+      "h": 78,
+      "label": "主动扫描",
+      "sublabel": "各物理网卡子网 + 本机 8891 · 60s"
+    },
+    {
+      "id": "register",
+      "lane": "daemon",
+      "type": "process",
+      "status": "new",
+      "x": 550,
+      "y": 96,
+      "w": 220,
+      "h": 78,
+      "label": "向本机官方注册",
+      "sublabel": "ping_v2 官方 8891 → 对方记我们 18991"
+    },
+    {
+      "id": "merge",
+      "lane": "daemon",
+      "type": "process",
+      "status": "changed",
+      "x": 810,
+      "y": 96,
+      "w": 210,
+      "h": 78,
+      "label": "设备列表合并",
+      "sublabel": "去重 · 标记 官方 / 未知版本"
+    },
+    {
+      "id": "identify",
+      "lane": "peer",
+      "type": "process",
+      "status": "unchanged",
+      "x": 290,
+      "y": 256,
+      "w": 220,
+      "h": 78,
+      "label": "身份识别",
+      "sublabel": "ping_v2 成功→指纹；不应答→unidentified"
+    },
+    {
+      "id": "recv",
+      "lane": "peer",
+      "type": "external",
+      "status": "unchanged",
+      "x": 550,
+      "y": 256,
+      "w": 220,
+      "h": 78,
+      "label": "接收消息",
+      "sublabel": "官方/任意版本 → 18991 /bubble"
+    },
+    {
+      "id": "send",
+      "lane": "msg",
+      "type": "messagebus",
+      "status": "changed",
+      "x": 810,
+      "y": 416,
+      "w": 210,
+      "h": 78,
+      "label": "发送消息",
+      "sublabel": "指纹 → ip:port → POST /bubble"
+    },
+    {
+      "id": "recvui",
+      "lane": "msg",
+      "type": "frontend",
+      "status": "unchanged",
+      "x": 550,
+      "y": 416,
+      "w": 220,
+      "h": 78,
+      "label": "会话入库与显示",
+      "sublabel": "官方来信与 RelayDesk 来信同列"
+    },
+    {
+      "id": "fail",
+      "lane": "exits",
+      "type": "process",
+      "status": "unchanged",
+      "x": 550,
+      "y": 576,
+      "w": 240,
+      "h": 78,
+      "label": "不可达 → outbox",
+      "sublabel": "30 秒重投，工具立即返回 queued"
+    },
+    {
+      "id": "unknown",
+      "lane": "exits",
+      "type": "process",
+      "status": "changed",
+      "x": 830,
+      "y": 576,
+      "w": 240,
+      "h": 78,
+      "label": "未识别设备",
+      "sublabel": "只可见；发送前提示先 ping 认身份"
+    }
+  ],
+  "edges": [
+    {
+      "from": "start",
+      "to": "scan",
+      "kind": "main",
+      "label": "首扫 2s",
+      "labelAt": [
+        275,
+        114
+      ],
+      "points": [
+        [
+          250,
+          135
+        ],
+        [
+          290,
+          135
+        ]
+      ]
+    },
+    {
+      "from": "scan",
+      "to": "identify",
+      "kind": "main",
+      "label": "候选 IP",
+      "labelAt": [
+        405,
+        213
+      ],
+      "points": [
+        [
+          400,
+          174
+        ],
+        [
+          400,
+          256
+        ]
+      ]
+    },
+    {
+      "from": "identify",
+      "to": "merge",
+      "kind": "main",
+      "label": "指纹 / unidentified",
+      "labelAt": [
+        700,
+        205
+      ],
+      "points": [
+        [
+          510,
+          295
+        ],
+        [
+          915,
+          295
+        ],
+        [
+          915,
+          174
+        ]
+      ]
+    },
+    {
+      "from": "start",
+      "to": "register",
+      "kind": "emphasis",
+      "label": "官方在跑",
+      "labelAt": [
+        520,
+        90
+      ],
+      "points": [
+        [
+          250,
+          135
+        ],
+        [
+          550,
+          135
+        ]
+      ]
+    },
+    {
+      "from": "register",
+      "to": "merge",
+      "kind": "main",
+      "points": [
+        [
+          770,
+          135
+        ],
+        [
+          810,
+          135
+        ]
+      ]
+    },
+    {
+      "from": "merge",
+      "to": "send",
+      "kind": "main",
+      "label": "选定会话",
+      "labelAt": [
+        925,
+        265
+      ],
+      "points": [
+        [
+          915,
+          174
+        ],
+        [
+          915,
+          416
+        ]
+      ]
+    },
+    {
+      "from": "send",
+      "to": "recv",
+      "kind": "main",
+      "label": "对端在线",
+      "labelAt": [
+        745,
+        372
+      ],
+      "points": [
+        [
+          810,
+          455
+        ],
+        [
+          660,
+          455
+        ],
+        [
+          660,
+          334
+        ]
+      ]
+    },
+    {
+      "from": "send",
+      "to": "fail",
+      "kind": "security",
+      "role": "error",
+      "label": "超时/拒绝",
+      "labelAt": [
+        560,
+        500
+      ],
+      "points": [
+        [
+          870,
+          494
+        ],
+        [
+          670,
+          494
+        ],
+        [
+          670,
+          576
+        ]
+      ]
+    },
+    {
+      "from": "identify",
+      "to": "unknown",
+      "kind": "security",
+      "role": "error",
+      "label": "端口开但不应答",
+      "labelAt": [
+        700,
+        340
+      ],
+      "points": [
+        [
+          510,
+          295
+        ],
+        [
+          950,
+          295
+        ],
+        [
+          950,
+          576
+        ]
+      ]
+    },
+    {
+      "from": "recv",
+      "to": "recvui",
+      "kind": "main",
+      "points": [
+        [
+          660,
+          334
+        ],
+        [
+          660,
+          416
+        ]
+      ]
+    }
+  ],
+  "changes": [
+    {
+      "node": "start",
+      "level": "调整",
+      "text": "设备通道固定 18991，不再抢占官方 8891/8898；官方没装时才允许回到 8891。"
+    },
+    {
+      "node": "scan",
+      "level": "调整",
+      "text": "扫描目标从「首选网卡 /24」改为每个物理网卡的子网（/23 覆盖 236 与 237 两段），并把本机回环 8891 纳入，发现同机官方客户端。"
+    },
+    {
+      "node": "register",
+      "level": "新增",
+      "text": "启动及每 60 秒对本机官方 8891 发一次 ping_v2（device_port=18991），官方 upsert 后即可回连我们；实测官方库把 port 改为 18991。"
+    },
+    {
+      "node": "merge",
+      "level": "调整",
+      "text": "unidentified 设备保留在列表，标记「官方 Flix / 未知版本」，不再只出现在日志。"
+    },
+    {
+      "node": "send",
+      "level": "修复",
+      "text": "按 ip:port 发送但本地无该设备时，先 ping_v2 取得指纹再发；当前会把 \"127.0.0.1:8891\" 原样写进 to，官方回 500 receive bubble failed。"
+    },
+    {
+      "node": "unknown",
+      "level": "新增",
+      "text": "未识别设备发消息给出可读提示，避免把 500 当网络故障。"
+    }
+  ],
+  "cards": [
+    {
+      "kind": "note",
+      "title": "已实测",
+      "body": "官方 Flix 2.0.4+100 收到我们 port=18991 的公告却不更新已有记录；对它发一次 ping_v2 后，其 persistence_devices 把 THEWANG 从 8891 改成 18991。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 · 只有一个 8891",
+      "body": "同机只能有一个 8891 监听。官方在跑时我们绝不监听 8891，否则官方设备通道与桌面 API 都起不来（实测只剩 8892）。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 · 旧官方记录",
+      "body": "官方库里若把我们记成 8891，会发给自己；注册步骤就是自动纠正这一条，无需用户在官方 UI 手动改。"
+    },
+    {
+      "kind": "note",
+      "title": "本批不改",
+      "body": "wire 格式、/intent、文件、群聊、配对语义保持不变；只改扫描目标、端口策略与发送前解析。"
+    },
+    {
+      "kind": "note",
+      "title": "2026-11-20 实测",
+      "body": "官方 Flix 2.0.4+100 的数据库缺少 auto_receive 表，收到任何气泡都会 500（SqliteException: no such table: auto_receive）。官方→RelayDesk 已通；RelayDesk→该官方实例被其自身库缺陷阻断，需修复/重装官方客户端。"
+    }
+  ]
+}

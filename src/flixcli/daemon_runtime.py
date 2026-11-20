@@ -115,6 +115,11 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
                      announce: bool = True, clip_sync: bool = True,
                      web_port: int = 0, multicast_if: str | None = None,
                      model_port: int = 0) -> int:
+    # Remember the port we actually listen on: a later one-shot CLI send that
+    # has to ping_v2 an unknown peer must advertise the real port, or it would
+    # teach the official client to write 8891 back over our 18991 record.
+    with contextlib.suppress(Exception):
+        store.set_pref("devicePort", int(device_port))
     devices: dict[str, dict] = {}
     verify_pending: set[str] = set()
 
@@ -286,7 +291,8 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
 
     async def send_text(to: str, text: str) -> dict:
         from .outbox import send_text as durable_send
-        result = await durable_send(store, ident, to, text)
+        result = await durable_send(store, ident, to, text,
+                                    device_port=device_port)
         bubble = result.pop("bubble", None)
         if bubble and result.get("state") in ("delivered", "queued"):
             # Echo locally so the transcript shows the message either way; the
@@ -336,7 +342,17 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
         do parse a valid announce arriving on UDP 8891 — that is what makes
         them show us without restarting.
         """
-        from .discovery import local_hosts, scan_lan
+        from .discovery import local_hosts, register_official, scan_lan
+        # Register before the sweep: the official client only needs the
+        # ping_v2 modal to move us from 8891 to 18991, and doing it first means
+        # the sweep that follows can already see it under its real identity.
+        try:
+            official = await register_official(ident, device_port)
+            if official:
+                on_device(official)
+        except Exception as exc:  # registration is best effort
+            print(f"[scan] official registration failed: {exc}",
+                  file=sys.stderr, flush=True)
         hosts = local_hosts(disc.iface)
         found = await scan_lan(
             on_device, ident, device_port,

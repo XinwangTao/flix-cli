@@ -176,6 +176,12 @@ class Store:
              int(time.time() * 1000), "", ""))
         self.con.commit()
 
+    def remove_device(self, fingerprint: str) -> None:
+        """Drop a device row (used to retire an ``ip:`` scan placeholder)."""
+        self.con.execute("DELETE FROM persistence_devices WHERE fingerprint=?",
+                         (fingerprint,))
+        self.con.commit()
+
     def devices(self) -> list[dict]:
         cur = self.con.execute(
             "SELECT fingerprint, alias, device_model, port, version, ip, os,"

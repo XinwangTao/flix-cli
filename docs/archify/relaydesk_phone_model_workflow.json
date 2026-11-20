@@ -1,0 +1,478 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "手机端使用局域网共享模型",
+    "locale": "zh-CN",
+    "level": "L2",
+    "status": "已确认",
+    "date": "2026-11-20",
+    "quality_profile": "showcase"
+  },
+  "scope": {
+    "in": "手机扫码拿到网关地址与令牌；新增 AI 对话页；Anthropic Messages 端到端",
+    "out": "OpenAI 兼容路径；多上游分流；改 cc-switch 配置；离线本地推理"
+  },
+  "canvas": {
+    "width": 1240,
+    "height": 720
+  },
+  "lanes": [
+    {
+      "id": "desktop",
+      "label": "桌面 RelayDesk"
+    },
+    {
+      "id": "phone",
+      "label": "手机 App"
+    },
+    {
+      "id": "gateway",
+      "label": "模型网关（18993）"
+    },
+    {
+      "id": "upstream",
+      "label": "本机 cc-switch"
+    },
+    {
+      "id": "exits",
+      "label": "失败出口"
+    }
+  ],
+  "bands": [
+    {
+      "lane": "desktop",
+      "y": 64,
+      "h": 120
+    },
+    {
+      "lane": "phone",
+      "y": 194,
+      "h": 120
+    },
+    {
+      "lane": "gateway",
+      "y": 324,
+      "h": 120
+    },
+    {
+      "lane": "upstream",
+      "y": 454,
+      "h": 120
+    },
+    {
+      "lane": "exits",
+      "y": 584,
+      "h": 110
+    }
+  ],
+  "mainPath": [
+    "cfg",
+    "qr",
+    "scan",
+    "chat",
+    "req",
+    "auth",
+    "fwd",
+    "back"
+  ],
+  "nodes": [
+    {
+      "id": "cfg",
+      "lane": "desktop",
+      "type": "frontend",
+      "status": "unchanged",
+      "x": 60,
+      "y": 96,
+      "w": 190,
+      "h": 78,
+      "label": "开启模型共享",
+      "sublabel": "GUI 开关 / flix models start"
+    },
+    {
+      "id": "qr",
+      "lane": "desktop",
+      "type": "frontend",
+      "status": "unchanged",
+      "x": 290,
+      "y": 96,
+      "w": 210,
+      "h": 78,
+      "label": "连接二维码",
+      "sublabel": "base + token 同码下发"
+    },
+    {
+      "id": "scan",
+      "lane": "phone",
+      "type": "frontend",
+      "status": "unchanged",
+      "x": 290,
+      "y": 226,
+      "w": 210,
+      "h": 78,
+      "label": "扫码写入",
+      "sublabel": "model_base / model_token"
+    },
+    {
+      "id": "chat",
+      "lane": "phone",
+      "type": "frontend",
+      "status": "new",
+      "x": 540,
+      "y": 226,
+      "w": 210,
+      "h": 78,
+      "label": "AI 对话页",
+      "sublabel": "新增：输入 / 流式显示 / 停止"
+    },
+    {
+      "id": "req",
+      "lane": "phone",
+      "type": "messagebus",
+      "status": "new",
+      "x": 790,
+      "y": 226,
+      "w": 200,
+      "h": 78,
+      "label": "POST /v1/messages",
+      "sublabel": "x-api-key · SSE"
+    },
+    {
+      "id": "auth",
+      "lane": "gateway",
+      "type": "security",
+      "status": "unchanged",
+      "x": 790,
+      "y": 356,
+      "w": 200,
+      "h": 78,
+      "label": "令牌 + 并发门",
+      "sublabel": "401 / 429 立即拒绝"
+    },
+    {
+      "id": "fwd",
+      "lane": "gateway",
+      "type": "backend",
+      "status": "unchanged",
+      "x": 540,
+      "y": 356,
+      "w": 210,
+      "h": 78,
+      "label": "反向代理",
+      "sublabel": "body 与流原样透传"
+    },
+    {
+      "id": "upstream",
+      "lane": "upstream",
+      "type": "cloud",
+      "status": "unchanged",
+      "x": 540,
+      "y": 486,
+      "w": 210,
+      "h": 78,
+      "label": "cc-switch 15721",
+      "sublabel": "模型映射 · 账号 · 计费"
+    },
+    {
+      "id": "back",
+      "lane": "gateway",
+      "type": "backend",
+      "status": "unchanged",
+      "x": 290,
+      "y": 356,
+      "w": 200,
+      "h": 78,
+      "label": "回显",
+      "sublabel": "SSE / JSON 原样返回"
+    },
+    {
+      "id": "e401",
+      "lane": "exits",
+      "type": "security",
+      "status": "unchanged",
+      "x": 790,
+      "y": 610,
+      "w": 190,
+      "h": 70,
+      "label": "401 令牌不符"
+    },
+    {
+      "id": "e429",
+      "lane": "exits",
+      "type": "security",
+      "status": "unchanged",
+      "x": 540,
+      "y": 610,
+      "w": 190,
+      "h": 70,
+      "label": "429 并发已满"
+    },
+    {
+      "id": "e502",
+      "lane": "exits",
+      "type": "process",
+      "status": "unchanged",
+      "x": 290,
+      "y": 610,
+      "w": 190,
+      "h": 70,
+      "label": "502 上游不可达"
+    }
+  ],
+  "edges": [
+    {
+      "from": "cfg",
+      "to": "qr",
+      "kind": "main",
+      "label": "已监听",
+      "labelAt": [
+        275,
+        114
+      ],
+      "points": [
+        [
+          250,
+          135
+        ],
+        [
+          290,
+          135
+        ]
+      ]
+    },
+    {
+      "from": "qr",
+      "to": "scan",
+      "kind": "main",
+      "label": "同一张码",
+      "labelAt": [
+        405,
+        188
+      ],
+      "points": [
+        [
+          395,
+          174
+        ],
+        [
+          395,
+          226
+        ]
+      ]
+    },
+    {
+      "from": "scan",
+      "to": "chat",
+      "kind": "main",
+      "points": [
+        [
+          500,
+          265
+        ],
+        [
+          540,
+          265
+        ]
+      ]
+    },
+    {
+      "from": "chat",
+      "to": "req",
+      "kind": "main",
+      "points": [
+        [
+          750,
+          265
+        ],
+        [
+          790,
+          265
+        ]
+      ]
+    },
+    {
+      "from": "req",
+      "to": "auth",
+      "kind": "main",
+      "points": [
+        [
+          890,
+          304
+        ],
+        [
+          890,
+          356
+        ]
+      ]
+    },
+    {
+      "from": "auth",
+      "to": "fwd",
+      "kind": "main",
+      "label": "通过",
+      "labelAt": [
+        775,
+        380
+      ],
+      "points": [
+        [
+          790,
+          395
+        ],
+        [
+          750,
+          395
+        ]
+      ]
+    },
+    {
+      "from": "fwd",
+      "to": "upstream",
+      "kind": "main",
+      "points": [
+        [
+          645,
+          434
+        ],
+        [
+          645,
+          486
+        ]
+      ]
+    },
+    {
+      "from": "upstream",
+      "to": "back",
+      "kind": "main",
+      "label": "响应",
+      "labelAt": [
+        520,
+        460
+      ],
+      "points": [
+        [
+          540,
+          525
+        ],
+        [
+          390,
+          525
+        ],
+        [
+          390,
+          434
+        ]
+      ]
+    },
+    {
+      "from": "auth",
+      "to": "e401",
+      "kind": "security",
+      "role": "error",
+      "points": [
+        [
+          890,
+          434
+        ],
+        [
+          890,
+          610
+        ]
+      ]
+    },
+    {
+      "from": "auth",
+      "to": "e429",
+      "kind": "security",
+      "role": "error",
+      "label": "并发满",
+      "labelAt": [
+        730,
+        480
+      ],
+      "points": [
+        [
+          790,
+          414
+        ],
+        [
+          635,
+          414
+        ],
+        [
+          635,
+          610
+        ]
+      ]
+    },
+    {
+      "from": "fwd",
+      "to": "e502",
+      "kind": "security",
+      "role": "error",
+      "label": "连不上",
+      "labelAt": [
+        430,
+        470
+      ],
+      "points": [
+        [
+          540,
+          395
+        ],
+        [
+          385,
+          395
+        ],
+        [
+          385,
+          610
+        ]
+      ]
+    }
+  ],
+  "changes": [
+    {
+      "node": "chat",
+      "level": "新增",
+      "text": "手机端新增 AI 对话页：复用现有底部输入与消息气泡样式，独立入口，不混进设备会话。"
+    },
+    {
+      "node": "req",
+      "level": "新增",
+      "text": "客户端按 Anthropic Messages 发请求，令牌走 x-api-key；流式用 SSE，逐段渲染。"
+    },
+    {
+      "node": "scan",
+      "level": "修复",
+      "text": "实测手机当前 prefs 里没有 model_base/model_token；扫码后必须落盘并在设置页显示，而不是只在配对成功时提示。"
+    },
+    {
+      "node": "cfg",
+      "level": "不变",
+      "text": "网关后端已验证：手机 curl /health 返回 ok，/v1/messages 返回真实模型结果。本批只补客户端与配置链路。"
+    }
+  ],
+  "cards": [
+    {
+      "kind": "note",
+      "title": "已实测",
+      "body": "手机（192.168.236.182）curl http://192.168.237.7:18993/health → {\"ok\":true}；/v1/messages 返回 deepseek-v4-1-flash 的真实补全。"
+    },
+    {
+      "kind": "note",
+      "title": "一个出口",
+      "body": "手机只认 /v1/messages；模型映射、账号、计费继续留在 cc-switch，RelayDesk 只持有访问令牌。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 · 网关没开",
+      "body": "二维码仍可生成，只带配对信息，并明确提示先在桌面开启模型共享。"
+    },
+    {
+      "kind": "fail",
+      "title": "出口 · 令牌失效",
+      "body": "401 在对话页直接显示「令牌无效，请在桌面重新扫码」，不重试。"
+    }
+  ]
+}

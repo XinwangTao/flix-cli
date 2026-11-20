@@ -194,21 +194,119 @@ class _Protocol(asyncio.DatagramProtocol):
         print(f"[discovery] {exc}", file=sys.stderr, flush=True)
 
 
-def local_hosts(iface_ip: str | None = None) -> list[str]:
-    """Candidate hosts on the local /24, excluding this machine.
+# A single sweep must stay bounded: a corporate /16 NIC would otherwise turn
+# one 60-second tick into 65k TCP connects. /22 (1022 hosts) is the widest
+# shape a home/office LAN realistically uses; anything wider is trimmed to the
+# /24 around our own address.
+MAX_SWEEP_HOSTS = 1024
 
-    /24 is the common home/office LAN shape. A wider mask would multiply the
-    probe count without a matching discovery benefit; peers on another subnet
-    are out of scope for broadcast discovery anyway.
-    """
-    ip = iface_ip or default_iface_ip()
-    if not ip:
+
+def _subnet_hosts(ip: str, mask: str, budget: int) -> list[str]:
+    if budget <= 0 or not mask:
         return []
     try:
-        net = ipaddress.ip_network(f"{ip}/24", strict=False)
+        net = ipaddress.ip_network(f"{ip}/{mask}", strict=False)
     except ValueError:
         return []
-    return [str(host) for host in net.hosts() if str(host) != ip]
+    if net.prefixlen < 22:
+        net = ipaddress.ip_network(f"{ip}/24", strict=False)
+    return [str(host) for host in list(net.hosts())[:budget]]
+
+
+def _physical_rows() -> list[tuple[str, str]]:
+    """(address, mask) for every adapter that can carry LAN traffic."""
+    from . import _win_ipv4_table, is_virtual_ip, virtual_interfaces
+    try:
+        rows = _win_ipv4_table()
+    except Exception:  # noqa: BLE001 - discovery must never fail to start
+        rows = []
+    virtual = {ip for ip, _name in virtual_interfaces()}
+    out: list[tuple[str, str]] = []
+    for ip, mask in rows:
+        if not ip or ip in virtual or is_virtual_ip(ip):
+            continue
+        if ip.startswith(("127.", "169.254.")):
+            continue
+        if mask in ("255.255.255.255", "255.255.255.254"):
+            continue
+        out.append((ip, mask))
+    if not out:
+        primary = default_iface_ip()
+        if primary:
+            out.append((primary, "255.255.255.0"))
+    return out
+
+
+def local_hosts(iface_ip: str | None = None,
+                limit: int = MAX_SWEEP_HOSTS) -> list[str]:
+    """Candidate hosts on every physical subnet, plus this machine.
+
+    Two shapes were missed by the old "primary /24, minus our own address"
+    rule: a /23 home LAN puts phones on the other half (192.168.236.x while we
+    are 192.168.237.7), and the official Flix client on this very machine only
+    answers at our own address or 127.0.0.1. Both are included now; our own
+    fingerprint is still filtered by scan_lan, so probing ourselves is safe.
+    """
+    targets: list[str] = []
+    seen: set[str] = set()
+
+    def add(ip: str) -> None:
+        if ip and ip not in seen and len(targets) < limit:
+            seen.add(ip)
+            targets.append(ip)
+
+    rows = _physical_rows()
+    if not rows and iface_ip:
+        rows = [(iface_ip, "255.255.255.0")]
+    if iface_ip:
+        rows = ([(iface_ip, "255.255.255.0")]
+                + [row for row in rows if row[0] != iface_ip])
+    for ip, mask in rows:
+        for host in _subnet_hosts(ip, mask, limit - len(targets)):
+            add(host)
+        add(ip)          # the official client answers on our own address
+        if len(targets) >= limit:
+            break
+    add("127.0.0.1")     # and on loopback
+    return targets
+
+
+async def register_official(ident: dict, device_port: int,
+                            timeout: float = 2.0) -> dict | None:
+    """Make the official client on this machine point at our port.
+
+    Official Flix answers /ping_v2 by upserting the requester's deviceModal,
+    but it ignores an announce for a fingerprint it already stores. A record
+    left at 8891 therefore sends our messages back to itself; one ping_v2 is
+    what moves it to 18991 (verified against 2.0.4+100). Returns the official
+    modal when it answered, otherwise None.
+    """
+    if device_port == DEVICE_PORT:
+        return None
+    from .channel import PeerError, ping_v2
+
+    addresses: list[str] = []
+    own = default_iface_ip()
+    if own:
+        addresses.append(own)
+    addresses.append("127.0.0.1")
+    for ip in addresses:
+        try:
+            modal = await ping_v2(ip, ident, port=DEVICE_PORT,
+                                  device_port=device_port,
+                                  timeout=timeout, from_="manual")
+        except PeerError:
+            continue
+        except Exception:  # noqa: BLE001 - registration is best effort
+            continue
+        fp = modal.get("fingerprint")
+        if not fp or fp == ident.get("fingerprint"):
+            continue
+        modal = dict(modal)
+        modal["ip"] = ip
+        modal["source"] = ip
+        return modal
+    return None
 
 
 async def scan_lan(on_device: Callable[[dict], None], ident: dict,

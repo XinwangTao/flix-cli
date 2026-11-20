@@ -228,6 +228,16 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
         if not isinstance(bubble, dict) or not isinstance(bubble.get("id"), str) \
                 or not isinstance(bubble.get("from"), str):
             return web.Response(status=400, text="receive bubble failed")
+        # Diagnostics only: RELAYDESK_BUBBLE_DUMP=<file> captures the verbatim
+        # wire shape an official client sends, the only reliable way to mirror
+        # fields a newer or older build expects.
+        dump = os.environ.get("RELAYDESK_BUBBLE_DUMP")
+        if dump:
+            with contextlib.suppress(OSError):
+                with open(dump, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(
+                        {"headers": dict(request.headers),
+                         "body": bubble}, ensure_ascii=False) + "\n")
         sender = bubble["from"]
         # `from` is attacker-controlled in the JSON body. Pairing plus a
         # matching source address is the only identity this transport has.

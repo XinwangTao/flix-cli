@@ -7,10 +7,12 @@ an ack. Non-idempotent actions (shell, upgrade) deliberately stay one-shot.
 """
 from __future__ import annotations
 
+import contextlib
+import ipaddress
 import json
 
 from . import DEVICE_PORT, model
-from .channel import PeerError, post_bubble
+from .channel import PeerError, ping_v2, post_bubble
 from .routing import resolve_target
 
 
@@ -18,17 +20,89 @@ def _acked(reply: str) -> bool:
     return "received bubble" in (reply or "")
 
 
-async def send_text(store, ident: dict, to: str, text: str,
-                    port: int | None = None) -> dict:
-    """Queue the bubble, try once, and report delivered|queued|failed."""
+def _placeholder(fp: str) -> bool:
+    """Scan entries use ``ip:<addr>:<port>`` until a probe proves a fingerprint."""
+    return not fp or fp.startswith("ip:")
+
+
+def _endpoint(text: str) -> bool:
+    """True when the target is an address, not an identity."""
+    head, _, tail = text.rpartition(":")
+    candidate = head if tail.isdigit() and head else text
+    try:
+        ipaddress.ip_address(candidate)
+        return True
+    except ValueError:
+        return False
+
+
+def _advertised_port(store, override: int | None) -> int:
+    """The device port peers should connect back on.
+
+    A CLI one-shot has no daemon arguments, so it reads what the daemon last
+    bound. Sending 8891 while the daemon sits on 18991 would make the official
+    client rewrite our record to 8891 — the exact failure this batch fixes.
+    """
+    if override:
+        return int(override)
+    raw = (store.prefs() or {}).get("devicePort")
+    try:
+        return int(raw) if raw else DEVICE_PORT
+    except (TypeError, ValueError):
+        return DEVICE_PORT
+
+
+async def _resolve_peer(store, ident: dict, to: str, port: int | None,
+                        device_port: int) -> tuple[str | None, int | None, str]:
+    """Resolve a target; an unknown ip:port is identified by ping_v2 first.
+
+    Without this, sending to ``192.168.1.9:8891`` put the literal endpoint in
+    the bubble's ``to`` field and the official client answered
+    ``500 receive bubble failed``. The probe also fills our device table, so
+    the next send resolves by fingerprint.
+    """
     ip, resolved_port, fp = resolve_target(store, to)
+    if not ip:
+        return None, None, ""
+    use_port = int(resolved_port or port or DEVICE_PORT)
+    if not _placeholder(fp) and not (fp == to and _endpoint(to)):
+        return ip, use_port, fp
+    try:
+        modal = await ping_v2(ip, ident, port=use_port,
+                              device_port=device_port, timeout=3.0)
+    except PeerError:
+        return ip, use_port, ""
+    real = str(modal.get("fingerprint") or "")
+    if not real or real == ident.get("fingerprint"):
+        return ip, use_port, ""
+    store.upsert_device(real, alias=str(modal.get("alias") or ""),
+                        device_model=str(modal.get("deviceModel") or ""),
+                        port=modal.get("port"), version=modal.get("version"),
+                        ip=ip, os_name=str(modal.get("os") or ""))
+    if _placeholder(fp):
+        with contextlib.suppress(Exception):
+            store.remove_device(fp)
+    return ip, use_port, real
+
+
+async def send_text(store, ident: dict, to: str, text: str,
+                    port: int | None = None,
+                    device_port: int | None = None) -> dict:
+    """Queue the bubble, try once, and report delivered|queued|failed."""
+    ip, use_port, fp = await _resolve_peer(
+        store, ident, to, port, _advertised_port(store, device_port))
     if not ip:
         return {"ok": False, "error": "no-device",
                 "detail": f"unknown target {to!r}; run 'flix discover' first"}
+    if not fp:
+        return {"ok": False, "error": "unknown-identity",
+                "detail": (f"{to} 端口开着，但没有应答 ping_v2；"
+                           "这是官方 Flix 或其它版本，先在设置里刷新设备再发送"),
+                "to": to}
     bubble = model.text_bubble(ident["fingerprint"], fp, text)
     store.add_outbox(bubble["id"], fp, "text",
                      json.dumps(bubble, ensure_ascii=False))
-    result = await _attempt(store, bubble, ip, resolved_port or port or DEVICE_PORT)
+    result = await _attempt(store, bubble, ip, use_port)
     result["bubble"] = bubble
     return result
 

@@ -1394,11 +1394,12 @@ class MainWindow(QMainWindow):
         return page
 
     def start_local_daemon(self, force: bool = False):
-        """Start the background service, preferring the official port 8891.
+        """Start the background service, keeping 8891 for official Flix.
 
-        The official Flix app sends to the fixed discovery/channel port 8891;
-        an instance parked on 18991 can be discovered but cannot receive its
-        messages. Fall back to 18991 only when 8891 is already owned.
+        Only one process can own 8891. When the official client is installed
+        we stay on 18991 and register with it over ping_v2 — taking 8891 would
+        leave the official app with no device channel at all. Machines without
+        the official client may use 8891 directly.
         """
         force = force or getattr(self, "_force_start", False)
         self._force_start = False
@@ -1434,7 +1435,7 @@ class MainWindow(QMainWindow):
                                        | subprocess.CREATE_NO_WINDOW)
         else:
             kwargs["start_new_session"] = True
-        device_port = 8891 if self._port_free(8891) else 18991
+        device_port = self._preferred_device_port()
         # A stale daemon may still own 18998; start the new build on the next
         # free candidate so discover() can find it instead of colliding.
         api_port = next(
@@ -1544,8 +1545,28 @@ class MainWindow(QMainWindow):
         finally:
             probe.close()
 
+    @staticmethod
+    def _preferred_device_port() -> int:
+        """18991 whenever official Flix is installed; 8891 only otherwise.
+
+        Official Flix binds 8891 for its whole lifetime and has no fallback:
+        with 8891 taken it only serves its web page (observed), so the desktop
+        app silently loses LAN messaging. Registration with ping_v2 is what
+        keeps the official side pointing at us instead.
+        """
+        from . import official_flix_installed
+        if official_flix_installed():
+            return 18991
+        return 8891 if MainWindow._port_free(8891) else 18991
+
     def _heal_device_port(self, self_port: int) -> bool:
-        """Move a daemon parked off 8891 back to the official port once."""
+        """Never move off 18991 while official Flix is installed."""
+        # Only older builds parked on 18991 *without* official Flix benefit
+        # from moving back to 8891; with the official client present that move
+        # is what starves its device channel.
+        from . import official_flix_installed
+        if official_flix_installed():
+            return False
         # Only the known fallback port is healed. A user who chose a custom
         # --device-port intentionally must not be moved, and test payloads
         # (e.g. an API port in self.port) must not trigger a restart.
@@ -1596,8 +1617,13 @@ class MainWindow(QMainWindow):
         if isinstance(overview, dict):
             self_port = int((overview.get("self") or {}).get("port") or 0)
         if self_port and self_port != 8891:
-            self.statusBar().showMessage(
-                f"设备端口 {self_port}：官方 Flix 互通不可用（8891 被占用）", 10000)
+            from . import official_flix_installed
+            if official_flix_installed():
+                self.statusBar().showMessage(
+                    f"设备端口 {self_port}：官方 Flix 占用 8891，已自动注册互通", 10000)
+            else:
+                self.statusBar().showMessage(
+                    f"设备端口 {self_port}（8891 被其它程序占用）", 10000)
         else:
             self.statusBar().showMessage(f"已连接本机服务 :{self.api_port}")
         self.refresh()
@@ -2863,9 +2889,14 @@ class MainWindow(QMainWindow):
             f"设备通道端口：{(payload.get('self') or {}).get('port', '未设置')}\n"
             f"下载目录：{(payload.get('settings') or {}).get('saveDir') or '系统 Downloads'}\n"
             f"活动媒体会话：{len((payload.get('media') or {}).get('sessions', []))}")
-        if (payload.get("self") or {}).get("port") not in (None, 8891):
+        self_port = (payload.get("self") or {}).get("port")
+        if self_port not in (None, 8891):
+            from . import official_flix_installed
+            note = ("官方 Flix 占用 8891；已通过 ping_v2 注册，双向消息照常"
+                    if official_flix_installed()
+                    else "8891 被其它程序占用；官方 Flix 互通需先释放该端口")
             self.settings_text.setText(
-                self.settings_text.text() + "\n⚠ 未占用 8891，官方 Flix 互通不可用")
+                self.settings_text.text() + "\n· " + note)
         self.populate_sidebar()
         self.populate_transfers()
         self.populate_adb()
@@ -2936,6 +2967,11 @@ class MainWindow(QMainWindow):
                 title = device.get("alias") or device.get("fingerprint", "")[:8]
                 subtitle = (f"{device.get('os') or 'unknown'} · "
                             f"{device.get('ip') or '离线'}:{device.get('port') or ''}")
+                # A scan placeholder (fingerprint "ip:…") is a port that
+                # answered but did not identify itself: official Flix or a
+                # version without /ping_v2. Say so instead of "unknown".
+                if str(device.get("fingerprint", "")).startswith("ip:"):
+                    subtitle = "官方 Flix / 其它版本 · " + subtitle
                 entities.append((title, subtitle, device.get("fingerprint", ""),
                                  "device", is_online(device)))
         if conversation_list or mode == "groups":

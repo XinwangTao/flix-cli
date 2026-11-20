@@ -509,3 +509,19 @@ def default_iface_ip() -> str:
 def local_ip() -> str:
     """Best-effort LAN IP (see default_iface_ip)."""
     return default_iface_ip()
+
+
+def official_flix_installed() -> bool:
+    """True when the official Flix client lives on this machine.
+
+    It owns TCP/UDP 8891 for its whole lifetime. RelayDesk taking 8891 while
+    the official app is installed leaves that app with no device channel at
+    all (observed: it then binds only its web port 8892), so the daemon parks
+    on 18991 and registers itself with ping_v2 instead.
+    """
+    if not sys.platform.startswith("win"):
+        return False
+    return any(os.path.exists(path) for path in (
+        r"C:\Program Files\Flix\flix.exe",
+        r"C:\Program Files (x86)\Flix\flix.exe",
+    ))

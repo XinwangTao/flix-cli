@@ -41,7 +41,10 @@ import android.widget.TextView
 import android.widget.Toast
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
+import org.json.JSONArray
 import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -93,6 +96,16 @@ class MainActivity : Activity() {
     // settings screen (v2D)
     private lateinit var settingsScreen: LinearLayout
     private lateinit var settingsBody: LinearLayout
+    // AI assistant (shared LAN model gateway)
+    private lateinit var aiScreen: LinearLayout
+    private lateinit var aiMessages: LinearLayout
+    private lateinit var aiScroll: ScrollView
+    private lateinit var aiInput: EditText
+    private lateinit var aiSend: TextView
+    private lateinit var aiTitle: TextView
+    private lateinit var aiModelChip: TextView
+    private var aiBusy = false
+    private var aiModel = "claude-sonnet-5-5"
     // in-conversation search (v2D)
     private lateinit var searchRow: LinearLayout
     private lateinit var searchEdit: EditText
@@ -292,11 +305,13 @@ class MainActivity : Activity() {
         val add = headerButton("＋", 20f) {
             if (listMode == MODE_GROUPS) createGroupDialog() else manualAddDialog()
         }
+        val aiButton = headerButton("✦", 18f) { openAiChat() }
         val more = headerButton("⋮", 19f) { showHeaderMenu() }
         headerMore = more
         listHeader.addView(brandColumn)
         listHeader.addView(refresh)
         listHeader.addView(add)
+        listHeader.addView(aiButton)
         listHeader.addView(more)
 
         tabDevices = TextView(this).apply {
@@ -605,6 +620,89 @@ class MainActivity : Activity() {
         }, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
+        // -- AI assistant (shared LAN model gateway) --
+        aiScreen = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.TRANSPARENT)
+            visibility = View.GONE
+        }
+        val aiHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(8), dp(10), dp(14), dp(10))
+            setBackgroundColor(getColor(R.color.bgHeader))
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        aiHeader.addView(TextView(this).apply {
+            text = "‹"; setTextColor(getColor(R.color.textPrimary)); textSize = 26f
+            setPadding(dp(12), dp(2), dp(12), dp(2))
+            setOnClickListener { closeAiChat() }
+        })
+        val aiLabels = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        aiTitle = TextView(this).apply {
+            text = "AI 助手"; setTextColor(getColor(R.color.textPrimary)); textSize = 17f
+            setTypeface(typeface, Typeface.BOLD)
+        }
+        aiLabels.addView(aiTitle)
+        aiModelChip = TextView(this).apply {
+            setTextColor(getColor(R.color.accent)); textSize = 11.5f
+            setPadding(0, dp(2), 0, 0)
+            setOnClickListener { chooseAiModel() }
+        }
+        aiLabels.addView(aiModelChip)
+        aiHeader.addView(aiLabels)
+        aiHeader.addView(TextView(this).apply {
+            text = "⋯"; setTextColor(getColor(R.color.textMuted)); textSize = 20f
+            setPadding(dp(10), dp(2), dp(6), dp(2))
+            setOnClickListener { chooseAiModel() }
+        })
+        aiScreen.addView(aiHeader)
+        aiScreen.addView(View(this).apply {
+            setBackgroundColor(getColor(R.color.divider))
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1))
+        aiMessages = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+        }
+        aiScroll = ScrollView(this).apply {
+            isFillViewport = true
+            addView(aiMessages)
+        }
+        aiScreen.addView(aiScroll, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        val aiComposer = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(10), dp(8), dp(10), dp(10))
+            setBackgroundColor(getColor(R.color.bgPanel))
+            gravity = Gravity.BOTTOM
+        }
+        aiInput = EditText(this).apply {
+            hint = "问点什么…"; setHintTextColor(getColor(R.color.textMuted))
+            setTextColor(getColor(R.color.textPrimary))
+            background = outlined(getColor(R.color.bgBubbleIn),
+                                  getColor(R.color.divider), dp(14))
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            textSize = 14f
+            maxLines = 5
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        aiSend = TextView(this).apply {
+            text = "➤"; textSize = 18f
+            setTextColor(getColor(R.color.accent))
+            gravity = Gravity.CENTER
+            background = tappable(getColor(R.color.iconBg), dp(12))
+            layoutParams = LinearLayout.LayoutParams(dp(42), dp(42)).apply {
+                leftMargin = dp(8)
+            }
+            setOnClickListener { sendAi() }
+        }
+        aiComposer.addView(aiInput)
+        aiComposer.addView(aiSend)
+        aiScreen.addView(aiComposer)
+        syncAiModelLabel()
+
         root.addView(listScreen, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         root.addView(chatScreen, FrameLayout.LayoutParams(
@@ -642,6 +740,8 @@ class MainActivity : Activity() {
             dp(1), ViewGroup.LayoutParams.MATCH_PARENT))
         root.addView(settingsScreen, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        root.addView(aiScreen, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         setContentView(root)
         updateTabStyles()
         applyShell()
@@ -650,16 +750,18 @@ class MainActivity : Activity() {
     /** Overflow for the actions that do not deserve permanent header space. */
     private fun showHeaderMenu() {
         val menu = android.widget.PopupMenu(this, headerMore)
-        menu.menu.add(0, 1, 0, "扫码配对")
-        menu.menu.add(0, 2, 1, "全部标为已读")
-        menu.menu.add(0, 3, 2, "添加设备（手动）")
-        menu.menu.add(0, 4, 3, "设置")
+        menu.menu.add(0, 1, 0, "AI 助手")
+        menu.menu.add(0, 2, 1, "扫码配对")
+        menu.menu.add(0, 3, 2, "全部标为已读")
+        menu.menu.add(0, 4, 3, "添加设备（手动）")
+        menu.menu.add(0, 5, 4, "设置")
         menu.setOnMenuItemClickListener { item ->
             when (item.itemId) {
-                1 -> showQrDialog()
-                2 -> markAllRead()
-                3 -> manualAddDialog()
-                4 -> openSettings()
+                1 -> openAiChat()
+                2 -> showQrDialog()
+                3 -> markAllRead()
+                4 -> manualAddDialog()
+                5 -> openSettings()
             }
             true
         }
@@ -2581,6 +2683,179 @@ class MainActivity : Activity() {
         listScreen.visibility = View.GONE
     }
 
+    // ---------- AI assistant (shared model gateway) ----------
+
+    private fun openAiChat() {
+        aiModel = prefs.getString("model_name", "").orEmpty()
+            .ifEmpty { "claude-sonnet-5-5" }
+        syncAiModelLabel()
+        if (aiMessages.childCount == 0) {
+            aiBubble(
+                "我是 RelayDesk 的 AI 助手，走桌面共享的模型网关。\n" +
+                    "先在电脑设置页开启「模型共享」，或扫码配对时自动写入地址与令牌。",
+                mine = false)
+        }
+        listScreen.visibility = View.GONE
+        chatScreen.visibility = View.GONE
+        if (::settingsScreen.isInitialized) settingsScreen.visibility = View.GONE
+        aiScreen.visibility = View.VISIBLE
+        aiScroll.post { aiScroll.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    private fun closeAiChat() {
+        aiScreen.visibility = View.GONE
+        listScreen.visibility = View.VISIBLE
+    }
+
+    private fun syncAiModelLabel() {
+        val base = prefs.getString("model_base", "").orEmpty()
+        aiModelChip.text = if (base.isEmpty()) "未配置网关 · 点此设置"
+        else "$aiModel · 点此切换"
+    }
+
+    private fun chooseAiModel() {
+        val models = arrayOf("claude-sonnet-5-5", "claude-opus-5-5",
+            "claude-haiku-5-5", "claude-fable-5-2")
+        val checked = models.indexOf(aiModel).coerceAtLeast(0)
+        AlertDialog.Builder(this, dlgTheme())
+            .setTitle("模型")
+            .setSingleChoiceItems(models, checked) { dialog, which ->
+                aiModel = models[which]
+                prefs.edit().putString("model_name", aiModel).apply()
+                syncAiModelLabel()
+                dialog.dismiss()
+            }
+            .setNegativeButton("关闭", null)
+            .show()
+    }
+
+    private fun aiBubble(text: String, mine: Boolean): TextView {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = if (mine) Gravity.END else Gravity.START
+            setPadding(0, dp(4), 0, dp(4))
+        }
+        val label = TextView(this).apply {
+            setTextColor(getColor(if (mine) R.color.textOnAccent
+                                  else R.color.textPrimary))
+            textSize = 14f
+            setLineSpacing(dp(3).toFloat(), 1f)
+            setPadding(dp(13), dp(9), dp(13), dp(9))
+            background = roundRect(
+                getColor(if (mine) R.color.accent else R.color.bgBubbleIn),
+                dp(14))
+            maxWidth = (resources.displayMetrics.widthPixels * 0.82f).toInt()
+            this.text = text
+        }
+        row.addView(label)
+        aiMessages.addView(row)
+        aiScroll.post { aiScroll.fullScroll(View.FOCUS_DOWN) }
+        return label
+    }
+
+    private fun sendAi() {
+        val base = prefs.getString("model_base", "").orEmpty().trimEnd('/')
+        val token = prefs.getString("model_token", "").orEmpty()
+        val prompt = aiInput.text.toString().trim()
+        if (base.isEmpty()) {
+            showModelGatewayDialog()
+            return
+        }
+        if (prompt.isEmpty() || aiBusy) return
+        aiInput.setText("")
+        aiBubble(prompt, mine = true)
+        val reply = aiBubble("…", mine = false)
+        aiBusy = true
+        aiSend.alpha = 0.4f
+        Thread {
+            val payload = JSONObject().apply {
+                put("model", aiModel)
+                put("max_tokens", 1024)
+                put("stream", true)
+                put("messages", JSONArray().put(JSONObject().apply {
+                    put("role", "user")
+                    put("content", prompt)
+                }))
+            }
+            var conn: HttpURLConnection? = null
+            try {
+                conn = (URL("$base/v1/messages").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 8000
+                    readTimeout = 180000
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json")
+                    setRequestProperty("x-api-key", token)
+                    setRequestProperty("anthropic-version", "2023-06-01")
+                    setRequestProperty("Accept", "text/event-stream")
+                }
+                conn.outputStream.use { it.write(payload.toString().toByteArray()) }
+                val code = conn.responseCode
+                if (code !in 200..299) {
+                    val hint = when (code) {
+                        401 -> "令牌无效，请在桌面重新扫码"
+                        429 -> "网关忙，稍后再试"
+                        502 -> "上游模型不可达"
+                        else -> "HTTP $code"
+                    }
+                    mainHandler.post { reply.text = hint }
+                    return@Thread
+                }
+                val streaming = conn.contentType.orEmpty().contains("event-stream")
+                if (streaming) {
+                    mainHandler.post { reply.text = "" }
+                    conn.inputStream.bufferedReader().useLines { lines ->
+                        for (line in lines) {
+                            if (!line.startsWith("data:")) continue
+                            val data = line.removePrefix("data:").trim()
+                            if (data.isEmpty() || data == "[DONE]") continue
+                            val obj = runCatching { JSONObject(data) }.getOrNull() ?: continue
+                            if (obj.optString("type") == "content_block_delta") {
+                                val text = obj.optJSONObject("delta")
+                                    ?.optString("text").orEmpty()
+                                if (text.isNotEmpty()) {
+                                    mainHandler.post {
+                                        reply.text = reply.text.toString() + text
+                                        aiScroll.post { aiScroll.fullScroll(View.FOCUS_DOWN) }
+                                    }
+                                }
+                            } else if (obj.optString("type") == "error") {
+                                val msg = obj.optJSONObject("error")
+                                    ?.optString("message").orEmpty()
+                                mainHandler.post { reply.text = "模型报错：$msg" }
+                            }
+                        }
+                    }
+                } else {
+                    val text = conn.inputStream.bufferedReader().use { it.readText() }
+                    val obj = JSONObject(text)
+                    val sb = StringBuilder()
+                    val arr = obj.optJSONArray("content") ?: JSONArray()
+                    for (i in 0 until arr.length()) {
+                        val part = arr.optJSONObject(i) ?: continue
+                        if (part.optString("type") == "text") {
+                            sb.append(part.optString("text"))
+                        }
+                    }
+                    mainHandler.post {
+                        reply.text = sb.toString().ifEmpty { "（空回复）" }
+                    }
+                }
+            } catch (e: Exception) {
+                mainHandler.post {
+                    reply.text = "连接失败：${e.message ?: e.javaClass.simpleName}"
+                }
+            } finally {
+                conn?.disconnect()
+                mainHandler.post {
+                    aiBusy = false
+                    aiSend.alpha = 1f
+                    aiScroll.post { aiScroll.fullScroll(View.FOCUS_DOWN) }
+                }
+            }
+        }.start()
+    }
+
     private fun closeSettings() {
         settingsScreen.visibility = View.GONE
         listScreen.visibility = View.VISIBLE
@@ -2721,6 +2996,10 @@ class MainActivity : Activity() {
         addSection("模型网关")
         val gatewayBase = prefs.getString("model_base", "").orEmpty()
         addRow("网关地址", gatewayBase.ifEmpty { "未配置" }) { showModelGatewayDialog() }
+        addRow("对话模型",
+            prefs.getString("model_name", "").orEmpty().ifEmpty { "claude-sonnet-5-5" }
+        ) { chooseAiModel() }
+        addRow("AI 助手", "打开对话 ›") { openAiChat() }
 
         addSection("通道")
         addRow("后台接收", if (Runtime.serviceRunning) "运行中" else "未运行")
@@ -2824,6 +3103,8 @@ class MainActivity : Activity() {
         when {
             ::settingsScreen.isInitialized && settingsScreen.visibility == View.VISIBLE ->
                 closeSettings()
+            ::aiScreen.isInitialized && aiScreen.visibility == View.VISIBLE ->
+                closeAiChat()
             chatScreen.visibility == View.VISIBLE -> closeChat()
             else -> super.onBackPressed()
         }

@@ -35,6 +35,10 @@ android {
         }
         release {
             isMinifyEnabled = false
+            // Same certificate as every shipped APK: CI restores the stable
+            // debug keystore under ~/.android, and an unsigned release could
+            // never install over the existing com.relaydesk.app.
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
     compileOptions {
@@ -43,6 +47,13 @@ android {
     }
     kotlinOptions {
         jvmTarget = "17"
+    }
+    lint {
+        // Release is a phone-install artifact, not a store upload: the vital
+        // lint task pulls lint-gradle from the network on every CI run and
+        // blocks offline builds. Gradle warnings still compile into the log.
+        checkReleaseBuilds = false
+        abortOnError = false
     }
 }
 
