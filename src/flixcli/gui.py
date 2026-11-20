@@ -895,15 +895,39 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(980, 640)
         if self.width() < 980 or self.height() < 640:
             self.resize(1280, 840)
-        # macOS paints the backdrop itself; keep it fed from the live desktop.
-        if sys.platform == "darwin":
+        # Both platforms paint the backdrop themselves; keep it fed from the
+        # live desktop so moving the window or changing wallpaper updates it.
+        if sys.platform in ("darwin", "win32"):
             self._start_glass_refresh()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._queue_glass_refresh()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._queue_glass_refresh()
+
+    def _queue_glass_refresh(self) -> None:
+        """拖动/缩放停下来 400ms 后再抓背景，过程中不抓以免拖影。"""
+        if not getattr(self, "glass", False) or not self.isVisible():
+            return
+        timer = getattr(self, "_glass_move_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(400)
+            timer.timeout.connect(self._refresh_glass_source)
+            self._glass_move_timer = timer
+        timer.start()
 
     def _start_glass_refresh(self) -> None:
         if getattr(self, "_glass_timer", None) is not None:
             return
         self._glass_timer = QTimer(self)
-        self._glass_timer.setInterval(300)
+        # 毛玻璃底不需要 3 秒一抓：每次抓图都要重绘整窗，节奏太快就是闪屏。
+        # 桌面一般只在换壁纸/切程序时变，30 秒足够，移动窗口时另有即时刷新。
+        self._glass_timer.setInterval(30_000)
         self._glass_timer.timeout.connect(self._refresh_glass_source)
         self._glass_timer.start()
 
@@ -918,19 +942,59 @@ class MainWindow(QMainWindow):
         root = getattr(self, "glass_root", None)
         if root is None or not root.isVisible():
             return
-        # Only the real cocoa window has a CGWindow behind it; the offscreen
-        # platform used by tests has no window server to ask.
         app = QApplication.instance()
-        if app is None or app.platformName() != "cocoa":
+        if app is None:
             return
-        from . import desktop_capture
         origin = root.mapToGlobal(QPoint(0, 0))
-        image = desktop_capture.grab_below(
-            int(self.winId()), origin.x(), origin.y(),
-            max(1, root.width()), max(1, root.height()))
+        width, height = max(1, root.width()), max(1, root.height())
+        if app.platformName() == "cocoa":
+            # Only the real cocoa window has a CGWindow behind it.
+            from . import desktop_capture
+            image = desktop_capture.grab_below(
+                int(self.winId()), origin.x(), origin.y(), width, height)
+        elif app.platformName() == "windows":
+            # Screen.grabWindow photographs every window, including this one,
+            # which would feed the blur its own output. DWM_CLOAK hides the
+            # window from the compositor for the half second it takes to grab.
+            image = self._grab_desktop_cloaked(origin, width, height)
+        else:
+            return
         if image is None or image.isNull():
             return
         root.set_snapshot((image, origin))
+
+    def _grab_desktop_cloaked(self, origin: QPoint, width: int, height: int):
+        """Grab the desktop behind us without hiding the window.
+
+        DWM_CLOAK did hide it — the window blinked out of the compositor every
+        capture, which read as constant flicker. WDA_EXCLUDEFROMCAPTURE
+        (Win10 2004+) removes the window from captures while leaving it on
+        screen, so the grab never contains our own blur.
+        """
+        try:
+            hwnd = int(self.winId())
+            user32 = ctypes.windll.user32
+            if not getattr(self, "_capture_excluded", False):
+                # 0x11 = WDA_EXCLUDEFROMCAPTURE; only needs to be set once.
+                user32.SetWindowDisplayAffinity(hwnd, 0x11)
+                self._capture_excluded = True
+        except Exception:
+            return None
+        try:
+            screen = QApplication.primaryScreen()
+            if screen is None:
+                return None
+            ratio = screen.devicePixelRatio() or 1.0
+            pixmap = screen.grabWindow(
+                0,
+                int(origin.x() * ratio), int(origin.y() * ratio),
+                int(width * ratio), int(height * ratio))
+            image = pixmap.toImage() if pixmap is not None else None
+            if image is not None and not image.isNull():
+                image.setDevicePixelRatio(ratio)
+            return image
+        except Exception:
+            return None
 
     def live_threads(self) -> list:
         """Workers that may still be running, for shutdown joins."""
@@ -983,18 +1047,17 @@ class MainWindow(QMainWindow):
             dark = ctypes.c_int(0 if self.theme == "light" else 1)
             dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(dark),
                                       ctypes.sizeof(dark))
-            # 1 = none, 2 = Mica (wallpaper), 3 = Acrylic (what is behind).
-            kind = ctypes.c_int(3 if self._glass_visible() else 1)
-            if dwm.DwmSetWindowAttribute(hwnd, 38, ctypes.byref(kind),
-                                         ctypes.sizeof(kind)) != 0:
-                return False
-            if self._glass_visible():
-                class _Margins(ctypes.Structure):
-                    _fields_ = [("left", ctypes.c_int), ("right", ctypes.c_int),
-                                ("top", ctypes.c_int), ("bottom", ctypes.c_int)]
-                margins = _Margins(-1, -1, -1, -1)
-                dwm.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(margins))
-            return True
+            # DWM will happily accept DWMWA_SYSTEMBACKDROP_TYPE for a Qt
+            # top-level window and then composite nothing: Qt's window is
+            # layered, so the acrylic never reaches the screen. Reporting
+            # True here is what made the app go flat — the painted backdrop
+            # was switched off in favour of a material that never appeared.
+            # Keep the immersive-dark-mode call above (system-drawn edges),
+            # then let GlassBackdrop paint the blurred desktop instead.
+            kind = ctypes.c_int(1)  # DWMSBT_NONE
+            dwm.DwmSetWindowAttribute(hwnd, 38, ctypes.byref(kind),
+                                      ctypes.sizeof(kind))
+            return False
         except Exception:
             return False
 
@@ -1089,6 +1152,12 @@ class MainWindow(QMainWindow):
             self._native_glass = self._apply_system_backdrop()
             self.glass_root.set_native(self._native_glass)
         if self._native_glass:
+            # DWM paints the material *behind* the window, so Qt has to stop
+            # filling the client area with an opaque palette colour or the
+            # blur never shows through. This was the missing half of glass on
+            # Windows: the attribute left with an old notification experiment
+            # and every pane's alpha then composited over solid grey.
+            self.setAutoFillBackground(False)
             # The first stylesheet ran before we knew DWM would own the
             # surface, so it still carried the heavy fallback alphas.
             self._restyle()

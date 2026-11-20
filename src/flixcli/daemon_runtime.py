@@ -328,11 +328,26 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
                                                   media_manager=media_manager,
                                                   media_runtime=media_runtime)
     async def scan_now() -> list[dict]:
-        """On-demand LAN sweep; shares the same identity check as discovery."""
-        from .discovery import scan_lan
-        return await scan_lan(
+        """Active LAN sweep, then a unicast announce round.
+
+        The sweep finds peers whose port answers (ours by ping_v2, official by
+        a bare TCP 8891 connect). The unicast announce then hands our modal to
+        every candidate IP, because official clients never answer a probe but
+        do parse a valid announce arriving on UDP 8891 — that is what makes
+        them show us without restarting.
+        """
+        from .discovery import local_hosts, scan_lan
+        hosts = local_hosts(disc.iface)
+        found = await scan_lan(
             on_device, ident, device_port,
+            hosts=hosts or None,
             ports=tuple(dict.fromkeys((DEVICE_PORT, 18991, device_port))))
+        try:
+            await asyncio.to_thread(disc.announce_unicast, ident, hosts)
+        except Exception as exc:  # announce is best effort, never fatal
+            print(f"[scan] unicast announce failed: {exc}",
+                  file=sys.stderr, flush=True)
+        return found
 
     api_runner, api_publish = await serve_desktop_api(store, ident, send_text,
                                                       api_port,
@@ -446,27 +461,32 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
     print("[flixd] periodic announce every 30s", file=sys.stderr, flush=True)
 
     async def startup_scan() -> None:
-        # Official clients announce only at startup, so a peer that booted
-        # before us is invisible until a sweep. One sweep is enough; later
-        # peers announce, and the GUI can ask for another via the API.
-        try:
-            await asyncio.sleep(2)
-            found = await scan_now()
-            if found:
-                names = ", ".join(
-                    f"{d.get('alias') or d['fingerprint'][:8]}"
-                    f"@{d.get('ip')}:{d.get('port')}" for d in found)
-                print(f"[scan] discovered {names}", file=sys.stderr, flush=True)
-        except Exception as exc:
-            print(f"[scan] {exc}", file=sys.stderr, flush=True)
+        # 常驻扫描：官方客户端只在启动时公告一次，且不回答任何探测；只扫
+        # 一次的话，比我们先开机、或中途换网络的设备永远发现不了。每 60 秒
+        # 主动扫一遍 /24（TCP 连接 8891），再单播一轮公告，版本无关。
+        first = True
+        while True:
+            try:
+                if first:
+                    await asyncio.sleep(2)
+                    first = False
+                else:
+                    await asyncio.sleep(60)
+                found = await scan_now()
+                if found:
+                    names = ", ".join(
+                        f"{d.get('alias') or d['fingerprint'][:8]}"
+                        f"@{d.get('ip')}:{d.get('port')}" for d in found)
+                    print(f"[scan] discovered {names}", file=sys.stderr, flush=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f"[scan] {exc}", file=sys.stderr, flush=True)
 
     if announce:
-        # One sweep repairs peers that were already running before us (the
-        # official client announces only at startup). New peers announce, and
-        # the GUI can request another sweep via POST /api/discover/scan, so a
-        # permanent scheduler would only add noise and stale-window bugs.
+        # 主动扫描常驻：每 60 秒一次，配合 /api/discover/scan 手动触发。
         tasks.append(asyncio.create_task(startup_scan()))
-        print("[flixd] startup LAN scan; on-demand via /api/discover/scan",
+        print("[flixd] active LAN scan every 60s; on-demand via /api/discover/scan",
               file=sys.stderr, flush=True)
 
     async def agent_outbox_loop() -> None:

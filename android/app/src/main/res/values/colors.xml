@@ -8,12 +8,15 @@
      foreground/background pair below clears WCAG AA (>= 4.5:1) · keep it that
      way if you retune, the jade neutrals are warm and easy to overshoot.
 
+     玻璃：bg/bgHeader/bgPanel 带透明度（#AARRGGBB），壁纸模糊层叠在下面，
+     数值参考桌面 GLASS_ALPHA_NATIVE；面板比背景更实，正文对比度才不会掉。
+
      `mention` has no desktop counterpart: @-mentions stay amber on purpose,
      because they must be distinguishable from the accent on sight. -->
 <resources>
-    <color name="bg">#F3F2EE</color>              <!-- bg -->
-    <color name="bgHeader">#F8F7F3</color>       <!-- bg_side -->
-    <color name="bgPanel">#FFFFFF</color>        <!-- surface -->
+    <color name="bg">#C7F3F2EE</color>              <!-- bg -->
+    <color name="bgHeader">#C0F8F7F3</color>       <!-- bg_side -->
+    <color name="bgPanel">#D9FFFFFF</color>        <!-- surface -->
     <color name="bgBubbleIn">#ECE9E2</color>     <!-- surface_2 -->
     <color name="accent">#12795B</color>         <!-- accent -->
     <color name="textPrimary">#191F1C</color>    <!-- text -->
@@ -26,7 +29,7 @@
     <color name="senderName">#0F6B50</color>     <!-- accent_hi -->
     <color name="searchHighlight">#4212795B</color> <!-- accent_line, 26% -->
     <color name="divider">#DEDAD1</color>        <!-- border -->
-    <color name="bgElevated">#F5F3EE</color>     <!-- surface_hi -->
+    <color name="bgElevated">#CCF5F3EE</color>     <!-- surface_hi -->
     <color name="chipBg">#ECE9E2</color>         <!-- surface_2 -->
     <color name="chipText">#3F4C46</color>       <!-- text_dim -->
     <color name="selectedBg">#1A12795B</color>   <!-- accent_soft, 10% -->
