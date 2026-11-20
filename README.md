@@ -350,7 +350,7 @@ GitHub Release 一次发齐（每份附件旁边都有同名 `.sha256`）：
 | Windows | `RelayDesk-<ver>-win64.zip` | 单文件 `RelayDesk.exe`（serve / mcp / 窗口） |
 | macOS | `RelayDesk-<ver>-macos-arm64.zip`、`-x86_64.zip` | `.app`，未签名未公证 |
 | Linux | `RelayDesk-<ver>-linux-x86_64.zip` | 单文件二进制 + zip，解压即用 |
-| Android | `RelayDesk-<ver>-android.apk` | `assembleDebug` 调试签名，与平板上验证过的包一致 |
+| Android | `RelayDesk-<ver>-android.apk` | `assembleDebug` 调试签名；密钥取自仓库密钥 `ANDROID_DEBUG_KEYSTORE_B64`，每次构建同一签名，手机才能原地升级 |
 
 门禁：`pytest tests -q --ignore=tests/e2e.py` 全绿且 `pyproject.toml` 版本与 tag 一致，
 才会进入构建；任一端缺失或失败，Release 不会创建，失败任务的 artifact 仍可下载排查。
@@ -358,6 +358,14 @@ GitHub Release 一次发齐（每份附件旁边都有同名 `.sha256`）：
 
 发布前本地流程：合入 `main` → 改 `pyproject.toml` 版本与 `CHANGELOG.md` →
 `git tag v<ver>` → `git push origin v<ver>`。
+
+Android 的门槛是签名加版本号，缺一不可：系统只允许同签名、versionCode 更大的包覆盖安装。
+APK 的 versionCode 由 `pyproject.toml` 推导（`major*10000+minor*100+patch`），签名来自上面的
+仓库密钥；两者任一失守，手机上的更新器下载成功也会装不上，报
+`INSTALL_FAILED_VERSION_DOWNGRADE` 或 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`。
+已经在用的包如果来自某个已丢失的调试密钥，只能卸载重装；动手前先备份
+`adb exec-out "run-as com.relaydesk.app tar -cf - -C /data/data/com.relaydesk.app ." > backup.tar`，
+装完用 `run-as` 解回去（聊天库 `databases/relaydesk.db` 与 `shared_prefs` 都在里面）。
 
 ## 仓库自动化
 
