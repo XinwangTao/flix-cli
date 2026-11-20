@@ -27,6 +27,12 @@ android {
     }
 
     buildTypes {
+        debug {
+            // 调试包用独立 applicationId，和手机上的正式包共存：正式包是发布签名，
+            // 调试签名盖不上去（INSTALL_FAILED_UPDATE_INCOMPATIBLE），共存才能不删数据地验收。
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+        }
         release {
             isMinifyEnabled = false
         }
