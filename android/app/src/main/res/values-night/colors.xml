@@ -10,9 +10,9 @@
      `textOnAccent` is near-black, not white: the jade accent is light enough
      that white text on it lands around 2:1. The desktop made the same call. -->
 <resources>
-    <color name="bg">#0B0F0E</color>              <!-- bg -->
-    <color name="bgHeader">#101615</color>        <!-- bg_side -->
-    <color name="bgPanel">#161D1B</color>         <!-- surface -->
+    <color name="bg">#C70B0F0E</color>              <!-- bg -->
+    <color name="bgHeader">#C0101615</color>        <!-- bg_side -->
+    <color name="bgPanel">#D9161D1B</color>         <!-- surface -->
     <color name="bgBubbleIn">#212A27</color>      <!-- surface_2 -->
     <color name="accent">#35B98D</color>          <!-- accent -->
     <color name="textPrimary">#EDF3F0</color>     <!-- text -->
@@ -25,7 +25,7 @@
     <color name="senderName">#43CFA0</color>      <!-- accent_hi -->
     <color name="searchHighlight">#6635B98D</color> <!-- accent, 40% -->
     <color name="divider">#232D2A</color>         <!-- border -->
-    <color name="bgElevated">#1C2422</color>      <!-- surface_hi -->
+    <color name="bgElevated">#CC1C2422</color>      <!-- surface_hi -->
     <color name="chipBg">#212A27</color>          <!-- surface_2 -->
     <color name="chipText">#BCC9C3</color>        <!-- text_dim -->
     <color name="selectedBg">#2135B98D</color>    <!-- accent_soft, 13% -->

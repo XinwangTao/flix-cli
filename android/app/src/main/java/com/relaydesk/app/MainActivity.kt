@@ -242,12 +242,14 @@ class MainActivity : Activity() {
         val wide = resources.configuration.smallestScreenWidthDp >= 600
         // Wide screens lose room to the chat pane, so the header tightens up.
         val iconPad = if (wide) dp(8) else dp(13)
-        val root = FrameLayout(this).apply { setBackgroundColor(getColor(R.color.bg)) }
+        // 玻璃底：壁纸模糊层在最下面，屏幕/面板改成半透明色叠上去。
+        val root = FrameLayout(this)
+        Glass.install(this, root)
 
         // -- device list screen --
         listScreen = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(getColor(R.color.bg))
+            setBackgroundColor(Color.TRANSPARENT)
         }
         val listHeader = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -414,6 +416,7 @@ class MainActivity : Activity() {
 
         // -- chat screen --
         chatScreen = LinearLayout(this).apply {
+            setBackgroundColor(Color.TRANSPARENT)
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(getColor(R.color.bg))
             visibility = View.GONE
@@ -571,6 +574,7 @@ class MainActivity : Activity() {
 
         // -- settings screen (v2D) --
         settingsScreen = LinearLayout(this).apply {
+            setBackgroundColor(Color.TRANSPARENT)
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(getColor(R.color.bg))
             visibility = View.GONE

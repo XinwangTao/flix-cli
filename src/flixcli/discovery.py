@@ -132,6 +132,26 @@ class Discovery:
         addrs.append("255.255.255.255")
         return addrs
 
+    def announce_unicast(self, ident: dict, ips: list[str],
+                         port: int = DEVICE_PORT) -> int:
+        """把公告逐个单播给候选 IP。
+
+        官方客户端只在启动时组播一次，之后既不回应探测也不定期公告；但它的
+        UDP 8891 监听在收到单播合法公告时仍会处理。主动扫描后补一轮单播，
+        官方端（任意版本）就会把我们列进设备列表。
+        """
+        payload = build_announce(ident, port=port)
+        sent = 0
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            for ip in ips:
+                with contextlib.suppress(OSError):
+                    tx.sendto(payload, (ip, DEVICE_PORT))
+                    sent += 1
+        finally:
+            tx.close()
+        return sent
+
     def announce(self, ident: dict, times: int = ANNOUNCE_BURST,
                  port: int = DEVICE_PORT) -> None:
         payload = build_announce(ident, port=port)
@@ -225,7 +245,22 @@ async def scan_lan(on_device: Callable[[dict], None], ident: dict,
                                       device_port=device_port,
                                       timeout=2.0, from_="scan")
             except Exception:
-                return None
+                # 端口通但不应答我们的握手：官方 Flix（任意版本）或别的实现。
+                # 以前这里直接丢掉了，所以「只能发现同版本」——把这类设备
+                # 标成 unidentified 交给上层，界面照样能看到并尝试官方协议。
+                return {
+                    "fingerprint": f"ip:{ip}:{port}",
+                    "alias": ip,
+                    "deviceModel": "unknown",
+                    "deviceType": "unknown",
+                    "os": "unknown",
+                    "port": port,
+                    "version": 0,
+                    "ip": ip,
+                    "source": ip,
+                    "unidentified": True,
+                    "app": "official-or-other",
+                }
             fp = modal.get("fingerprint")
             if not fp or fp == ident.get("fingerprint"):
                 return None
