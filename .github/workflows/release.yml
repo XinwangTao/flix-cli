@@ -277,9 +277,32 @@ jobs:
       # Debug signing is deliberate: it is the build that was verified on the
       # tablet over wireless adb, so the released APK installs exactly like the
       # tested one. A release keystore can replace this once one exists.
+      #
+      # Same signing identity as every earlier APK. The runner regenerates
+      # ~/.android/debug.keystore for each build, so without this the APK ships
+      # a brand-new certificate and Android rejects the update
+      # (INSTALL_FAILED_UPDATE_INCOMPATIBLE) no matter how correct the bytes are.
+      - name: Restore signing keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            mkdir -p "$HOME/.android"
+            printf '%s' "$KEYSTORE_B64" | base64 -d > "$HOME/.android/debug.keystore"
+            echo "restored the stable debug keystore"
+          else
+            echo "::warning::ANDROID_DEBUG_KEYSTORE_B64 is empty; this APK gets a throwaway key and will not install over an existing one"
+          fi
+
       - name: Build APK
         working-directory: android
         run: gradle assembleDebug --no-daemon
+
+      - name: Report APK certificate
+        run: |
+          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          BT=$(ls -d "$ANDROID_HOME/build-tools/"* | sort -V | tail -1)
+          "$BT/apksigner" verify --print-certs "$APK" | grep "SHA-256" || true
 
       - name: Package
         run: |
