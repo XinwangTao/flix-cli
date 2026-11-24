@@ -1108,37 +1108,81 @@ async def cmd_serve(args) -> int:
         store.close()
 
 
+_DAEMON_API_PORTS = (8898, 18998, 19098, 19598, 18997, 18996)
+
+
+def _find_daemon_api_port(explicit: int | None = None) -> int | None:
+    """Loopback port that answers flixcli's desktop API, or None.
+
+    Port 8898 belongs to the OFFICIAL Flix client just as often, so a candidate
+    only counts once it answers /api/overview with flixcli's own shape.
+    """
+    import os
+    candidates: list[int] = []
+    if explicit:
+        candidates.append(int(explicit))
+    env = os.environ.get("FLIX_API_PORT", "")
+    if env.isdigit():
+        candidates.append(int(env))
+    candidates += [p for p in _DAEMON_API_PORTS if p not in candidates]
+    for port in candidates:
+        data = _desktop_api_request(port, "/api/overview")
+        if isinstance(data, dict) and "self" in data and "devices" in data:
+            return port
+    return None
+
+
 def cmd_models(args) -> int:
     """LAN model gateway: phones talk Anthropic Messages, cc-switch does the rest."""
     from .model_gateway import (lan_urls, load_config, reset_token,
                                 run_gateway, save_config, status_payload)
     action = getattr(args, "action", None) or "status"
     store = Store()
-    if action == "start":
-        changes = {"enabled": True}
-        if args.port:
-            changes["port"] = args.port
-        if args.upstream:
-            changes["upstream"] = args.upstream
-        if getattr(args, "allow_remote_upstream", False):
-            changes["allow_remote_upstream"] = True
-        if getattr(args, "max_concurrent", None) is not None:
-            changes["max_concurrent"] = args.max_concurrent
-        try:
-            cfg = save_config(store, **changes)
-        except ValueError as exc:
-            emit({"error": "upstream", "detail": str(exc)}, args.json)
-            store.close()
-            return 2
-        if args.json:
-            print(json.dumps({"ok": True, "port": cfg["port"],
-                              "upstream": cfg["upstream"],
-                              "token": cfg["token"],
-                              "urls": lan_urls(cfg["port"])},
-                             ensure_ascii=False, indent=1), flush=True)
-        return _models_serve(store, cfg)  # coroutine: runs until interrupted
     try:
+        if action == "start":
+            changes = {"enabled": True}
+            if args.port:
+                changes["port"] = args.port
+            if args.upstream:
+                changes["upstream"] = args.upstream
+            if getattr(args, "allow_remote_upstream", False):
+                changes["allow_remote_upstream"] = True
+            if getattr(args, "max_concurrent", None) is not None:
+                changes["max_concurrent"] = args.max_concurrent
+            try:
+                cfg = save_config(store, **changes)
+            except ValueError as exc:
+                emit({"error": "upstream", "detail": str(exc)}, args.json)
+                return 2
+            # A running daemon owns the listener, so ask it to open the port
+            # (in-process) before falling back to a standalone foreground one.
+            api_port = _find_daemon_api_port(getattr(args, "api_port", None))
+            if api_port is not None:
+                started = _desktop_api_request(api_port, "/api/models/enable", {
+                    "port": cfg["port"], "upstream": cfg["upstream"]})
+                if started.get("ok"):
+                    emit({"ok": True, "daemon_hosted": True,
+                          "api_port": api_port, **started}, args.json)
+                    return 0
+            if args.json:
+                print(json.dumps({"ok": True, "port": cfg["port"],
+                                  "upstream": cfg["upstream"],
+                                  "token": cfg["token"],
+                                  "urls": lan_urls(cfg["port"])},
+                                 ensure_ascii=False, indent=1), flush=True)
+            return _models_serve(store, cfg)  # coroutine: runs until interrupted
         if action == "stop":
+            # Only rewriting the pref would leave the daemon listening (and the
+            # token usable on the LAN) until the next restart -- exactly the bug
+            # this path used to print a warning about instead of fixing.
+            api_port = _find_daemon_api_port(getattr(args, "api_port", None))
+            if api_port is not None:
+                stopped = _desktop_api_request(api_port, "/api/models/disable", {})
+                if stopped.get("ok") and not stopped.get("listening"):
+                    emit({"ok": True, "stopped": True, "daemon_hosted": True,
+                          "api_port": api_port, "port": stopped.get("port")},
+                         args.json)
+                    return 0
             from .model_gateway import save_config, stop_gateway
             cfg = save_config(store, enabled=False)
             result = stop_gateway(cfg["port"])
@@ -1525,6 +1569,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="allow an upstream outside 127.0.0.1 (default: loopback only)")
     p.add_argument("--max-concurrent", type=int, default=None,
                    help="in-flight cap before answering 429; 0 = no cap (default)")
+    p.add_argument("--api-port", type=int, default=None,
+                   help="desktop API port of a running daemon to toggle the "
+                        "gateway in place (default: auto-discover)")
 
     args = ap.parse_args(_normalize_shell_argv(
         list(sys.argv[1:] if argv is None else argv)))

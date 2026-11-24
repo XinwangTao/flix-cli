@@ -12,6 +12,11 @@
   旧配置里写死的 4 会按「显式上限」继续生效，清成 0 即恢复无上限。
 
 ### 修复
+- **`flix models stop` 并没有真的关闭共享**：它只把 pref 的 `enabled` 置 false，再打印
+  「网关由本机服务托管，重启本机服务后停止监听」——端口 18993 仍在监听、请求照样 200，
+  令牌对整个局域网依然有效（"关掉了"的假象比不提供开关更危险）。现在监听由 `GatewayHost`
+  持有，Desktop API 新增 `/api/models/status|enable|disable`，CLI 通过它即时开关；绑定失败
+  时不会留下半初始化的 runner，同一个 host 对象可以重试（不必重启守护进程）。
 - rdShell 远程执行现场两个故障：
   - **失败只剩裸 500**：目标端执行器抛异常时 aiohttp 回 `500 … Server got itself in
     trouble`，发起方分不清是「对端构建过旧 / 环境缺 COMSPEC / 进程起不来」。现在

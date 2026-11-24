@@ -525,6 +525,58 @@ async def run_gateway(store, port: int | None = None,
         await runner.cleanup()
 
 
+class GatewayHost:
+    """The gateway listener owned by the daemon, toggleable while it runs.
+
+    `flix models stop` used to only flip `enabled` in the prefs and print a note:
+    port 18993 kept listening and requests kept flowing until the daemon was
+    restarted, which is the opposite of what "关闭共享" promises (and the token
+    stays valid LAN-wide). Owning the AppRunner lets the desktop API close and
+    reopen it on demand.
+    """
+
+    def __init__(self, store):
+        self.store = store
+        self._runner = None
+        self.port = 0
+        self.upstream = ""
+
+    @property
+    def listening(self) -> bool:
+        return self._runner is not None
+
+    async def start(self, port: int | None = None) -> dict:
+        cfg = load_config(self.store)
+        target = int(port or cfg["port"])
+        if self._runner is not None:
+            if target == self.port:
+                return {"ok": True, "listening": True, "port": self.port,
+                        "upstream": self.upstream, "already": True}
+            await self.stop()
+        cfg["port"] = target
+        runner = web.AppRunner(make_model_app(self.store, cfg))
+        await runner.setup()
+        try:
+            await web.TCPSite(runner, "0.0.0.0", target).start()
+        except (OSError, ValueError):
+            # Keep no half-built runner around: the next enable must start clean.
+            with contextlib.suppress(Exception):
+                await runner.cleanup()
+            raise
+        self._runner, self.port, self.upstream = runner, target, cfg["upstream"]
+        return {"ok": True, "listening": True, "port": target,
+                "upstream": cfg["upstream"]}
+
+    async def stop(self) -> dict:
+        runner, self._runner = self._runner, None
+        port = self.port
+        self.port = 0
+        if runner is not None:
+            with contextlib.suppress(Exception):
+                await runner.cleanup()
+        return {"ok": True, "listening": False, "port": port}
+
+
 def port_open(port: int, timeout: float = 0.2) -> bool:
     """Cheap liveness check for GUI painting; never does an HTTP round trip."""
     import socket

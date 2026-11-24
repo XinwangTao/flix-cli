@@ -349,6 +349,25 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
                   file=sys.stderr, flush=True)
         return found
 
+    # The gateway listener has to exist *before* the desktop API so /api/models/*
+    # can open and close it at runtime, instead of promising "restart to stop".
+    model_port = int(model_port or 0)
+    model_host = None
+    if not model_port:
+        # The GUI toggle persists "enabled", so a plain restart keeps sharing.
+        try:
+            from .model_gateway import load_config as _load_model_gw
+            _gw = _load_model_gw(store)
+            if _gw.get("enabled"):
+                model_port = int(_gw["port"])
+        except (OSError, ValueError, TypeError) as e:
+            print(f"[flixd] model gateway config ignored: {e}",
+                  file=sys.stderr, flush=True)
+            model_port = 0
+    if model_port:
+        from .model_gateway import GatewayHost
+        model_host = GatewayHost(store)
+
     api_runner, api_publish = await serve_desktop_api(store, ident, send_text,
                                                       api_port,
                                                       channel_port=device_port,
@@ -356,7 +375,8 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
                                                       adb_client=adb_client,
                                                       media_manager=media_manager,
                                                       media_runtime=media_runtime,
-                                                      scan_fn=scan_now)
+                                                      scan_fn=scan_now,
+                                                      model_host=model_host)
 
     web_runner = None
     if web_port:
@@ -390,39 +410,19 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
         pin = store.own_web_pin()
         print(f"[flixd] web send page on http://0.0.0.0:{web_port}  PIN: {pin}",
               file=sys.stderr)
-    model_runner = None
     # The model gateway is a side channel: whatever happens to it (bad config,
-    # port taken by a standalone `flix models start`) must never take the
-    # device channel and the desktop API down with it.
-    if not model_port:
-        # The GUI toggle persists "enabled", so a plain restart keeps sharing.
+    # port taken by a standalone `flix models start`) must never take the device
+    # channel and the desktop API down with it. The host object outlives a failed
+    # start, so `flix models start` can retry without restarting the daemon.
+    if model_host is not None and model_port:
         try:
-            from .model_gateway import load_config as _load_model_gw
-            _gw = _load_model_gw(store)
-            if _gw.get("enabled"):
-                model_port = int(_gw["port"])
-        except (OSError, ValueError, TypeError) as e:
-            print(f"[flixd] model gateway config ignored: {e}",
-                  file=sys.stderr, flush=True)
-            model_port = 0
-    if model_port:
-        try:
-            from aiohttp import web as _webgw
-            from .model_gateway import load_config as _load_model_cfg
-            from .model_gateway import make_model_app
-            mcfg = _load_model_cfg(store)
-            mcfg["port"] = model_port
-            mr = _webgw.AppRunner(make_model_app(store, mcfg))
-            await mr.setup()
-            await _webgw.TCPSite(mr, "0.0.0.0", model_port).start()
-            model_runner = mr
-            print(f"[flixd] model gateway on http://0.0.0.0:{model_port} -> "
-                  f"{mcfg['upstream']}", file=sys.stderr, flush=True)
+            info = await model_host.start(model_port)
+            print(f"[flixd] model gateway on http://0.0.0.0:{info['port']} -> "
+                  f"{info.get('upstream', '')}", file=sys.stderr, flush=True)
         except (OSError, ValueError, TypeError) as e:
             print(f"[flixd] model gateway unavailable on port {model_port}: "
                   f"{e} (device channel keeps running)", file=sys.stderr,
                   flush=True)
-            model_runner = None
     disc = Discovery(on_device, multicast_if)
     bound = await disc.start()
     if bound:
@@ -599,9 +599,9 @@ async def run_daemon(store, ident, device_port: int, api_port: int,
         if web_runner:
             with contextlib.suppress(Exception):
                 await web_runner.cleanup()
-        if model_runner:
+        if model_host is not None:
             with contextlib.suppress(Exception):
-                await model_runner.cleanup()
+                await model_host.stop()
         with contextlib.suppress(Exception):
             await channel_runner.cleanup()
         with contextlib.suppress(Exception):
