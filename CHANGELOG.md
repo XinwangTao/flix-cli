@@ -6,6 +6,12 @@
 ## [未发布]
 
 ### 变更
+- **模型网关不再整块缓存请求体**：≤256 KB 的请求按原样带 `Content-Length` 转发（正常的
+  API 调用完全不变）；更大或 `Transfer-Encoding: chunked` 的上传边走边转，网关内存不再
+  随并发上传体积线性增长——去掉并发上限后，这是唯一会按并发吃内存的地方。超过
+  `max_body_mb` 仍回 413（chunked 无长度时按流式累计判定），上传中途停发回 408 并立刻
+  释放上游调用；aiohttp 会把流生成器的异常包成 `ClientConnectionError`，按 `__cause__`
+  解包后分别映射 413/408。
 - **模型共享网关默认不再设并发上限**：`max_concurrent` 默认 0（无上限），网关不再回
   429，多设备/多路流式请求全部放行，排队交给上游 cc-switch。要给单个令牌限流时显式设
   1–32（`flix models start --max-concurrent N`）；`flix models status` 显示「无限制」。

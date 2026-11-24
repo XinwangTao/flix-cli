@@ -163,6 +163,9 @@ Anthropic Messages 端点（默认 `18993`），所有请求原样转发到本�
 - 只开放 `POST /v1/messages` 与 `GET /v1/models`；OpenAI 兼容路径不提供。
 - **并发不设上限（默认）**：网关照单全收，不再回 429；上游 cc-switch 自己排队。需要给
   单个令牌限流时显式设 `--max-concurrent 1..32`（`flix models start --max-concurrent N`）。
+- **大请求不整块缓存**：≤256 KB 的请求体按原样（带 `Content-Length`）转发，正常 API 调用
+  行为不变；更大或 chunked 上传边走边转，内存不随并发上传体积线性增长。超过
+  `max_body_mb` 仍是 413，上传中途停发回 408 并立刻释放上游调用。
 - GUI：设置页「模型共享」开关 + 扫码/复制配置；`serve --model-port 18993` 供无界面部署。
 - 状态：`flix models status`（含监听、地址、令牌、并发上限）。
 
