@@ -201,6 +201,23 @@ def _offer_first_contact_pair(store, sender, remote, publish, pair_gate,
         asyncio.get_running_loop().create_task(verify_then_ask())
 
 
+def _unique_destination(path: str) -> str:
+    """Pick a free sibling name instead of refusing a collision.
+
+    Official peers abort the whole transfer with ``upload-failed: HTTP 409
+    destination exists`` and the user only sees "send failed"; sending the same
+    photo twice is normal, so land it as ``photo (1).jpg`` (the same convention
+    the web upload already uses).
+    """
+    root, name = os.path.split(path)
+    stem, ext = os.path.splitext(name)
+    for i in range(1, 1000):
+        candidate = os.path.join(root, f"{stem} ({i}){ext}")
+        if not os.path.exists(candidate):
+            return candidate
+    return os.path.join(root, f"{stem} ({uuid.uuid4().hex}){ext}")
+
+
 def _safe_destination(store, name: str) -> tuple[str, str] | None:
     clean = os.path.basename(name.replace("\\", "/"))
     if not clean or clean in (".", ".."):
@@ -821,7 +838,9 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
             return web.Response(status=400, text="bad file name")
         root, dest = safe
         if os.path.exists(dest):
-            return web.Response(status=409, text="destination exists")
+            # 409 here makes the official peer abort with "send failed" and the
+            # user sees nothing; land it beside the existing file instead.
+            dest = _unique_destination(dest)
         declared = _to_int(declared, -1)
         maximum = _max_file_bytes(store)
         if declared < 0 or declared > maximum:
