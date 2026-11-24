@@ -5,10 +5,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from aiohttp.test_utils import TestClient, TestServer
 
 from flixcli import model, server
+from flixcli.channel import _error_detail
 from flixcli.config import Store
 from flixcli.remoteshell import MAX_OUTPUT_BYTES, run_command
 
@@ -100,6 +102,50 @@ class ShellHttpTests(unittest.IsolatedAsyncioTestCase):
             "/intent", json={"action": model.ACTION_SHELL,
                              "deviceId": "fp-peer", "extra": {"to": "fp-me"}})
         self.assertEqual(resp.status, 400)
+
+    async def test_executor_failure_reports_the_reason(self):
+        """A crash in the worker used to be a bare aiohttp 500 with no body.
+
+        The peer could not tell it apart from a dead daemon, so it had nothing
+        to show the operator. The handler must answer in the JSON shape the
+        client already parses, and must not write an audit row for a command
+        that never ran.
+        """
+        with mock.patch.object(server, "run_command",
+                               side_effect=OSError("cannot spawn cmd.exe")):
+            intent = model.shell_intent("fp-peer", "fp-me", "sid-boom", "whoami", 5)
+            resp = await self.client.post("/intent", json=intent)
+        self.assertEqual(resp.status, 500)
+        body = await resp.json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["error"], "shell-failed")
+        self.assertEqual(body["id"], "sid-boom")
+        self.assertIn("OSError", body["detail"])
+        self.assertEqual(self.store.shell_audit(), [])
+
+    async def test_audit_failure_does_not_fail_a_command_that_ran(self):
+        with mock.patch.object(Store, "add_shell_audit",
+                               side_effect=RuntimeError("database is locked")):
+            intent = model.shell_intent("fp-peer", "fp-me", "sid-2", "echo hi", 10)
+            resp = await self.client.post("/intent", json=intent)
+        self.assertEqual(resp.status, 200)
+        body = await resp.json()
+        self.assertEqual(body["exit"], 0)
+        self.assertIn("hi", body["stdout"])
+
+
+class ErrorDetailTests(unittest.TestCase):
+    def test_json_handshake_payload_is_surfaced(self):
+        detail = _error_detail(500, '{"ok": false, "error": "shell-failed", '
+                                    '"detail": "OSError: nope"}')
+        self.assertIn("shell-failed", detail)
+        self.assertIn("OSError: nope", detail)
+
+    def test_bare_aiohttp_500_gets_an_actionable_hint(self):
+        detail = _error_detail(500, "500 Internal Server Error\n\n"
+                                   "Server got itself in trouble")
+        self.assertIn("peer crashed", detail)
+        self.assertNotIn("Internal Server Error", detail)
 
 
 if __name__ == "__main__":

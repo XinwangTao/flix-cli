@@ -19,7 +19,9 @@ import hmac
 import ipaddress
 import json
 import os
+import sys
 import time
+import traceback
 import uuid
 from pathlib import Path
 from typing import Callable
@@ -30,6 +32,22 @@ from . import DEVICE_PORT, model
 from .media_session import SessionError
 from . import ptyshell
 from .remoteshell import DEFAULT_TIMEOUT_S, run_command
+
+
+def _log_shell_failure(sid: str, sender: str, command: str, exc: BaseException) -> None:
+    """Leave a trace behind when an rdShell request dies.
+
+    Without this the daemon answered a bare aiohttp 500, which looks the same
+    from the peer as a crashed process and left the operator nothing to grep
+    for.
+    """
+    who = str(sender)[:8] if sender else "?"
+    row_id = str(sid)[:8] if sid else "?"
+    shown = command if isinstance(command, str) else repr(command)
+    print(f"[shell] {who} failed: {type(exc).__name__}: {exc} "
+          f"cmd={shown[:120]!r} id={row_id}", file=sys.stderr, flush=True)
+    traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
+    sys.stderr.flush()
 
 
 def _to_int(v, default: int = 0) -> int:
@@ -394,8 +412,20 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
         except (TypeError, ValueError):
             timeout = DEFAULT_TIMEOUT_S
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, run_command, command, timeout)
-        store.add_shell_audit(sid, sender, command, result)
+        try:
+            result = await loop.run_in_executor(None, run_command, command, timeout)
+        except Exception as exc:  # noqa: BLE001 - the peer needs the reason
+            # A bare aiohttp 500 is indistinguishable from a crashed daemon and
+            # gives the caller nothing to act on; answer in the same JSON shape
+            # as a success so the CLI can show the actual failure.
+            _log_shell_failure(sid, sender, command, exc)
+            return web.json_response(
+                {"ok": False, "id": sid, "error": "shell-failed",
+                 "detail": f"{type(exc).__name__}: {exc}"}, status=500)
+        # The audit row is a side record: a locked/broken store must not turn a
+        # command that already ran into a failed request.
+        with contextlib.suppress(Exception):
+            store.add_shell_audit(sid, sender, command, result)
         return web.json_response({"ok": True, "id": sid, **result})
 
     active_ptys = {"count": 0}
@@ -443,6 +473,13 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
                                     "detail": str(exc)})
                 await ws.close()
             return ws
+        except Exception as exc:  # noqa: BLE001 - ConPTY can fail to spawn
+            _log_shell_failure(sid, sender, f"pty:{shell or 'default'}", exc)
+            with contextlib.suppress(Exception):
+                await ws.send_json({"t": "error", "error": "pty-failed",
+                                    "detail": f"{type(exc).__name__}: {exc}"})
+                await ws.close()
+            return ws
 
         active_ptys["count"] += 1
         started = time.monotonic()
@@ -477,7 +514,22 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
                         await ws.close()
                     return
 
-        tasks = [asyncio.create_task(pump()), asyncio.create_task(watch_idle())]
+        async def watch_detach() -> None:
+            """Free the ConPTY when the client stops reading.
+
+            `pump()` is parked in a blocking read until the child writes or the
+            session is closed. A client that vanishes therefore pins a worker
+            thread *and* the single session slot; closing the session as soon as
+            the socket is gone is what unblocks it.
+            """
+            while not ws.closed:
+                await asyncio.sleep(0.5)
+            with contextlib.suppress(Exception):
+                session.close()
+
+        tasks = [asyncio.create_task(pump()),
+                 asyncio.create_task(watch_idle()),
+                 asyncio.create_task(watch_detach())]
         try:
             async for msg in ws:
                 if msg.type in (web.WSMsgType.ERROR, web.WSMsgType.CLOSE):
@@ -497,15 +549,21 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
                 elif kind == "close":
                     break
         finally:
+            # Release the slot FIRST, then guard every teardown step: closing a
+            # ConPTY whose child already died (pywinpty) and the audit write both
+            # raised here, which skipped the decrement and left the peer answering
+            # 409 "busy" until its daemon was restarted by hand.
+            active_ptys["count"] -= 1
             for task in tasks:
                 task.cancel()
-            session.close()
-            active_ptys["count"] -= 1
-            store.add_shell_audit(
-                sid, sender, f"pty:{shell or 'default'}",
-                {"exit": exit_code[0],
-                 "durationMs": int((time.monotonic() - started) * 1000),
-                 "truncated": False, "timeout": False})
+            with contextlib.suppress(Exception):
+                session.close()
+            with contextlib.suppress(Exception):
+                store.add_shell_audit(
+                    sid, sender, f"pty:{shell or 'default'}",
+                    {"exit": exit_code[0],
+                     "durationMs": int((time.monotonic() - started) * 1000),
+                     "truncated": False, "timeout": False})
             with contextlib.suppress(Exception):
                 await ws.close()
         return ws

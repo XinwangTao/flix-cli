@@ -132,9 +132,22 @@ def run_command(command: str, timeout: float = DEFAULT_TIMEOUT_S) -> dict:
         # shell=True is the feature: rdShell runs the caller's command line
         # verbatim on a PAIRED peer whose source IP matches the stored one.
         # Parsing it ourselves would change quoting the user already chose.
-        proc = subprocess.Popen(command, shell=True,  # nosec B602
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, **kwargs)
+        try:
+            proc = subprocess.Popen(command, shell=True,  # nosec B602
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, **kwargs)
+        except OSError as exc:
+            # A daemon started with a stripped environment (no COMSPEC/PATH)
+            # cannot spawn the platform shell. Report that as a normal result so
+            # the caller sees the reason instead of an opaque HTTP 500.
+            return {
+                "exit": 127,
+                "stdout": "",
+                "stderr": f"cannot start command on this device: {exc}",
+                "truncated": False,
+                "timeout": False,
+                "durationMs": int((time.monotonic() - started) * 1000),
+            }
         chunks: dict[str, bytes] = {}
         readers = []
         for key, pipe in (("out", proc.stdout), ("err", proc.stderr)):
