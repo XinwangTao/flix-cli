@@ -1132,6 +1132,26 @@ def _find_daemon_api_port(explicit: int | None = None) -> int | None:
     return None
 
 
+def _daemon_for_port(api_port: int, port: int) -> dict | None:
+    """The daemon's model status, but only if it may govern `port`.
+
+    Ports are machine-wide while prefs are per-profile: a daemon started from a
+    different profile (or a second instance) must not be toggled by a CLI that
+    was asked about its own port. Returning None sends the caller down the
+    standalone path instead of silently switching someone else's gateway off.
+    """
+    status = _desktop_api_request(api_port, "/api/models/status")
+    if not isinstance(status, dict) or not status.get("ok"):
+        return None
+    try:
+        hosted = int(status.get("port") or 0)
+    except (TypeError, ValueError):
+        hosted = 0
+    if status.get("listening") and hosted != int(port):
+        return None
+    return status
+
+
 def cmd_models(args) -> int:
     """LAN model gateway: phones talk Anthropic Messages, cc-switch does the rest."""
     from .model_gateway import (lan_urls, load_config, reset_token,
@@ -1157,7 +1177,7 @@ def cmd_models(args) -> int:
             # A running daemon owns the listener, so ask it to open the port
             # (in-process) before falling back to a standalone foreground one.
             api_port = _find_daemon_api_port(getattr(args, "api_port", None))
-            if api_port is not None:
+            if api_port is not None and _daemon_for_port(api_port, cfg["port"]):
                 started = _desktop_api_request(api_port, "/api/models/enable", {
                     "port": cfg["port"], "upstream": cfg["upstream"]})
                 if started.get("ok"):
@@ -1175,12 +1195,18 @@ def cmd_models(args) -> int:
             # Only rewriting the pref would leave the daemon listening (and the
             # token usable on the LAN) until the next restart -- exactly the bug
             # this path used to print a warning about instead of fixing.
+            # Only the daemon that governs OUR port may be toggled: a stop from
+            # another profile must not switch off a different gateway (and a
+            # foreground gateway on another port would keep serving while we
+            # reported "stopped").
+            target = int(load_config(store)["port"])
             api_port = _find_daemon_api_port(getattr(args, "api_port", None))
-            if api_port is not None:
+            if api_port is not None and _daemon_for_port(api_port, target):
                 stopped = _desktop_api_request(api_port, "/api/models/disable", {})
                 if stopped.get("ok") and not stopped.get("listening"):
                     emit({"ok": True, "stopped": True, "daemon_hosted": True,
-                          "api_port": api_port, "port": stopped.get("port")},
+                          "api_port": api_port,
+                          "port": stopped.get("port") or target},
                          args.json)
                     return 0
             from .model_gateway import save_config, stop_gateway
@@ -1196,8 +1222,10 @@ def cmd_models(args) -> int:
             # Rotate through the daemon when one is running: the live listener
             # closes over the config, so a prefs-only reset would keep the OLD
             # token valid (and reject the new one) until the next restart.
+            # Same targeting rule as stop: only a daemon hosting OUR port.
+            target = int(load_config(store)["port"])
             api_port = _find_daemon_api_port(getattr(args, "api_port", None))
-            if api_port is not None:
+            if api_port is not None and _daemon_for_port(api_port, target):
                 got = _desktop_api_request(api_port, "/api/models/token",
                                            {"reset": bool(args.reset)})
                 if got.get("ok"):

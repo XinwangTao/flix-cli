@@ -12,6 +12,11 @@
   旧配置里写死的 4 会按「显式上限」继续生效，清成 0 即恢复无上限。
 
 ### 修复
+- **`models stop|token` 会误伤别的 profile 的网关**：CLI 只要「发现任意一个本机 flixcli
+  Desktop API」就直接调 disable/token——端口按机器算、prefs 按 profile 算。实测在临时
+  profile 下 `models stop` 把真实 profile 的 18993 关了，而它自己 profile 的前台网关
+  20993 仍在服务，同时还报告了 `stopped`。现在先读 `/api/models/status`，只有**同一端口**
+  的 daemon 才允许被切换，否则回落到按端口停（`stop_gateway`）/ 本地改令牌。
 - **`models start --upstream X` 只改报告、不改行为**：守护进程已在同一端口监听时直接走
   `already` 分支返回，新的上游/并发上限/请求体上限都不生效——API 和 `models status` 说
   「上游已换成 X」，实际仍转发到旧上游（实测：改成不可达端口后请求依旧 200）。现在同端口
