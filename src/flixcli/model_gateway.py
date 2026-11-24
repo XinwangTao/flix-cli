@@ -43,6 +43,14 @@ MAX_BODY_MB_CAP = 128
 DEFAULT_MAX_CONCURRENT = 0
 MAX_CONCURRENT_CAP = 32
 BODY_READ_TIMEOUT = 30.0
+# Bodies up to this size are buffered: that is what every normal API call looks
+# like, and forwarding an exact Content-Length keeps the upstream request
+# byte-for-byte what the client sent. Anything larger (or chunked, so unknown)
+# is streamed through as it arrives, so the daemon's memory no longer scales
+# with concurrent upload size — which matters now that there is no concurrency
+# cap to bound how many uploads can be in flight.
+BUFFER_STREAM_THRESHOLD = 256 * 1024
+BODY_CHUNK = 64 * 1024
 
 CONFIG_TEMPLATE = {
     "enabled": False,
@@ -295,6 +303,46 @@ FORWARD_HEADERS = ("content-type", "accept", "anthropic-version",
                    "anthropic-beta", "anthropic-dangerous-direct-browser-access")
 
 
+class _UploadTimeout(Exception):
+    """The client stopped sending its body part-way through the upload."""
+
+
+async def _stream_body(request: web.Request, cap: int):
+    """Yield the request body in chunks, refusing anything over `cap`.
+
+    Only used for large or chunked uploads: the client's bytes go upstream while
+    they arrive instead of being collected first, so N concurrent uploads cost
+    N buffers of BODY_CHUNK instead of N × 32 MB.
+    """
+    total = 0
+    while True:
+        try:
+            chunk = await asyncio.wait_for(request.content.read(BODY_CHUNK),
+                                           BODY_READ_TIMEOUT)
+        except asyncio.TimeoutError:
+            raise _UploadTimeout() from None
+        if not chunk:
+            return
+        total += len(chunk)
+        if total > cap:
+            raise web.HTTPRequestEntityTooLarge(max_size=cap, actual_size=total)
+        yield chunk
+
+
+def _root_cause(exc: BaseException) -> BaseException:
+    """Unwrap aiohttp's payload wrapper back to the exception we raised.
+
+    A streaming request body that blows up is reported by the client session as
+    `ClientConnectionError(...): ...: RuntimeError('...')` with the real
+    exception in `__cause__`, so the caller has to look through it.
+    """
+    for _ in range(5):
+        if exc.__cause__ is None:
+            break
+        exc = exc.__cause__
+    return exc
+
+
 def _new_stats() -> dict:
     return {"requests": 0, "ok": 0, "rejected": 0, "failed": 0,
             "aborted": 0, "too_large": 0, "active": 0, "last": 0,
@@ -337,15 +385,24 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
     # Reserve the slot before the next await: reading the body suspends this
     # coroutine, and two requests could otherwise both pass the guard at 0.
     stats["active"] += 1
-    try:
-        body = await asyncio.wait_for(request.read(), BODY_READ_TIMEOUT)
-    except asyncio.TimeoutError:
-        stats["active"] -= 1
-        stats["failed"] += 1
-        return _error(408, "timeout_error", "request body read timed out")
-    except BaseException:
-        stats["active"] -= 1
-        raise
+    cap = max(1, int(cfg.get("max_body_mb", DEFAULT_MAX_BODY_MB))) * 1024 * 1024
+    declared = request.content_length
+    if not declared:
+        # 0 bytes, or chunked with no length: nothing to buffer up front.
+        data = None if declared == 0 else _stream_body(request, cap)
+    elif declared > BUFFER_STREAM_THRESHOLD:
+        data = _stream_body(request, cap)
+    else:
+        try:
+            data = await asyncio.wait_for(request.read(), BODY_READ_TIMEOUT)
+        except asyncio.TimeoutError:
+            stats["active"] -= 1
+            stats["failed"] += 1
+            return _error(408, "timeout_error", "request body read timed out")
+        except BaseException:
+            stats["active"] -= 1
+            raise
+        data = data or None
     headers = {h: request.headers[h] for h in FORWARD_HEADERS
                if h in request.headers}
     url = _target_url(cfg, request)
@@ -354,7 +411,7 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
     stream = None  # set once response headers are on the wire
     try:
         async with request.app[SESSION].request(
-                request.method, url, data=body or None,
+                request.method, url, data=data,
                 headers=headers) as upstream:
             ctype = upstream.headers.get("content-type", "application/json")
             out_headers = {h: upstream.headers[h] for h in PASS_HEADERS
@@ -386,6 +443,14 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
             return web.Response(status=upstream.status, body=payload,
                                 headers=out_headers,
                                 content_type=ctype.split(";")[0].strip())
+    except _UploadTimeout:
+        # The client stalled mid-upload: release the upstream call now instead of
+        # waiting for sock_read to expire.
+        if stream is not None:
+            stats["aborted"] += 1
+            return stream
+        stats["failed"] += 1
+        return _error(408, "timeout_error", "request body upload timed out")
     except asyncio.TimeoutError:
         if stream is not None:
             stats["aborted"] += 1
@@ -393,6 +458,17 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
         stats["failed"] += 1
         return _error(504, "timeout_error", "upstream timed out")
     except aiohttp.ClientError as exc:
+        root = _root_cause(exc)
+        if isinstance(root, web.HTTPRequestEntityTooLarge):
+            # Streaming found a body larger than the cap: let the size
+            # middleware shape the same 413 JSON a declared-oversize body gets.
+            raise root from exc
+        if isinstance(root, _UploadTimeout):
+            if stream is not None:
+                stats["aborted"] += 1
+                return stream
+            stats["failed"] += 1
+            return _error(408, "timeout_error", "request body upload timed out")
         if stream is not None:
             # Headers already sent: writing a second response here would
             # corrupt the chunked stream, so close and report by disconnect.

@@ -565,5 +565,160 @@ class ModelGatewayTests(unittest.TestCase):
         self.assertTrue(new_token().startswith("rd-"))
 
 
+class StreamingBodyTests(unittest.TestCase):
+    """Big or chunked uploads are forwarded while they arrive, not collected.
+
+    Buffering 32 MB per request was the reason the old concurrency cap existed;
+    with the cap gone the gateway must not scale its memory with upload size.
+    """
+
+    def _cfg_for(self, tmp: str, upstream_url: str, max_body_mb: int = 1) -> dict:
+        store = Store(Path(tmp) / "db.sqlite")
+        try:
+            return save_config(store, upstream=upstream_url, port=0,
+                               max_body_mb=max_body_mb)
+        finally:
+            store.close()
+
+    def test_small_body_keeps_a_content_length_upstream(self):
+        """The common call must look byte-for-byte like the client sent it."""
+
+        async def run():
+            with tempfile.TemporaryDirectory() as tmp:
+                seen: list[dict] = []
+                upstream = TestServer(_upstream_app(seen))
+                await upstream.start_server()
+                try:
+                    cfg = self._cfg_for(tmp, str(upstream.make_url("")).rstrip("/"))
+                    client = TestClient(TestServer(make_model_app(None, cfg)))
+                    await client.start_server()
+                    try:
+                        resp = await client.post(
+                            "/v1/messages", json={"model": "x"},
+                            headers={"x-api-key": cfg["token"]})
+                        self.assertEqual(resp.status, 200)
+                        await resp.read()
+                        headers = seen[-1]["headers"]
+                        self.assertIn("Content-Length", headers)
+                        self.assertNotIn("Transfer-Encoding", headers,
+                                         "小请求不该被改成 chunked 转发")
+                    finally:
+                        await client.close()
+                finally:
+                    await upstream.close()
+
+        asyncio.run(run())
+
+    def test_large_body_is_streamed_upstream(self):
+        async def run():
+            with tempfile.TemporaryDirectory() as tmp:
+                seen: list[dict] = []
+                upstream = TestServer(_upstream_app(seen))
+                await upstream.start_server()
+                try:
+                    cfg = self._cfg_for(tmp, str(upstream.make_url("")).rstrip("/"))
+                    client = TestClient(TestServer(make_model_app(None, cfg)))
+                    await client.start_server()
+                    try:
+                        filler = "a" * (getattr(
+                            model_gateway, "BUFFER_STREAM_THRESHOLD",
+                            256 * 1024) + 4096)
+                        payload = ('{"model":"x","messages":[{"role":"user",'
+                                   f'"content":"{filler}"}}]}}').encode()
+                        resp = await client.post(
+                            "/v1/messages", data=payload,
+                            headers={"x-api-key": cfg["token"],
+                                     "content-type": "application/json"})
+                        self.assertEqual(resp.status, 200)
+                        await resp.read()
+                        self.assertEqual(len(seen[-1]["body"]), len(payload),
+                                         "上游收到的字节数与客户端不一致")
+                        headers = seen[-1]["headers"]
+                        self.assertEqual(headers.get("Transfer-Encoding"),
+                                         "chunked",
+                                         "大请求应走流式（chunked）而不是先整块缓存")
+                    finally:
+                        await client.close()
+                finally:
+                    await upstream.close()
+
+        asyncio.run(run())
+
+    def test_chunked_body_over_the_cap_is_refused(self):
+        """No Content-Length means the cap has to be enforced while streaming."""
+
+        async def big():
+            chunk = b"a" * (256 * 1024)
+            for _ in range(6):  # 1.5 MB against a 1 MB cap
+                yield chunk
+                await asyncio.sleep(0)
+
+        async def run():
+            with tempfile.TemporaryDirectory() as tmp:
+                seen: list[dict] = []
+                upstream = TestServer(_upstream_app(seen))
+                await upstream.start_server()
+                try:
+                    cfg = self._cfg_for(tmp, str(upstream.make_url("")).rstrip("/"),
+                                        max_body_mb=1)
+                    client = TestClient(TestServer(make_model_app(None, cfg)))
+                    await client.start_server()
+                    try:
+                        resp = await client.post(
+                            "/v1/messages", data=big(),
+                            headers={"x-api-key": cfg["token"],
+                                     "content-type": "application/json"})
+                        self.assertEqual(resp.status, 413)
+                        body = await resp.json()
+                        self.assertEqual(body["error"]["type"], "request_too_large")
+                        self.assertEqual(client.app[model_gateway.STATS]["too_large"], 1)
+                        self.assertEqual(client.app[model_gateway.STATS]["active"], 0,
+                                         "被拒后 active 必须归零")
+                    finally:
+                        await client.close()
+                finally:
+                    await upstream.close()
+
+        asyncio.run(run())
+
+    def test_stalled_upload_is_released(self):
+        """A client that stops sending must not hold the upstream call."""
+
+        async def stalling():
+            yield b'{"model":"x","messages":['
+            await asyncio.sleep(2.0)
+            yield b"]}"
+
+        async def run():
+            with tempfile.TemporaryDirectory() as tmp:
+                seen: list[dict] = []
+                upstream = TestServer(_upstream_app(seen))
+                await upstream.start_server()
+                try:
+                    cfg = self._cfg_for(tmp, str(upstream.make_url("")).rstrip("/"))
+                    client = TestClient(TestServer(make_model_app(None, cfg)))
+                    await client.start_server()
+                    try:
+                        import unittest.mock as mock
+                        with mock.patch.object(model_gateway, "BODY_READ_TIMEOUT", 0.2):
+                            try:
+                                resp = await client.post(
+                                    "/v1/messages", data=stalling(),
+                                    headers={"x-api-key": cfg["token"],
+                                             "content-type": "application/json"})
+                                self.assertEqual(resp.status, 408)
+                            except aiohttp.ClientError:
+                                # The peer may close while we are still uploading;
+                                # what matters is the gateway gave up promptly.
+                                pass
+                        self.assertEqual(client.app[model_gateway.STATS]["active"], 0)
+                    finally:
+                        await client.close()
+                finally:
+                    await upstream.close()
+
+        asyncio.run(run())
+
+
 if __name__ == "__main__":
     unittest.main()
