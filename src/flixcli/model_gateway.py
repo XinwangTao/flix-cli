@@ -37,7 +37,10 @@ DEFAULT_PORT = 18993
 DEFAULT_UPSTREAM = "http://127.0.0.1:15721"
 DEFAULT_MAX_BODY_MB = 32
 MAX_BODY_MB_CAP = 128
-DEFAULT_MAX_CONCURRENT = 4
+# 0 = no cap, and that is the default: a shared token decides *who* may call,
+# not how many calls may be in flight. The upstream (a local cc-switch) already
+# queues, and a client that streams several long requests is normal.
+DEFAULT_MAX_CONCURRENT = 0
 MAX_CONCURRENT_CAP = 32
 BODY_READ_TIMEOUT = 30.0
 
@@ -47,8 +50,8 @@ CONFIG_TEMPLATE = {
     "upstream": DEFAULT_UPSTREAM,
     "token": "",
     "max_body_mb": DEFAULT_MAX_BODY_MB,
-    # One shared token means one phone (or anyone who copied it) can saturate
-    # the local cc-switch; cap what a single client can occupy.
+    # 0 keeps the gateway from ever answering 429; set 1-32 to bound what one
+    # token holder can occupy on the local cc-switch.
     "max_concurrent": DEFAULT_MAX_CONCURRENT,
     # Off by default: a reachable gateway that can be pointed anywhere is an
     # SSRF pivot for anyone holding the token.
@@ -123,7 +126,8 @@ def _merged(raw: dict | None) -> dict:
         slots = int(cfg["max_concurrent"])
     except (TypeError, ValueError):
         slots = DEFAULT_MAX_CONCURRENT
-    cfg["max_concurrent"] = min(MAX_CONCURRENT_CAP, max(1, slots))
+    # 0 is meaningful here ("no cap"); only a positive value is an actual limit.
+    cfg["max_concurrent"] = min(MAX_CONCURRENT_CAP, max(0, slots))
     cfg["allow_remote_upstream"] = bool(cfg["allow_remote_upstream"])
     return cfg
 
@@ -320,10 +324,11 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
         return _error(401, "authentication_error",
                       "invalid gateway token; set x-api-key to the token "
                       "shown in RelayDesk settings")
-    limit = int(cfg.get("max_concurrent") or DEFAULT_MAX_CONCURRENT)
-    if stats["active"] >= limit:
-        # Checked before reading the body: a flood must not cost us a 32 MB
-        # buffer per request. 429 keeps the Anthropic error shape.
+    # 0 = no cap: never answer 429. Only an explicitly configured positive limit
+    # is enforced, and it is read before the body so a flood cannot each grab a
+    # 32 MB buffer.
+    limit = int(cfg.get("max_concurrent") or 0)
+    if limit > 0 and stats["active"] >= limit:
         stats["rejected"] += 1
         _note_reject(stats, "429 busy", request.remote)
         return _error(429, "overloaded_error",

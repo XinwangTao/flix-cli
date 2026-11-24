@@ -200,17 +200,65 @@ class ModelGatewayTests(unittest.TestCase):
 
         asyncio.run(run())
 
-    def test_concurrency_default_is_clamped(self):
-        self.assertEqual(CONFIG_TEMPLATE["max_concurrent"], 4)
+    def test_concurrency_default_is_unlimited_and_clamped(self):
+        self.assertEqual(CONFIG_TEMPLATE["max_concurrent"], 0,
+                         "默认不该限制并发：429 不该出现在开箱即用路径上")
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(Path(tmp) / "db.sqlite")
             try:
                 cfg = save_config(store, max_concurrent=999)
                 self.assertEqual(cfg["max_concurrent"], 32)
-                cfg = save_config(store, max_concurrent=0)
-                self.assertEqual(cfg["max_concurrent"], 1)
+                cfg = save_config(store, max_concurrent=-5)
+                self.assertEqual(cfg["max_concurrent"], 0)
             finally:
                 store.close()
+
+    def test_unlimited_concurrency_never_answers_429(self):
+        """max_concurrent=0 must let a burst through instead of throttling it."""
+
+        async def run():
+            with tempfile.TemporaryDirectory() as tmp:
+                gate = asyncio.Event()
+                inflight = {"now": 0, "peak": 0}
+
+                async def slow(request):
+                    inflight["now"] += 1
+                    inflight["peak"] = max(inflight["peak"], inflight["now"])
+                    await gate.wait()
+                    inflight["now"] -= 1
+                    return web.json_response({"type": "message"})
+
+                upstream_app = web.Application()
+                upstream_app.router.add_post("/v1/messages", slow)
+                upstream = TestServer(upstream_app)
+                await upstream.start_server()
+                try:
+                    cfg = self._cfg(tmp, str(upstream.make_url("")).rstrip("/"))
+                    cfg["max_concurrent"] = 0
+                    client = TestClient(TestServer(make_model_app(None, cfg)))
+                    await client.start_server()
+                    try:
+                        headers = {"x-api-key": cfg["token"]}
+                        tasks = [asyncio.create_task(client.post(
+                            "/v1/messages", json={"model": "x"},
+                            headers=headers)) for _ in range(8)]
+                        for _ in range(200):
+                            if inflight["peak"] >= 4:
+                                break
+                            await asyncio.sleep(0.01)
+                        gate.set()
+                        responses = await asyncio.gather(*tasks)
+                        codes = [r.status for r in responses]
+                        self.assertEqual(codes.count(200), 8, codes)
+                        self.assertEqual(codes.count(429), 0, codes)
+                        self.assertGreaterEqual(inflight["peak"], 4,
+                                                "上游没有真正收到并发请求")
+                    finally:
+                        await client.close()
+                finally:
+                    await upstream.close()
+
+        asyncio.run(run())
 
     def test_forwards_body_and_returns_upstream_json(self):
         async def run():

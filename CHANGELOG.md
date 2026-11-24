@@ -5,6 +5,12 @@
 
 ## [未发布]
 
+### 变更
+- **模型共享网关默认不再设并发上限**：`max_concurrent` 默认 0（无上限），网关不再回
+  429，多设备/多路流式请求全部放行，排队交给上游 cc-switch。要给单个令牌限流时显式设
+  1–32（`flix models start --max-concurrent N`）；`flix models status` 显示「无限制」。
+  旧配置里写死的 4 会按「显式上限」继续生效，清成 0 即恢复无上限。
+
 ### 修复
 - rdShell 远程执行现场两个故障：
   - **失败只剩裸 500**：目标端执行器抛异常时 aiohttp 回 `500 … Server got itself in

@@ -161,8 +161,10 @@ Anthropic Messages 端点（默认 `18993`），所有请求原样转发到本�
 - 手机端：协议选 Anthropic，Base URL 填 `http://<本机IP>:18993`，API Key 填设置页里的令牌。
 - 令牌：首次开启自动生成；`flix models token --reset` 或设置页「重置令牌」轮换。
 - 只开放 `POST /v1/messages` 与 `GET /v1/models`；OpenAI 兼容路径不提供。
+- **并发不设上限（默认）**：网关照单全收，不再回 429；上游 cc-switch 自己排队。需要给
+  单个令牌限流时显式设 `--max-concurrent 1..32`（`flix models start --max-concurrent N`）。
 - GUI：设置页「模型共享」开关 + 扫码/复制配置；`serve --model-port 18993` 供无界面部署。
-- 状态：`flix models status`（含监听、地址、令牌）。
+- 状态：`flix models status`（含监听、地址、令牌、并发上限）。
 
 ## 自动更新
 
