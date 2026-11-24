@@ -632,9 +632,14 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
         cfg = await loop.run_in_executor(None, load_config, store)
         port = (model_host.port if model_host and model_host.listening
                 else int(cfg["port"]))
+        # While listening, report what the app is really using: a payload that
+        # echoes the pref while the listener forwards elsewhere is a status page
+        # that lies.
+        upstream = (model_host.upstream
+                    if model_host and model_host.listening else cfg["upstream"])
         return {"ok": True, "enabled": bool(cfg["enabled"]),
                 "listening": bool(model_host and model_host.listening),
-                "port": port, "upstream": cfg["upstream"],
+                "port": port, "upstream": upstream,
                 "token": cfg["token"], "urls": lan_urls(port),
                 "max_concurrent": cfg["max_concurrent"]}
 

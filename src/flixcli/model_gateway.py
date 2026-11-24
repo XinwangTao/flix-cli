@@ -560,6 +560,7 @@ class GatewayHost:
                         "allow_remote_upstream"):
                 if key in cfg:
                     self._cfg[key] = cfg[key]
+            self.upstream = str(self._cfg.get("upstream") or self.upstream)
         return cfg
 
     async def start(self, port: int | None = None) -> dict:
@@ -567,6 +568,11 @@ class GatewayHost:
         target = int(port or cfg["port"])
         if self._runner is not None:
             if target == self.port:
+                # Same listener: apply the settings that do not move it. Without
+                # this, `models start --upstream X` answered "upstream: X" (and
+                # status echoed it) while the live app kept forwarding to the old
+                # upstream — a config report that lies.
+                self.sync_config()
                 return {"ok": True, "listening": True, "port": self.port,
                         "upstream": self.upstream, "already": True}
             await self.stop()
