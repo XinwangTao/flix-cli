@@ -12,6 +12,10 @@
   旧配置里写死的 4 会按「显式上限」继续生效，清成 0 即恢复无上限。
 
 ### 修复
+- **`models start --upstream X` 只改报告、不改行为**：守护进程已在同一端口监听时直接走
+  `already` 分支返回，新的上游/并发上限/请求体上限都不生效——API 和 `models status` 说
+  「上游已换成 X」，实际仍转发到旧上游（实测：改成不可达端口后请求依旧 200）。现在同端口
+  start 会先 `sync_config()`；Desktop API 的状态负载也改成回报运行中实例真正在用的上游。
 - **「重置令牌」等于没撤销**：`flix models token --reset` 只改 pref，运行中的网关闭包里的
   还是旧 token——实测轮换后**旧令牌照样 200、新令牌反而 401**，要重启守护进程才生效。
   现在轮换走 Desktop API `/api/models/token`，`GatewayHost.sync_config()` 把

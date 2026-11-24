@@ -168,6 +168,9 @@ Anthropic Messages 端点（默认 `18993`），所有请求原样转发到本�
   不再需要重启守护进程；没有守护进程时仍回落到前台/独立进程模式。
 - **令牌轮换即时生效**：`flix models token --reset` 同样走 Desktop API（`/api/models/token`），
   旧令牌立刻 401、新令牌立刻可用；上传/上游/并发上限的改动也会同步到运行中的实例。
+- **同端口再 start 也会应用新配置**：`flix models start --upstream X` 在本机守护进程已监听
+  同一端口时不再只是「already」，而是把上游/上限推给运行中的实例；`models status` 报的是
+  实例真正在用的上游。
 - 状态：`flix models status`（含监听、地址、令牌、并发上限）。
 
 ## 自动更新

@@ -220,5 +220,66 @@ class TokenRotationTests(unittest.IsolatedAsyncioTestCase):
             await client.close()
 
 
+class LiveConfigTests(unittest.IsolatedAsyncioTestCase):
+    """`models start --upstream X` on a running listener must actually switch."""
+
+    async def asyncSetUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.store = Store(Path(self._tmp.name) / "db.sqlite")
+        self.port = _free_port()
+        self._runners = []
+
+    async def asyncTearDown(self):
+        for runner in self._runners:
+            await runner.cleanup()
+        self.store.close()
+        self._tmp.cleanup()
+
+    async def _stub(self, name: str) -> str:
+        from aiohttp import web
+
+        app = web.Application()
+
+        async def handler(request: web.Request) -> web.Response:
+            await request.read()
+            return web.json_response({"from": name})
+
+        app.router.add_post("/v1/messages", handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        port = _free_port()
+        await web.TCPSite(runner, "127.0.0.1", port).start()
+        self._runners.append(runner)
+        return f"http://127.0.0.1:{port}"
+
+    async def _from(self, host, token: str) -> str:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                    f"http://127.0.0.1:{host.port}/v1/messages",
+                    json={"model": "x"},
+                    headers={"x-api-key": token}) as resp:
+                return (await resp.json())["from"]
+
+    async def test_same_port_start_applies_the_new_upstream(self):
+        first, second = await self._stub("A"), await self._stub("B")
+        save_config(self.store, enabled=True, port=self.port, upstream=first)
+        host = GatewayHost(self.store)
+        try:
+            await host.start(self.port)
+            token = load_config(self.store)["token"]
+            self.assertEqual(await self._from(host, token), "A")
+
+            save_config(self.store, upstream=second)
+            info = await host.start(self.port)
+            self.assertTrue(info.get("already"), info)
+            self.assertEqual(info["upstream"], second,
+                             "同一端口 start 的返回里必须是新上游")
+            self.assertEqual(await self._from(host, token), "B",
+                             "新的上游必须真的生效，而不是只改报告")
+        finally:
+            await host.stop()
+
+
 if __name__ == "__main__":
     unittest.main()
