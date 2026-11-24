@@ -12,6 +12,10 @@
   旧配置里写死的 4 会按「显式上限」继续生效，清成 0 即恢复无上限。
 
 ### 修复
+- **「重置令牌」等于没撤销**：`flix models token --reset` 只改 pref，运行中的网关闭包里的
+  还是旧 token——实测轮换后**旧令牌照样 200、新令牌反而 401**，要重启守护进程才生效。
+  现在轮换走 Desktop API `/api/models/token`，`GatewayHost.sync_config()` 把
+  token/upstream/max_concurrent/max_body_mb 推给运行中的 app，旧令牌立刻 401、新令牌立刻可用。
 - **`flix models stop` 并没有真的关闭共享**：它只把 pref 的 `enabled` 置 false，再打印
   「网关由本机服务托管，重启本机服务后停止监听」——端口 18993 仍在监听、请求照样 200，
   令牌对整个局域网依然有效（"关掉了"的假象比不提供开关更危险）。现在监听由 `GatewayHost`

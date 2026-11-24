@@ -166,6 +166,8 @@ Anthropic Messages 端点（默认 `18993`），所有请求原样转发到本�
 - GUI：设置页「模型共享」开关 + 扫码/复制配置；`serve --model-port 18993` 供无界面部署。
 - **开关即时生效**：`flix models stop|start` 通过本机 Desktop API 关/开守护进程内的监听，
   不再需要重启守护进程；没有守护进程时仍回落到前台/独立进程模式。
+- **令牌轮换即时生效**：`flix models token --reset` 同样走 Desktop API（`/api/models/token`），
+  旧令牌立刻 401、新令牌立刻可用；上传/上游/并发上限的改动也会同步到运行中的实例。
 - 状态：`flix models status`（含监听、地址、令牌、并发上限）。
 
 ## 自动更新

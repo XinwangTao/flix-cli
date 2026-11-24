@@ -1193,6 +1193,18 @@ def cmd_models(args) -> int:
             emit(payload, args.json)
             return 0 if result.get("ok") else 5
         if action == "token":
+            # Rotate through the daemon when one is running: the live listener
+            # closes over the config, so a prefs-only reset would keep the OLD
+            # token valid (and reject the new one) until the next restart.
+            api_port = _find_daemon_api_port(getattr(args, "api_port", None))
+            if api_port is not None:
+                got = _desktop_api_request(api_port, "/api/models/token",
+                                           {"reset": bool(args.reset)})
+                if got.get("ok"):
+                    emit({"ok": True, "token": got.get("token"),
+                          "rotated": got.get("rotated"),
+                          "daemon_hosted": True}, args.json)
+                    return 0
             token = (reset_token(store) if args.reset
                      else load_config(store)["token"])
             emit({"ok": True, "token": token}, args.json)
