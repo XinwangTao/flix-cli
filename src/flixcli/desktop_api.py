@@ -51,7 +51,8 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
                      adb_client: AdbClient | None = None,
                      media_manager: SessionManager | None = None,
                      media_runtime=None,
-                     scan_fn=None) -> tuple[web.Application, Callable[[dict], None]]:
+                     scan_fn=None,
+                     model_host=None) -> tuple[web.Application, Callable[[dict], None]]:
     events_q: asyncio.Queue = asyncio.Queue(maxsize=256)
     shutdown_ev = asyncio.Event()
     from .pairgate import GATE as pair_gate
@@ -621,6 +622,83 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
         return web.json_response({"error": "not implemented in flix-cli yet",
                                   "route": request.path}, status=501)
 
+    # -- model gateway: live on/off -------------------------------------------
+    # The gateway runs inside this daemon, so the switch belongs here; only
+    # rewriting the pref would leave the port listening (and the token valid on
+    # the whole LAN) until the daemon was restarted by hand.
+    async def _models_payload() -> dict:
+        from .model_gateway import lan_urls, load_config
+        loop = asyncio.get_running_loop()
+        cfg = await loop.run_in_executor(None, load_config, store)
+        port = (model_host.port if model_host and model_host.listening
+                else int(cfg["port"]))
+        return {"ok": True, "enabled": bool(cfg["enabled"]),
+                "listening": bool(model_host and model_host.listening),
+                "port": port, "upstream": cfg["upstream"],
+                "token": cfg["token"], "urls": lan_urls(port),
+                "max_concurrent": cfg["max_concurrent"]}
+
+    async def models_status_get(request: web.Request) -> web.Response:
+        if model_host is None:
+            return web.json_response(
+                {"ok": False, "error": "models-unavailable",
+                 "detail": "this daemon was started without the model gateway "
+                           "(pass --model-port or enable it in settings)"},
+                status=503)
+        return web.json_response(await _models_payload())
+
+    async def models_enable_post(request: web.Request) -> web.Response:
+        from .model_gateway import save_config
+        if model_host is None:
+            return web.json_response(
+                {"ok": False, "error": "models-unavailable",
+                 "detail": "this daemon was started without the model gateway "
+                           "(pass --model-port or enable it in settings)"},
+                status=503)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 - an empty body means "just enable"
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        changes: dict = {"enabled": True}
+        if body.get("port"):
+            try:
+                changes["port"] = int(body["port"])
+            except (TypeError, ValueError):
+                return web.json_response({"ok": False, "error": "bad-port"},
+                                         status=400)
+        if body.get("upstream"):
+            changes["upstream"] = str(body["upstream"])
+        loop = asyncio.get_running_loop()
+        try:
+            cfg = await loop.run_in_executor(
+                None, lambda: save_config(store, **changes))
+        except ValueError as exc:
+            return web.json_response({"ok": False, "error": "upstream",
+                                      "detail": str(exc)}, status=400)
+        try:
+            await model_host.start(int(cfg["port"]))
+        except (OSError, ValueError, TypeError) as exc:
+            return web.json_response({"ok": False, "error": "bind-failed",
+                                      "detail": str(exc)}, status=500)
+        publish({"t": "models", "enabled": True, "port": cfg["port"]})
+        return web.json_response(await _models_payload())
+
+    async def models_disable_post(request: web.Request) -> web.Response:
+        from .model_gateway import save_config
+        if model_host is None:
+            return web.json_response(
+                {"ok": False, "error": "models-unavailable"}, status=503)
+        loop = asyncio.get_running_loop()
+        cfg = await loop.run_in_executor(
+            None, lambda: save_config(store, enabled=False))
+        info = await model_host.stop()
+        publish({"t": "models", "enabled": False, "port": info.get("port")})
+        payload = await _models_payload()
+        payload["stopped"] = info.get("listening") is False
+        return web.json_response(payload)
+
     @web.middleware
     async def _localhost_guard(request: web.Request, handler):
         """DNS-rebinding / CSRF guard for an unauthenticated loopback API.
@@ -663,6 +741,9 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
     app.router.add_post("/api/groups/create", group_create_post)
     app.router.add_get("/api/events", events_get)
     app.router.add_get("/api/pair-link", pair_link_get)
+    app.router.add_get("/api/models/status", models_status_get)
+    app.router.add_post("/api/models/enable", models_enable_post)
+    app.router.add_post("/api/models/disable", models_disable_post)
     app.router.add_get("/api/adb/devices", adb_devices_get)
     app.router.add_post("/api/adb/connect", adb_connect_post)
     app.router.add_post("/api/adb/pair", adb_pair_post)
@@ -728,13 +809,14 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
 async def serve_desktop_api(store, ident, send_text_fn, port: int,
                             channel_port: int = 8891, webrtc_hub=None,
                             adb_client=None, media_manager=None, media_runtime=None,
-                            scan_fn=None):
+                            scan_fn=None, model_host=None):
     app, publish = make_desktop_app(store, ident, send_text_fn,
                                     api_port=port, channel_port=channel_port,
                                     webrtc_hub=webrtc_hub, adb_client=adb_client,
                                     media_manager=media_manager,
                                     media_runtime=media_runtime,
-                                    scan_fn=scan_fn)
+                                    scan_fn=scan_fn,
+                                    model_host=model_host)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", port)
