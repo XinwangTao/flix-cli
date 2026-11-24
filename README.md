@@ -171,6 +171,8 @@ Anthropic Messages 端点（默认 `18993`），所有请求原样转发到本�
 - **同端口再 start 也会应用新配置**：`flix models start --upstream X` 在本机守护进程已监听
   同一端口时不再只是「already」，而是把上游/上限推给运行中的实例；`models status` 报的是
   实例真正在用的上游。
+- **只操作自己端口上的那一个**：`models stop|token` 先核对 daemon 回报的端口，同端口才通过
+  它切换；否则回落到按端口停 / 本地改令牌，避免多 profile 或前台网关互相误伤。
 - 状态：`flix models status`（含监听、地址、令牌、并发上限）。
 
 ## 自动更新
