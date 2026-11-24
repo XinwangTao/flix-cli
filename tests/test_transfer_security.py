@@ -10,6 +10,7 @@ from pathlib import Path
 
 from aiohttp import ClientSession, web
 
+from flixcli import server
 from flixcli.config import Store
 from flixcli.model import BUBBLE_FILE
 from flixcli.server import make_app
@@ -83,11 +84,41 @@ class TransferSecurityTests(unittest.TestCase):
                         await client.post("http://127.0.0.1:19592/bubble", json=bubble)
                         r = await client.post("http://127.0.0.1:19592/file",
                                               params={"share_id": rid, "file_name": "safe.bin"}, data=b"new!")
+                        # 2026-11-24 联调结论：这里回 409 会让官方端整单
+                        # upload-failed（手机只显示"发送失败"），而"再发一次同名
+                        # 图片"是完全正常的操作，所以改为改名落盘。
+                        self.assertEqual(r.status, 200)
+                        self.assertEqual(target.read_bytes(), b"original")
+                        landed = downloads / "safe (1).bin"
+                        self.assertTrue(landed.exists(), "collision did not land beside the original")
+                        self.assertEqual(landed.read_bytes(), b"new!")
+                        # 但同一个 share_id 重复上传仍然要拒绝（已提交）。
+                        r = await client.post("http://127.0.0.1:19592/file",
+                                              params={"share_id": rid, "file_name": "safe.bin"}, data=b"new!")
                         self.assertEqual(r.status, 409)
-                    self.assertEqual(target.read_bytes(), b"original")
                 finally:
                     await runner.cleanup(); store.close()
         asyncio.run(run())
+
+    def test_unique_destination_numbering(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "photo.jpg"
+            first.write_bytes(b"a")
+            self.assertEqual(server._unique_destination(str(first)),
+                             str(root / "photo (1).jpg"))
+            (root / "photo (1).jpg").write_bytes(b"b")
+            self.assertEqual(server._unique_destination(str(first)),
+                             str(root / "photo (2).jpg"))
+            # 没有扩展名 / 多个点都要保持原样拼接
+            dotless = root / "README"
+            dotless.write_bytes(b"c")
+            self.assertEqual(server._unique_destination(str(dotless)),
+                             str(root / "README (1)"))
+            multi = root / "archive.tar.gz"
+            multi.write_bytes(b"d")
+            self.assertEqual(server._unique_destination(str(multi)),
+                             str(root / "archive.tar (1).gz"))
 
 
 if __name__ == "__main__":
