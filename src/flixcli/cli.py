@@ -1236,6 +1236,15 @@ def main(argv: list[str] | None = None) -> int:
         p.set_defaults(fn=fn)
         return p
 
+    # Nested verbs (adb/call) must also accept --json *after* the verb:
+    # `flix adb report --json` is what people type, and `group send --json`
+    # already worked that way while the others answered with a usage error.
+    # SUPPRESS keeps an earlier `flix adb --json report` from being reset.
+    json_parent = argparse.ArgumentParser(add_help=False)
+    json_parent.add_argument("--json", action="store_true",
+                             default=argparse.SUPPRESS,
+                             help="machine-readable output")
+
     p = add("discover", "listen for device announces on the LAN "
                         "(devices announce at startup)", cmd_discover)
     p.add_argument("--timeout", type=float, default=5.0)
@@ -1414,20 +1423,25 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--json", action="store_true")
     p.add_argument("--api-port", type=int, default=8898)
     csub = p.add_subparsers(dest="call_cmd", required=True)
-    csub.add_parser("list", help="list media sessions")
-    p_req = csub.add_parser("request", help="request a peer session")
+    csub.add_parser("list", help="list media sessions", parents=[json_parent])
+    p_req = csub.add_parser("request", help="request a peer session",
+                            parents=[json_parent])
     p_req.add_argument("device")
     p_req.add_argument("--audio", action="store_true")
     p_req.add_argument("--control", action="store_true")
-    p_app = csub.add_parser("approve", help="approve a pending session locally")
+    p_app = csub.add_parser("approve", help="approve a pending session locally",
+                            parents=[json_parent])
     p_app.add_argument("call_id")
     p_app.add_argument("--control", action="store_true")
-    p_den = csub.add_parser("deny", help="deny a pending session")
+    p_den = csub.add_parser("deny", help="deny a pending session",
+                            parents=[json_parent])
     p_den.add_argument("call_id")
     p_den.add_argument("--reason", default="denied by user")
-    p_con = csub.add_parser("connect", help="connect an approved session")
+    p_con = csub.add_parser("connect", help="connect an approved session",
+                            parents=[json_parent])
     p_con.add_argument("call_id")
-    p_rev = csub.add_parser("revoke", help="revoke a media session")
+    p_rev = csub.add_parser("revoke", help="revoke a media session",
+                            parents=[json_parent])
     p_rev.add_argument("call_id")
     p_rev.add_argument("--reason", default="revoked by user")
     p.set_defaults(fn=cmd_call)
@@ -1438,11 +1452,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--adb-path", default=None, help="adb executable path")
     p.add_argument("--timeout", type=float, default=30.0)
     adb_sub = p.add_subparsers(dest="adb_cmd", required=True)
-    adb_sub.add_parser("devices", help="list connected devices")
-    adb_sub.add_parser("report", help="show device authorization report")
+    adb_sub.add_parser("devices", help="list connected devices",
+                       parents=[json_parent])
+    adb_sub.add_parser("report", help="show device authorization report",
+                       parents=[json_parent])
     p_conn = adb_sub.add_parser(
         "connect", help="wireless debugging: discover the phone and connect "
-                        "through the loopback relay")
+                        "through the loopback relay", parents=[json_parent])
     p_conn.add_argument("--relay-port", type=int, default=None,
                         help="loopback relay port (default 40009)")
     p_conn.add_argument("--discover-timeout", type=float, default=3.0,
@@ -1450,16 +1466,20 @@ def main(argv: list[str] | None = None) -> int:
     p_conn.add_argument("--stop-relay", action="store_true",
                         help="stop a relay started by an earlier connect")
     p_qrpair = adb_sub.add_parser(
-        "pair-qr", help="show the official ADB pairing QR, then pair + connect")
+        "pair-qr", help="show the official ADB pairing QR, then pair + connect",
+        parents=[json_parent])
     p_qrpair.add_argument("--pair-timeout", type=float, default=90.0,
                           help="seconds to wait for the phone to scan")
-    p_push = adb_sub.add_parser("push", help="copy a local file to Android")
+    p_push = adb_sub.add_parser("push", help="copy a local file to Android",
+                                parents=[json_parent])
     p_push.add_argument("source")
     p_push.add_argument("destination")
-    p_pull = adb_sub.add_parser("pull", help="copy an Android file to this machine")
+    p_pull = adb_sub.add_parser("pull", help="copy an Android file to this machine",
+                                parents=[json_parent])
     p_pull.add_argument("source")
     p_pull.add_argument("destination")
-    p_shell = adb_sub.add_parser("shell", help="request a shell command; approval is required")
+    p_shell = adb_sub.add_parser("shell", help="request a shell command; approval is required",
+                                 parents=[json_parent])
     # REMAINDER keeps leading-dash command args (e.g. am start -n) intact
     # instead of argparse eating them as flix options. --approve must come
     # before the command words.

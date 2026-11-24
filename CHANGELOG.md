@@ -12,6 +12,9 @@
   旧配置里写死的 4 会按「显式上限」继续生效，清成 0 即恢复无上限。
 
 ### 修复
+- `--json` 放错位置就报用法错误：`flix adb report --json`、`flix call list --json` 都被
+  argparse 拒（父级 `adb --json report` 才行），而 `flix group send --json` 一直是好的。
+  给嵌套动词统一挂共享父解析器（`default=SUPPRESS`，父级写法仍然有效），现在两种顺序都行。
 - rdShell 远程执行现场两个故障：
   - **失败只剩裸 500**：目标端执行器抛异常时 aiohttp 回 `500 … Server got itself in
     trouble`，发起方分不清是「对端构建过旧 / 环境缺 COMSPEC / 进程起不来」。现在
