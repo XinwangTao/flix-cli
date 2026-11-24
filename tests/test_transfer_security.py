@@ -83,8 +83,18 @@ class TransferSecurityTests(unittest.TestCase):
                         await client.post("http://127.0.0.1:19592/bubble", json=bubble)
                         r = await client.post("http://127.0.0.1:19592/file",
                                               params={"share_id": rid, "file_name": "safe.bin"}, data=b"new!")
-                        self.assertEqual(r.status, 409)
-                    self.assertEqual(target.read_bytes(), b"original")
+                        # Same name is no longer a 409 (that made the official peer
+                        # abort the whole transfer): it lands under a free name.
+                        self.assertEqual(r.status, 200)
+                    self.assertEqual(target.read_bytes(), b"original",
+                                     "同名文件必须原样保留，不能被覆盖")
+                    landed = sorted(p for p in downloads.iterdir()
+                                    if p.is_file() and p.name != "safe.bin")
+                    self.assertEqual(len(landed), 1,
+                                     [p.name for p in downloads.iterdir()])
+                    self.assertEqual(landed[0].read_bytes(), b"new!",
+                                     f"新内容应落在改名后的文件里：{landed[0].name}")
+                    self.assertEqual(landed[0].name, "safe (1).bin")
                 finally:
                     await runner.cleanup(); store.close()
         asyncio.run(run())
