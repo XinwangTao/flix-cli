@@ -18,7 +18,7 @@ from flixcli import model_gateway
 from flixcli.config import Store
 from flixcli.desktop_api import make_desktop_app
 from flixcli.model_gateway import (GatewayHost, load_config, make_model_app,
-                                   save_config)
+                                   reset_token, save_config)
 
 
 def _free_port() -> int:
@@ -154,6 +154,68 @@ class ModelsApiTests(unittest.IsolatedAsyncioTestCase):
             resp = await client.post("/api/models/enable", json={})
             self.assertEqual(resp.status, 503)
             self.assertEqual((await resp.json())["error"], "models-unavailable")
+        finally:
+            await client.close()
+
+
+class TokenRotationTests(unittest.IsolatedAsyncioTestCase):
+    """A rotated token must stop working on the running listener at once."""
+
+    async def asyncSetUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.store = Store(Path(self._tmp.name) / "db.sqlite")
+        self.port = _free_port()
+        # A dead upstream keeps this cheap: 401 means "token decided here",
+        # anything else means the request got past the gate.
+        save_config(self.store, enabled=True, port=self.port,
+                    upstream="http://127.0.0.1:9")
+        self.host = GatewayHost(self.store)
+        await self.host.start(self.port)
+
+    async def asyncTearDown(self):
+        await self.host.stop()
+        self.store.close()
+        self._tmp.cleanup()
+
+    async def _call(self, token: str) -> int:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                    f"http://127.0.0.1:{self.port}/v1/messages",
+                    json={"model": "x"},
+                    headers={"x-api-key": token}) as resp:
+                return resp.status
+
+    async def test_rotated_token_applies_to_the_live_listener(self):
+        old = load_config(self.store)["token"]
+        self.assertNotEqual(await self._call(old), 401)
+        new = reset_token(self.store)
+        self.host.sync_config()
+        self.assertEqual(await self._call(old), 401,
+                         "轮换后旧令牌必须立刻失效（否则撤销毫无意义）")
+        self.assertNotEqual(await self._call(new), 401,
+                            "轮换后新令牌必须立刻可用")
+
+    async def test_desktop_api_rotation_is_immediate(self):
+        old = load_config(self.store)["token"]
+        app, _ = make_desktop_app(
+            self.store, {"fingerprint": "fp-me", "alias": "me"},
+            lambda to, text: None, api_port=8898, model_host=self.host)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            resp = await client.post("/api/models/token", json={"reset": True})
+            self.assertEqual(resp.status, 200)
+            body = await resp.json()
+            self.assertTrue(body["rotated"])
+            new = body["token"]
+            self.assertNotEqual(new, old)
+            # No restart, no extra call: the live app already honours it.
+            self.assertEqual(await self._call(old), 401)
+            self.assertNotEqual(await self._call(new), 401)
+
+            again = await (await client.post("/api/models/token", json={})).json()
+            self.assertEqual(again["token"], new, "不带 reset 只应读出当前令牌")
         finally:
             await client.close()
 

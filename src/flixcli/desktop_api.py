@@ -699,6 +699,27 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
         payload["stopped"] = info.get("listening") is False
         return web.json_response(payload)
 
+    async def models_token_post(request: web.Request) -> web.Response:
+        """Read or rotate the token, and make the live app honour it at once."""
+        from .model_gateway import load_config as _load_cfg, reset_token
+        if model_host is None:
+            return web.json_response(
+                {"ok": False, "error": "models-unavailable"}, status=503)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 - no body means "just show the token"
+            body = {}
+        reset = bool(body.get("reset")) if isinstance(body, dict) else False
+        loop = asyncio.get_running_loop()
+        token = await loop.run_in_executor(
+            None, (lambda: reset_token(store)) if reset
+            else (lambda: _load_cfg(store)["token"]))
+        # Rotating only the pref would keep the OLD token valid on the running
+        # listener until a restart, i.e. exactly what revoking must prevent.
+        model_host.sync_config()
+        publish({"t": "models", "tokenRotated": reset})
+        return web.json_response({"ok": True, "token": token, "rotated": reset})
+
     @web.middleware
     async def _localhost_guard(request: web.Request, handler):
         """DNS-rebinding / CSRF guard for an unauthenticated loopback API.
@@ -744,6 +765,7 @@ def make_desktop_app(store, ident: dict, send_text_fn: Callable,
     app.router.add_get("/api/models/status", models_status_get)
     app.router.add_post("/api/models/enable", models_enable_post)
     app.router.add_post("/api/models/disable", models_disable_post)
+    app.router.add_post("/api/models/token", models_token_post)
     app.router.add_get("/api/adb/devices", adb_devices_get)
     app.router.add_post("/api/adb/connect", adb_connect_post)
     app.router.add_post("/api/adb/pair", adb_pair_post)

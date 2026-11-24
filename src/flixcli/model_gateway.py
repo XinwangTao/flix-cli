@@ -538,12 +538,29 @@ class GatewayHost:
     def __init__(self, store):
         self.store = store
         self._runner = None
+        self._cfg = None
         self.port = 0
         self.upstream = ""
 
     @property
     def listening(self) -> bool:
         return self._runner is not None
+
+    def sync_config(self) -> dict:
+        """Push pref changes (token/upstream/limits) into the live app.
+
+        The app closes over one config dict, so a rotated token used to keep the
+        OLD value working (and reject the new one) until the daemon restarted —
+        a "revoke" that revokes nothing. Settings that change the listener itself
+        (the port) still need stop/start.
+        """
+        cfg = load_config(self.store)
+        if self._cfg is not None:
+            for key in ("token", "upstream", "max_concurrent", "max_body_mb",
+                        "allow_remote_upstream"):
+                if key in cfg:
+                    self._cfg[key] = cfg[key]
+        return cfg
 
     async def start(self, port: int | None = None) -> dict:
         cfg = load_config(self.store)
@@ -563,12 +580,14 @@ class GatewayHost:
             with contextlib.suppress(Exception):
                 await runner.cleanup()
             raise
-        self._runner, self.port, self.upstream = runner, target, cfg["upstream"]
+        self._runner, self._cfg = runner, cfg
+        self.port, self.upstream = target, cfg["upstream"]
         return {"ok": True, "listening": True, "port": target,
                 "upstream": cfg["upstream"]}
 
     async def stop(self) -> dict:
         runner, self._runner = self._runner, None
+        self._cfg = None
         port = self.port
         self.port = 0
         if runner is not None:
