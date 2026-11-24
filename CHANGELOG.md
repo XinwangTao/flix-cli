@@ -6,6 +6,33 @@
 ## [未发布]
 
 ### 修复
+- rdShell 远程执行现场两个故障：
+  - **失败只剩裸 500**：目标端执行器抛异常时 aiohttp 回 `500 … Server got itself in
+    trouble`，发起方分不清是「对端构建过旧 / 环境缺 COMSPEC / 进程起不来」。现在
+    `/intent` 回 `{ok:false, error:"shell-failed", detail:"<异常类型>: <信息>"}`，daemon
+    stderr 落完整 traceback；`remoteshell.run_command` 起进程失败改为返回 `exit=127` +
+    `stderr` 原因，不再把异常抛给 handler。
+  - **PTY 单会话槽位永久泄漏**：`finally` 里先 `session.close()` 再 `active_ptys -= 1`，
+    pywinpty 在子进程已死时抛异常就跳过了递减，此后每次 attach 都是 409 busy，只能手工
+    重启对端。改为先递减，`close`/审计/`ws.close` 各自 suppress，并加 `watch_detach`
+    在 socket 断开时主动关 ConPTY（同时放出被阻塞的读线程）。
+- `flix shell --pty` 客户端：stdin 关闭（管道/脚本用法）不再原地空等，直接发
+  `{"t":"close"}` 结束会话；握手 409/403/503 分别给出可操作提示，不再是「连接失败: 409」。
+- 审计写库失败不再把已经执行成功的命令变成失败请求（只丢那一行审计）。
+- **Windows 上 `os.kill(pid, 0)` 会杀进程**：`adb_wireless._pid_alive` 用它探活，
+  而 CPython 在 Windows 把非 CTRL_C/CTRL_BREAK 的信号直接转给 TerminateProcess。
+  后果是 `stop_relay` 里的「存活检查」把目标进程杀掉（陈旧 pidfile 还会误杀复用了
+  该 pid 的无关进程），`tests/test_scan_connect.py` 也因此把整个测试进程带走。改为
+  Windows 走 `OpenProcess(SYNCHRONIZE)` + `WaitForSingleObject(0)`，POSIX 保持 `os.kill(pid, 0)`。
+  （顺带说明：Windows 上 `stop_relay` 仍读不到命令行，验证不过就拒绝停止并保留 pidfile。）
+
+### 新增
+- `tests/rd_shell_integration.py`：双真实 daemon 的 rdShell 联调（exec / 链式命令 /
+  退出码透传 / PTY 客户端被强杀后槽位仍可复用）。
+- `tests/test_remoteshell.py`、`tests/test_ptyshell.py` 增补回归：执行器异常返回结构化
+  错误且不写审计、teardown 抛异常后槽位仍可复用。
+
+### 其他修复
 - 界面一直闪：毛玻璃背景原先用 DWM_CLOAK 把窗口藏起来再截屏，窗口每 3 秒真的
   消失一次。改用 WDA_EXCLUDEFROMCAPTURE（截图排除窗口、屏幕上看不出变化），
   刷新从 3 秒放宽到 30 秒，移动/缩放停下 400ms 后再补抓。

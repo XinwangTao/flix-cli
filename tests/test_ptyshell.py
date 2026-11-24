@@ -9,6 +9,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -89,6 +90,34 @@ class PtyTrustTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.2)
         audit = self.store.shell_audit()
         self.assertTrue(any(row["id"] == "test-1" for row in audit))
+
+    @unittest.skipUnless(ptyshell.available(), "PTY backend not installed")
+    async def test_slot_is_released_when_teardown_raises(self):
+        """One raising teardown must not poison the only session slot.
+
+        Seen in the field: `session.close()` (pywinpty on an already dead child)
+        raised inside `finally` *before* the decrement, so the peer answered 409
+        "busy" to every later attach until its daemon was restarted by hand.
+        """
+        real_close = ptyshell.PtySession.close
+        calls = {"n": 0}
+
+        def flaky_close(session):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("pywinpty closed twice")
+            real_close(session)
+
+        with mock.patch.object(ptyshell.PtySession, "close", flaky_close):
+            ws = await self.client.ws_connect("/shell/pty?from=fp-peer&sid=leak-1")
+            await ws.close()
+            await asyncio.sleep(1.0)
+
+        try:
+            ws2 = await self.client.ws_connect("/shell/pty?from=fp-peer&sid=leak-2")
+        except Exception as exc:  # noqa: BLE001 - assert with a useful message
+            self.fail(f"session slot was not released after a failed teardown: {exc}")
+        await ws2.close()
 
 
 if __name__ == "__main__":

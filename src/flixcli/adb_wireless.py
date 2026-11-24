@@ -338,6 +338,33 @@ def _pid_file(port: int) -> Path:
 
 
 def _pid_alive(pid: int) -> bool:
+    """Is `pid` still running?
+
+    Windows must not be probed with `os.kill(pid, 0)`: anything that is not
+    CTRL_C_EVENT/CTRL_BREAK_EVENT is forwarded straight to TerminateProcess, so
+    "checking" kills the process. A pid file left over from a previous boot then
+    takes out whatever process recycled that pid — ask the kernel instead.
+    """
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        SYNCHRONIZE = 0x00100000
+        WAIT_TIMEOUT = 0x00000102
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL,
+                                         wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel32.OpenProcess(SYNCHRONIZE, False, int(pid))
+        if not handle:
+            return False
+        try:
+            return kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
         return True

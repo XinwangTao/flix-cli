@@ -24,6 +24,27 @@ class PeerError(Exception):
         self.detail = detail
 
 
+def _error_detail(status: int, text: str) -> str:
+    """Render a peer error body, preferring the JSON handshake used by rdShell.
+
+    A current peer answers `{"error": ..., "detail": ...}`; an older one answers
+    the bare aiohttp page, which carries no reason at all — keep both readable
+    and add a hint only for the useless case.
+    """
+    body = (text or "").strip()
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict) and (payload.get("error") or payload.get("detail")):
+        return f"HTTP {status} {payload.get('error') or 'error'}: " \
+               f"{payload.get('detail') or ''}".rstrip()
+    if status == 500 and "Internal Server Error" in body:
+        return (f"HTTP 500 (peer crashed running the command, no detail; "
+                f"restart or update the peer build to get one)")
+    return f"HTTP {status} {body}"
+
+
 async def post_bubble(ip: str, bubble: dict, port: int = DEVICE_PORT,
                       timeout: float = 8.0) -> str:
     """Send a bubble; returns the response text ('received bubble')."""
@@ -140,7 +161,7 @@ async def post_json(ip: str, path: str, payload: dict, port: int = DEVICE_PORT,
                               timeout=aiohttp.ClientTimeout(total=timeout)) as r:
                 text = await r.text()
                 if r.status != 200:
-                    raise PeerError("rejected", f"HTTP {r.status} {text.strip()}")
+                    raise PeerError("rejected", _error_detail(r.status, text))
                 try:
                     return json.loads(text)
                 except ValueError:

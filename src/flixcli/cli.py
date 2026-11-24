@@ -250,7 +250,18 @@ _WIN_KEYS = {"H": b"\x1b[A", "P": b"\x1b[B", "M": b"\x1b[C", "K": b"\x1b[D",
              "I": b"\x1b[5~", "Q": b"\x1b[6~"}
 
 
-def _read_keys() -> bytes:
+def _read_keys() -> bytes | None:
+    """One chunk of local keystrokes; `None` means stdin reached EOF.
+
+    Scripted callers pipe stdin, and a closed pipe has to end the session —
+    otherwise the client sits in raw mode forever waiting for keys nobody will
+    type (and the peer keeps its single PTY slot allocated).
+    """
+    if not sys.stdin.isatty():
+        try:
+            return sys.stdin.buffer.read1(1024) or None
+        except (OSError, ValueError):
+            return None
     if os.name == "nt":
         import msvcrt
         ch = msvcrt.getwch()
@@ -284,6 +295,10 @@ async def _pty_client(ip: str, port: int, my_fp: str, shell_name: str) -> int:
                     async def keyboard() -> None:
                         while not stop.is_set():
                             data = await loop.run_in_executor(None, _read_keys)
+                            if data is None:  # stdin closed: ask the peer to end
+                                with contextlib.suppress(Exception):
+                                    await ws.send_json({"t": "close"})
+                                return
                             if not data:
                                 await asyncio.sleep(0.02)
                                 continue
@@ -334,6 +349,19 @@ async def _pty_client(ip: str, port: int, my_fp: str, shell_name: str) -> int:
                             task.cancel()
                     print("\r\n[flix] 会话已关闭")
                     return 0
+        except aiohttp.WSServerHandshakeError as exc:
+            # The peer answers before upgrading, so this is the only chance to
+            # tell the operator *why* the terminal did not open.
+            hint = {
+                409: "对端 PTY 槽位已被占用（一个活动会话，或旧版本的泄漏）"
+                     " → 到对端重启 RelayDesk",
+                403: "对端拒绝：未配对，或来源 IP 与配对记录不一致",
+                503: "对端缺 pywinpty，无法分配伪终端 → 改用 "
+                     "flix shell <设备> -- <命令>",
+            }.get(exc.status)
+            print(f"[flix] 握手失败 HTTP {exc.status}" +
+                  (f"：{hint}" if hint else ""), file=sys.stderr)
+            return 5
         except aiohttp.ClientError as exc:
             print(f"[flix] 连接失败: {exc}", file=sys.stderr)
             return 3

@@ -229,7 +229,11 @@ flix shell <设备> --timeout 120 -- "ping -n 5 127.0.0.1"
 - **返回**：`stdout` / `stderr` / `exit` / `truncated` / `durationMs`；CLI 的退出码就是远端命令的退出码。
 - **上限**：输出超过 256 KB 截断并置 `truncated`；超时默认 30 s、最大 300 s，到点杀整个进程树。
 - **授权**：配对即授权（两端都查 `pair_devices`），未配对一律 403，不执行、不落库。
+- **失败可诊断**：目标端起不来进程或执行器抛异常时，不再回裸 aiohttp 500，而是
+  `{ok:false, error:"shell-failed", detail:"<异常类型>: <信息>"}`，同时 daemon 的 stderr
+  记完整 traceback；`run_command` 自身起进程失败返回 `exit=127` + `stderr` 原因。
 - **审计**：目标端 `shell_audit` 表记录发起方、命令摘要、退出码、耗时；`stdout` 不回写数据库。
+  （审计写失败不会把已经跑完的命令变成失败请求。）
 - **MCP**：`flix_shell{to, command, timeout?}` 与 CLI 共用同一实现。
 
 流程真源：`docs/archify/flix_shell_workflow.html`（旁路 `.json`）。
@@ -243,8 +247,13 @@ flix shell --pty --shell powershell 4c4ca286
 
 - 目标端用 **ConPTY**（`pip install -e ".[pty]"`）分配伪终端，`vim`/`top` 这类全屏程序可用；
 - 客户端把本机控制台切到 raw 模式并透传 ANSI，**Ctrl+]** 退出会话；
+- **stdin 关闭即结束**（`"ver\r\n" | flix shell --pty <设备>` 这类脚本用法会自动收会话，
+  不会挂着占住对端的槽位）；
 - 信任门与 exec 相同（配对 + 来源 IP 一致）；缺 `pywinpty` 时明确报 `pty-unavailable`，请退回 exec；
-- 空闲 30 分钟自动断开，同一时间只允许 1 个会话；会话结束写一条审计（时长/退出码）。
+- 空闲 30 分钟自动断开，同一时间只允许 1 个会话；握手失败按状态码给提示
+  （409 = 槽位被占/旧版本泄漏，403 = 未配对或来源不符，503 = 对端缺 pywinpty）；
+- 会话槽位在 teardown 抛异常时也会释放（旧版本会永久 409 直到重启对端）；
+- 会话结束写一条审计（时长/退出码）。
 
 流程真源：`docs/archify/flix_shell_pty_workflow.html`（旁路 `.json`）。
 
