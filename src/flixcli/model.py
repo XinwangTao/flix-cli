@@ -19,6 +19,16 @@ import uuid
 
 BUBBLE_TEXT = 0
 BUBBLE_FILE = 3
+# Official Android Felix sends pictures as type 1 carrying the same
+# FileTransfer content blob as a file bubble (meta.thumbnailBase64 + size...),
+# wire-verified 2026-11-24 from the peer's logcat:
+#   send primitiveBubble = PrimitiveFileBubble{id...}
+#   _sendBasicBubble body={"type":1,"content":{...meta{thumbnailBase64}...}}
+# A receiver that only understands type 3 answers 200 and stores nothing,
+# which strands the sender on "waiting for peer confirmation" forever.
+BUBBLE_IMAGE = 1
+# Every bubble type that carries a FileTransfer-style `content` map.
+TRANSFER_BUBBLE_TYPES = frozenset({BUBBLE_IMAGE, BUBBLE_FILE})
 
 # FileState string values observed on the wire/log (official Dart enum names)
 FILE_STATE_WAIT_TO_ACCEPTED = "waitToAccepted"

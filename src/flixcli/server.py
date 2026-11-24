@@ -248,7 +248,11 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
                                   str(bubble.get("to") or ""), content, ts, gid)
             publish("bubbleChanged", {"bubbleId": bubble["id"], "type": "text",
                                       "groupId": gid})
-        elif btype == model.BUBBLE_FILE and isinstance(content, dict):
+        elif btype in model.TRANSFER_BUBBLE_TYPES and isinstance(content, dict):
+            # type 1 is the official Android client's picture bubble; it carries
+            # the same FileTransfer content map as type 3. Persist both as the
+            # file type so the desktop UI (which keys off file_contents) renders
+            # them identically, and so the sender gets its confirmReceive.
             meta = content.get("meta") if isinstance(content.get("meta"), dict) else {}
             name = str(meta.get("name") or "")
             if not name:
@@ -294,6 +298,11 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
                     _aio.create_task(_confirm(ip, int(sender_port[0])
                                               if sender_port and sender_port[0]
                                               else DEVICE_PORT))
+        else:
+            # Never answer 200 for a bubble we did not understand: the official
+            # client treats 200 as delivered and then waits for an ack that will
+            # never come ("waiting for peer confirmation"), losing the message.
+            return web.Response(status=400, text="receive bubble failed")
         return web.Response(text="received bubble")
 
     async def intent_post(request: web.Request) -> web.Response:
