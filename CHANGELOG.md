@@ -3,7 +3,7 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号与 GitHub Release 标签一致。
 可执行产物见 [Releases](https://github.com/XinwangTao/flix-cli/releases)。
 
-## [未发布]
+## [v2.6.5] - 2026-11-25
 
 ### 变更
 - **模型共享网关默认不再设并发上限**：`max_concurrent` 默认 0（无上限），网关不再回
