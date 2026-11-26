@@ -10,7 +10,25 @@ from __future__ import annotations
 import os
 
 MAX_IDLE_S = 30 * 60
-MAX_SESSIONS = 1
+
+
+def _max_sessions_from_env() -> int:
+    """How many interactive PTYs this host may serve at once.
+
+    This used to be 1: a second `flix shell --pty` got 409 "busy" until the
+    first one closed, which makes the LAN SSH feature unusable for the normal
+    case of several panes/terminals at once. 8 by default, tunable with
+    FLIX_RD_PTY_MAX.
+    """
+    raw = os.environ.get("FLIX_RD_PTY_MAX", "").strip()
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 8
+    return max(1, min(64, value))
+
+
+MAX_SESSIONS = _max_sessions_from_env()
 READ_CHUNK = 8192
 
 

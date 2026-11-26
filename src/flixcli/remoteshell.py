@@ -69,10 +69,35 @@ def _clip(data: bytes) -> tuple[str, bool]:
 
 
 # A peer can ask for several rdShell calls at once. Each occupies a worker
-# thread; without a cap, ~32 requests starve the default executor (PTY reads,
-# media, everything else).
-_MAX_CONCURRENT = 4
+# thread; without a cap, a flood starves the rest of the process.
+#
+# The old cap was 4 with a 2 s queue wait, which turned a burst of 5 remote
+# commands into immediate exit=124 failures — bad for the "LAN SSH under load"
+# use case (CI steps, editor remote tasks, several panes at once). The cap is
+# now 16 by default, tunable with FLIX_RD_SHELL_MAX, and a queued command waits
+# for a slot (bounded by its own timeout) instead of failing at once.
+# Reference: server.py runs these on a *dedicated* pool, so shell load can no
+# longer starve PTY reads or media.
+DEFAULT_MAX_CONCURRENT = 16
+MAX_CONCURRENT_LIMIT = 64
+
+
+def _max_concurrent_from_env() -> int:
+    raw = os.environ.get("FLIX_RD_SHELL_MAX", "").strip()
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_CONCURRENT
+    return max(1, min(MAX_CONCURRENT_LIMIT, value))
+
+
+_MAX_CONCURRENT = _max_concurrent_from_env()
 _SLOTS = threading.BoundedSemaphore(_MAX_CONCURRENT)
+
+
+def max_concurrent() -> int:
+    """Current rdShell exec cap (for status output and tests)."""
+    return _MAX_CONCURRENT
 
 
 def _drain(pipe, cap: int) -> bytes:
@@ -119,9 +144,15 @@ def run_command(command: str, timeout: float = DEFAULT_TIMEOUT_S) -> dict:
     """Run `command` through the platform shell; never raises for exit codes."""
     limit = max(0.1, min(float(timeout or DEFAULT_TIMEOUT_S), MAX_TIMEOUT_S))
     started = time.monotonic()
-    if not _SLOTS.acquire(timeout=2):
-        return {"exit": 124, "stdout": "", "stderr": "too many concurrent "
-                "remote commands", "truncated": False, "timeout": True,
+    # Wait for a slot instead of failing after 2 s: a burst of remote commands
+    # should queue, not error out. The wait is bounded by the command's own
+    # timeout so a caller never blocks longer than it asked to.
+    wait_for_slot = min(max(2.0, limit), 60.0)
+    if not _SLOTS.acquire(timeout=wait_for_slot):
+        return {"exit": 124, "stdout": "", "stderr":
+                f"too many concurrent remote commands (>{_MAX_CONCURRENT} "
+                f"in flight, waited {int(wait_for_slot)}s)",
+                "truncated": False, "timeout": True,
                 "durationMs": int((time.monotonic() - started) * 1000)}
     try:
         kwargs: dict = {}

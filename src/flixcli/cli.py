@@ -138,6 +138,15 @@ async def cmd_send_text(args) -> int:
     return 0 if result.get("ok") else 3
 
 
+def _sibling_device_port(port: int) -> int | None:
+    """RelayDesk 的两个常规设备端口：8891（首选）与 18991（8891 被占用时）。"""
+    if port == DEVICE_PORT:
+        return 18991
+    if port == 18991:
+        return DEVICE_PORT
+    return None
+
+
 async def cmd_shell(args) -> int:
     """Run one command on a paired peer (exec only, no PTY, no streaming).
 
@@ -168,18 +177,43 @@ async def cmd_shell(args) -> int:
                                      ident["fingerprint"], args.shell)
         intent = shell_intent(ident["fingerprint"], fp, uuid.uuid4().hex,
                               command, args.timeout)
-        try:
-            result = await post_json(ip, "/intent", intent,
-                                     port=port or args.port,
-                                     timeout=args.timeout + 15)
-        except PeerError as e:
+        # GUI 启动 `serve` 时优先用 8891，只有 8891 被占用才退回 18991
+        # （见 gui.py 的 device_port 选择）。所以「另一台机器到底开在哪个端口」
+        # 是随机器而定的：同一个人在两台机器上敲同一条命令，可能一个通一个不通。
+        # 这里在连不上时自动再试另一个候选端口，并把实际用到的端口告诉用户。
+        candidates = [port or args.port]
+        sibling = _sibling_device_port(candidates[0])
+        if sibling:
+            candidates.append(sibling)
+        result = None
+        last_error = None
+        used_port = candidates[0]
+        for index, candidate_port in enumerate(candidates):
+            try:
+                result = await post_json(ip, "/intent", intent,
+                                         port=candidate_port,
+                                         timeout=args.timeout + 15)
+                used_port = candidate_port
+                if index:
+                    emit({"note": "device-port-fallback",
+                          "detail": f"端口 {candidates[0]} 连不上，已自动改用 "
+                                    f"{candidate_port}", "to": fp}, True)
+                break
+            except PeerError as e:
+                last_error = e
+                if e.kind not in ("timeout", "unreachable") or index + 1 == len(candidates):
+                    break
+                continue
+        if result is None:
+            e = last_error
             code = {"timeout": 3, "unreachable": 3, "rejected": 4}.get(e.kind, 3)
-            emit({"error": e.kind, "detail": e.detail, "to": fp, "ip": ip}, True)
+            emit({"error": e.kind, "detail": e.detail, "to": fp, "ip": ip,
+                  "tried_ports": candidates}, True)
             return code
     finally:
         store.close()
     if args.json:
-        emit({"ok": True, "to": fp, "ip": ip, **result}, True)
+        emit({"ok": True, "to": fp, "ip": ip, "port": used_port, **result}, True)
     else:
         out = result.get("stdout") or ""
         err = result.get("stderr") or ""
@@ -518,42 +552,77 @@ def _tcp_reachable(ip: str, port: int, timeout: float) -> bool:
         return False
 
 
-def _firewall_programs() -> tuple[dict, list[str]]:
-    """Enabled inbound-allow application filters matching flix/RelayDesk."""
+def _firewall_coverage(app_profiles: list[str], categories: list[str]) -> dict:
+    """Which of the *current* network categories a set of allow rules covers.
+
+    A rule that exists but only covers `Public` does nothing on a Wi-Fi that
+    Windows classified as `Private` — `netcheck` used to say "allowed: yes"
+    there and the peer still could not connect. Rule existence is not enough;
+    the profile has to match the network the peers are on.
+    """
+    covered: set[str] = set()
+    for raw in app_profiles:
+        parts = {p.strip().lower() for p in str(raw).replace(",", " ").split()}
+        if "any" in parts:
+            covered.update(c.lower() for c in categories)
+            continue
+        for category in categories:
+            if category.lower() in parts:
+                covered.add(category.lower())
+    missing = [c for c in categories if c.lower() not in covered]
+    return {"covered": sorted(covered), "uncovered": sorted(missing)}
+
+
+def _firewall_programs() -> dict:
+    """Inbound-allow rules for flix/RelayDesk, with the profiles each one covers.
+
+    Enumerating *all* firewall rules takes minutes on a busy host (thousands of
+    entries) and used to time out, which made `netcheck` report "unknown". The
+    rules that matter are named after the product, so query them by name — a
+    3 s round trip — and resolve program/port only for the handful that match.
+    """
+    empty = {"profiles": {}, "programs": [], "apps": [], "categories": []}
     if not sys.platform.startswith("win"):
-        return {}, []
+        return empty
     import subprocess
     script = (
         "$out = @();"
-        "Get-NetFirewallApplicationFilter | "
-        "Where-Object { $_.Program -match 'flixd|flix-cli|RelayDesk|flix\\.exe' } | "
-        "ForEach-Object { $prog = $_.Program;"
-        "$rules = Get-NetFirewallRule -AssociatedNetFirewallApplicationFilter $_ "
-        "-ErrorAction SilentlyContinue;"
-        "if ($rules | Where-Object { $_.Enabled -eq 'True' -and "
-        "$_.Direction -eq 'Inbound' -and $_.Action -eq 'Allow' }) "
-        "{ $out += $prog } };"
-        "$p = Get-NetFirewallProfile | Select-Object Name,Enabled;"
-        "@{profiles=@($p); programs=@($out | Select-Object -Unique)} | "
-        "ConvertTo-Json -Depth 4 -Compress"
+        "Get-NetFirewallRule -DisplayName '*flix*','*RelayDesk*' "
+        "-ErrorAction SilentlyContinue | "
+        "Where-Object { $_.Direction -eq 'Inbound' -and $_.Enabled -eq 'True' "
+        "-and $_.Action -eq 'Allow' } | ForEach-Object {"
+        "$app = $_ | Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue;"
+        "$port = $_ | Get-NetFirewallPortFilter -ErrorAction SilentlyContinue;"
+        "$out += @{ name = [string]$_.DisplayName;"
+        "profile = [string]$_.Profile;"
+        "program = [string]$app.Program;"
+        "port = [string]$port.LocalPort } };"
+        "$cats = @(Get-NetConnectionProfile -ErrorAction SilentlyContinue |"
+        "ForEach-Object { [string]$_.NetworkCategory } | Select-Object -Unique);"
+        "$p = @(Get-NetFirewallProfile -ErrorAction SilentlyContinue |"
+        "ForEach-Object { @{ Name = [string]$_.Name; Enabled = [string]$_.Enabled } });"
+        "@{profiles=@($p); apps=@($out); categories=@($cats)} | "
+        "ConvertTo-Json -Depth 5 -Compress"
     )
     try:
         proc = subprocess.run(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
             capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=12)
+            errors="replace", timeout=45)
         data = json.loads((proc.stdout or "{}").lstrip("﻿"))
     except Exception:
-        return {}, []
+        return empty
     rows = data.get("profiles") or []
     if isinstance(rows, dict):
         rows = [rows]
-    profiles = {str(row.get("Name")): bool(row.get("Enabled"))
+    profiles = {str(row.get("Name")): str(row.get("Enabled")).lower() == "true"
                 for row in rows if isinstance(row, dict)}
-    programs = data.get("programs") or []
-    if isinstance(programs, str):
-        programs = [programs]
-    return profiles, [str(p) for p in programs if p]
+    apps = [row for row in (data.get("apps") or []) if isinstance(row, dict)]
+    programs = sorted({str(row.get("program")) for row in apps
+                       if row.get("program")})
+    categories = [str(c) for c in (data.get("categories") or []) if str(c)]
+    return {"profiles": profiles, "programs": programs, "apps": apps,
+            "categories": categories}
 
 
 def _multicast_probe(iface: str, group: str) -> dict:
@@ -597,15 +666,27 @@ async def cmd_netcheck(args) -> int:
         join = {"interface": iface, **_multicast_probe(iface, MULTICAST_GROUP)}
         udp_port = _udp_port_probe(DEVICE_PORT)
 
-        profiles, programs = _firewall_programs()
+        fw = _firewall_programs()
+        profiles = fw["profiles"]
+        programs = fw["programs"]
         exe_norm = sys.executable.lower().replace("/", "\\")
         allowed = any(str(p).lower().replace("/", "\\") == exe_norm
                       for p in programs)
+        # Rule existence is not the same as coverage: a Public-only rule is
+        # useless on the Private Wi-Fi that phones and peers actually use.
+        ours = [row.get("profile", "") for row in fw["apps"]
+                if str(row.get("program", "")).lower().replace("/", "\\")
+                in {str(p).lower().replace("/", "\\") for p in programs}]
+        coverage = _firewall_coverage(ours, fw["categories"])
         firewall = {"supported": sys.platform.startswith("win"),
                     "profiles": profiles, "programs": programs,
                     "anyProfileEnabled": any(profiles.values()),
                     "currentExe": sys.executable,
-                    "currentExeAllowed": allowed}
+                    "currentExeAllowed": allowed,
+                    "ruleProfiles": ours,
+                    "networkCategories": fw["categories"],
+                    "coveredCategories": coverage["covered"],
+                    "uncoveredCategories": coverage["uncovered"]}
 
         peers = []
         for row in store.devices():
@@ -653,6 +734,17 @@ async def cmd_netcheck(args) -> int:
                 else:
                     print(f"[netcheck] firewall    profiles: {states}  "
                           f"current exe allowed: {'yes' if allowed else 'no'}")
+                    cats = ", ".join(fw["categories"]) or "unknown"
+                    print(f"[netcheck] firewall    network categories: {cats}  "
+                          f"rule profiles: {', '.join(ours) or 'none'}")
+                    if firewall["uncoveredCategories"]:
+                        need = firewall["uncoveredCategories"][0]
+                        print(f"[netcheck] WARNING     inbound rules do not cover "
+                              f"{', '.join(firewall['uncoveredCategories'])} — "
+                              f"peers on this network cannot connect")
+                        print("[netcheck] hint        fix once in an elevated "
+                              "PowerShell: "
+                              f"scripts\\fix_firewall.ps1 -Profile {need}")
             else:
                 print("[netcheck] firewall    unsupported on this platform")
             for peer in peers:
@@ -1110,10 +1202,34 @@ async def cmd_serve(args) -> int:
 
 def cmd_models(args) -> int:
     """LAN model gateway: phones talk Anthropic Messages, cc-switch does the rest."""
-    from .model_gateway import (lan_urls, load_config, reset_token,
-                                run_gateway, save_config, status_payload)
+    from .model_gateway import (lan_urls, load_config, models_list,
+                                reset_token, run_gateway, save_config,
+                                status_payload)
     action = getattr(args, "action", None) or "status"
     store = Store()
+    if action == "doctor":
+        try:
+            if int(getattr(args, "watch", 0) or 0) > 0:
+                return _models_watch(store, args)
+            return _models_doctor(store, args)
+        finally:
+            store.close()
+    if action == "list":
+        try:
+            rows = models_list(store)
+        finally:
+            store.close()
+        if args.json:
+            emit({"ok": True, "count": len(rows), "models": rows}, True)
+            return 0
+        if not rows:
+            print("上游没有返回模型列表：检查 cc-switch 是否在运行（默认 127.0.0.1:15721）")
+            return 0
+        for row in rows:
+            print(f"{row['short']:<32} {row['id']}")
+            print(f"{'':<32} {row['display']}")
+        print(f"\n共 {len(rows)} 个；手机 App 里填短名或完整 id 都可以。")
+        return 0
     if action == "start":
         changes = {"enabled": True}
         if args.port:
@@ -1122,6 +1238,8 @@ def cmd_models(args) -> int:
             changes["upstream"] = args.upstream
         if getattr(args, "allow_remote_upstream", False):
             changes["allow_remote_upstream"] = True
+        if getattr(args, "upstream_token", None):
+            changes["upstream_token"] = args.upstream_token
         if getattr(args, "max_concurrent", None) is not None:
             changes["max_concurrent"] = args.max_concurrent
         try:
@@ -1136,6 +1254,12 @@ def cmd_models(args) -> int:
                               "token": cfg["token"],
                               "urls": lan_urls(cfg["port"])},
                              ensure_ascii=False, indent=1), flush=True)
+        # `models start` 是**前台常驻**（Ctrl+C 结束），不是卡住。用户第一次跑
+        # 很容易以为它挂了：先明确说一句，并给出「想要后台托管该走哪条路」。
+        if not args.json:
+            print(f"前台运行中：网关监听 {cfg['port']}，Ctrl+C 结束。"
+                  "\n  想让它在后台托管（关掉终端也继续跑），"
+                  "用设置页「模型共享」开关，或 `flix serve`。", flush=True)
         return _models_serve(store, cfg)  # coroutine: runs until interrupted
     try:
         if action == "stop":
@@ -1155,12 +1279,74 @@ def cmd_models(args) -> int:
             return 0
         payload = status_payload(store)
         if not args.json:
-            state = "运行中" if payload["listening"] else "未运行"
-            print(f"状态: {state}（{'已开启' if payload['enabled'] else '未开启'}）")
+            enabled = bool(payload["enabled"])
+            unauthorized = bool(payload.get("unauthorized"))
+            if not enabled:
+                state = "未开启（不共享给局域网）"
+            elif unauthorized:
+                state = "已开启，但端口上的网关不认当前令牌"
+            elif payload["listening"]:
+                state = "运行中"
+            else:
+                state = "已开启但未运行"
+            print(f"状态: {state}")
             print(f"端口: {payload['port']}  上游: {payload['upstream']}")
-            print(f"并发上限: {payload.get('max_concurrent') or '无限制'}")
-            print(f"地址: {', '.join(payload['urls'])}")
+            # 两个并发概念不同：max_concurrent 是本网关总并发，upstream_concurrency
+            # 是压给上游（cc-switch）的闸门。只写「无限制」会让人以为没有任何上限。
+            total = payload.get("max_concurrent") or 0
+            gate = payload.get("upstream_concurrency") or 0
+            print(f"并发: 本机 {('不限' if not total else total)}，"
+                  f"上游闸门 {('不限' if not gate else gate)}"
+                  f"（排队 {payload.get('queue_wait_s', '-')}s）")
+            named = payload.get("urls_named") or []
+            if named:
+                print("地址: " + "、".join(
+                    f"{row['url']}"
+                    + (f"（{row['interface']}）" if row.get("interface") else "")
+                    for row in named))
+            else:
+                print(f"地址: {', '.join(payload['urls'])}")
             print(f"令牌: {payload['token']}")
+            print("协议: Anthropic Messages（/v1/messages）+ OpenAI 兼容"
+                  "（/v1/chat/completions，手机端多数客户端用这个）")
+            if unauthorized:
+                print("上游链路: 无法确认（当前令牌通不过端口上那个网关的鉴权）")
+            elif payload["listening"]:
+                upstream_ok = payload.get("upstream_ok")
+                upstream_text = ("正常" if upstream_ok
+                                 else ("不可达" if upstream_ok is False
+                                       else "未探测"))
+                print(f"上游链路: {upstream_text}"
+                      f"  模型: {payload.get('models', 0)} 个"
+                      f"（flix models list 查看）")
+                if payload.get("last_error"):
+                    print(f"最近错误: {payload['last_error']}")
+                prefixes = payload.get("relay_prefixes") or {}
+                if prefixes:
+                    print(f"中继: {len(prefixes)} 个前缀近期失败，"
+                          f"这些路由暂不尝试（对端 VPN/服务未连？）："
+                          f"{', '.join(prefixes)}")
+            # 一行健康摘要：本机是否可用只看这一条就够（对端中继不算本机故障）
+            if unauthorized:
+                print("健康: 令牌对不上——要么被轮换过，要么这个端口上跑的是"
+                      "另一个安装。用「复制手机配置」取当前令牌，或先停掉它再重试")
+            elif not enabled:
+                print("健康: 共享未开启（这是默认状态；要共享就开一下开关）")
+            elif payload["listening"]:
+                direct_dead = [
+                    m for m, v in (payload.get("routes") or {}).items()
+                    if not v.get("ok", True) and m.count("--") <= 1]
+                visible = payload.get("models", 0)
+                if direct_dead:
+                    print(f"健康: 本机直连有 {len(direct_dead)} 条路由不可用"
+                          f"（检查 cc-switch）")
+                elif not visible:
+                    print("健康: 没有可用模型（上游目录为空？）")
+                else:
+                    peer = payload.get("relay_prefixes") or {}
+                    extra = (f"；{len(peer)} 个对端中继暂时不通（已从列表隐藏）"
+                             if peer else "")
+                    print(f"健康: 可用（{visible} 个模型）{extra}")
             stats = payload.get("stats") or {}
             if stats:
                 mins = int(stats.get("uptime", 0)) // 60
@@ -1172,6 +1358,15 @@ def cmd_models(args) -> int:
                     last = recent[-1]
                     print(f"最近拒绝: {last.get('kind', '?')} ← "
                           f"{last.get('remote') or '本机'}")
+                # The last few proxied calls answer "手机为什么没反应":
+                # status, latency and which model it actually asked for.
+                calls = stats.get("recent_requests") or []
+                for call in calls[-3:]:
+                    model = call.get("to") or call.get("model") or "-"
+                    print(f"  · {call.get('ms', 0)}ms  {call.get('status', 0)}  "
+                          f"{model}  ← {call.get('remote') or '本机'}"
+                          + ("  流式" if call.get("stream") else "")
+                          + (f"  ({call['error']})" if call.get("error") else ""))
             if payload.get("detail") and not payload["listening"]:
                 print(f"提示: {payload['detail']}")
             return 0
@@ -1179,6 +1374,430 @@ def cmd_models(args) -> int:
         return 0
     finally:
         store.close()
+
+
+def _watch_baseline(samples: list[dict]) -> tuple[int, dict]:
+    """找出计数器最后一次归零的位置，返回（重启次数，基线样本）。
+
+    计数器是进程内的，网关重启就归零。直接拿末样本减首样本会算出负数
+    （实测出现过「新增失败 -2」这种看不懂的数）。所以以「最后一次重启之后
+    的第一个样本」当基线；没重启过就是第一个样本。
+    """
+    restart_at = [index for index, (prev, cur)
+                  in enumerate(zip(samples, samples[1:]))
+                  if cur["ok"] < prev["ok"] or cur["failed"] < prev["failed"]]
+    if not restart_at:
+        return 0, samples[0]
+    return len(restart_at), samples[restart_at[-1] + 1]
+
+
+def _models_watch(store, args) -> int:
+    """持续采样本机网关，回答「跑久了会不会漂」。
+
+    一次性 doctor 只能证明「此刻正常」；真实现场关心的是 30 分钟、2 小时后还正常吗。
+    这里按间隔采样并在结束时给出漂移结论（模型数变化 / 新增失败 / active 泄漏 /
+    直连路由变坏 / 真实补全变慢）。
+    """
+    import time
+
+    from .model_gateway import load_config, probe
+
+    cfg = load_config(store)
+    duration = max(10, int(getattr(args, "watch", 0) or 0))
+    interval = max(5, min(300, int(getattr(args, "interval", 30) or 30)))
+    model = getattr(args, "model", None) or ""
+    samples: list[dict] = []
+    anomalies: list[str] = []
+    started = time.monotonic()
+    print(f"观察 {duration}s，每 {interval}s 采样一次（Ctrl-C 结束并给结论）", flush=True)
+
+    def call_completion() -> tuple[bool, float, str]:
+        import urllib.request
+        # 200 而不是 64：推理模型可能把预算全花在思考上，64 会得到空正文，
+        # 那是模型行为不是网关故障（实测误报过一次）。
+        body = json.dumps({"model": model, "max_tokens": 200,
+                           "messages": [{"role": "user",
+                                         "content": "只回答两个字：通了"}]}).encode()
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{cfg['port']}/v1/messages", data=body,
+            headers={"content-type": "application/json",
+                     "x-api-key": cfg["token"],
+                     "anthropic-version": "2023-06-01"})
+        began = time.monotonic()
+        try:
+            with urllib.request.urlopen(request, timeout=180) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+            blocks = data.get("content") or []
+            text = "".join(b.get("text", "") for b in blocks
+                           if b.get("type") == "text")
+            thinking = "".join(b.get("thinking", "") for b in blocks
+                               if b.get("type") == "thinking")
+            elapsed = time.monotonic() - began
+            if text.strip():
+                return True, elapsed, ""
+            # 推理模型在 max_tokens 小时会只回思考——链路是通的，不算故障。
+            if thinking.strip():
+                return True, elapsed, f"只回思考（{len(thinking)} 字，stop="
+            return (False, elapsed,
+                    f"HTTP 200 但正文与思考都为空（stop={data.get('stop_reason')}）")
+        except Exception as exc:  # noqa: BLE001
+            return False, time.monotonic() - began, f"{type(exc).__name__}"
+
+    previous: dict | None = None
+    index = 0
+    try:
+        while True:
+            elapsed = time.monotonic() - started
+            if elapsed > duration:
+                break
+            index += 1
+            live = probe(cfg["port"], cfg["token"], timeout=8.0)
+            routes = live.get("routes") or {}
+            dead_direct = [m for m, v in routes.items()
+                           if not v.get("ok", True) and m.count("--") <= 1]
+            stats = live.get("stats") or {}
+            sample = {
+                "t": int(elapsed),
+                "listening": bool(live.get("listening")),
+                "models": live.get("models", 0),
+                "catalog": live.get("catalog_models", 0),
+                "ok": stats.get("ok", 0),
+                "failed": stats.get("failed", 0),
+                "rejected": stats.get("rejected", 0),
+                "active": stats.get("active", 0),
+                "dead_direct": len(dead_direct),
+            }
+            if index % 4 == 1:      # 每 4 次采一次真实补全，避免自己把自己压着
+                good, seconds, error = call_completion()
+                sample["chat_ms"] = int(seconds * 1000)
+                sample["chat_ok"] = good
+                if not good:
+                    anomalies.append(f"t+{sample['t']}s 补全失败 {error}")
+            samples.append(sample)
+
+            if not sample["listening"]:
+                anomalies.append(f"t+{sample['t']}s 网关不监听")
+            if sample["dead_direct"]:
+                anomalies.append(f"t+{sample['t']}s 直连路由不可用 "
+                                 f"{sample['dead_direct']} 条")
+            if previous is not None:
+                if sample["failed"] > previous["failed"]:
+                    anomalies.append(
+                        f"t+{sample['t']}s 新增失败 "
+                        f"{sample['failed'] - previous['failed']} 次")
+                if sample["models"] != previous["models"]:
+                    anomalies.append(
+                        f"t+{sample['t']}s 模型数 {previous['models']}"
+                        f"->{sample['models']}")
+            previous = sample
+            print(f"  t+{sample['t']:>4}s 模型={sample['models']:<3} "
+                  f"目录={sample['catalog']:<3} ok={sample['ok']:<4} "
+                  f"fail={sample['failed']:<3} rej={sample['rejected']:<3} "
+                  f"active={sample['active']:<2} "
+                  + (f"补全={sample['chat_ms']}ms" if "chat_ms" in sample else ""),
+                  flush=True)
+            remaining = duration - (time.monotonic() - started)
+            if remaining <= 0:
+                break
+            time.sleep(min(interval, remaining))
+    except KeyboardInterrupt:
+        pass
+
+    print()
+    if not samples:
+        print("没有采到样本")
+        return 6
+    models_were = [s["models"] for s in samples]
+    chats = [s["chat_ms"] for s in samples if "chat_ms" in s]
+    restarts, base = _watch_baseline(samples)
+    if restarts:
+        anomalies.append(
+            f"观测期间网关重启过 {restarts} 次（计数归零，增量按重启后计）")
+    summary = {
+        "samples": len(samples),
+        "seconds": samples[-1]["t"],
+        "models_min": min(models_were),
+        "models_max": max(models_were),
+        "restarts": restarts,
+        "failed_total": samples[-1]["failed"] - base["failed"],
+        "rejected_total": samples[-1]["rejected"] - base["rejected"],
+        "active_max": max(s["active"] for s in samples),
+        "chat_p50_ms": sorted(chats)[len(chats) // 2] if chats else None,
+        "chat_max_ms": max(chats) if chats else None,
+        "dead_direct_max": max(s["dead_direct"] for s in samples),
+        "anomalies": anomalies,
+    }
+    if getattr(args, "json", False):
+        emit({"ok": not anomalies, "summary": summary, "samples": samples}, True)
+    else:
+        print(f"样本 {summary['samples']} 个，共 {summary['seconds']}s")
+        if summary["restarts"]:
+            print(f"注意: 观测期间网关重启过 {summary['restarts']} 次，"
+                  "增量已按重启后重算")
+        print(f"模型数 {summary['models_min']}–{summary['models_max']}，"
+              f"active 峰值 {summary['active_max']}，"
+              f"新增失败 {summary['failed_total']}，"
+              f"新增拒绝 {summary['rejected_total']}")
+        if summary["chat_p50_ms"] is not None:
+            print(f"补全耗时 中位 {summary['chat_p50_ms']}ms / "
+                  f"最大 {summary['chat_max_ms']}ms")
+        if anomalies:
+            print(f"异常 {len(anomalies)} 条：")
+            for row in anomalies[:12]:
+                print(f"  - {row}")
+        else:
+            print("结论: 无异常（模型数稳定、无新增失败、active 不泄漏）")
+    return 0 if not anomalies else 6
+
+
+def _models_doctor(store, args) -> int:
+    """一条命令把整条链路体检一遍：配置 / 监听 / 上游 / 路由 / 真跑一次。
+
+    现场排障时用户只知道「手机连不上」，而原因可能在六七个环节里。这里按顺序
+    逐项给结论，并给出可执行的下一步建议。
+    """
+    import socket
+    import time
+
+    from .model_gateway import (lan_urls_named, load_config, probe,
+                                route_health, relay_prefix_health)
+
+    checks: list[dict] = []
+
+    def add(name: str, ok: bool | None, detail: str, hint: str = "") -> None:
+        checks.append({"name": name, "ok": ok, "detail": detail, "hint": hint})
+
+    cfg = load_config(store)
+    port = cfg["port"]
+
+    # 1. 配置
+    add("配置", True,
+        f"port={port} upstream={cfg['upstream']} "
+        f"并发={cfg.get('upstream_concurrency')} 排队={cfg.get('queue_wait_s')}s "
+        f"超时={cfg.get('upstream_timeout_s')}s "
+        f"级联令牌={'已设置' if cfg.get('upstream_token') else '未设置'}",
+        "关闭共享时先看 enabled")
+    # 共享关着是用户的选择，不是故障：用提示级，不计入失败。
+    add("共享开关", True if cfg.get("enabled") else None,
+        "已开启" if cfg.get("enabled") else "未开启（不共享给局域网）",
+        "flix models start 或设置页「模型共享」")
+    # prefs 损坏会被备份成 *.bad-<时间戳> 并**轮换令牌**（配置本身救不回来）。
+    # 后果是「手机突然全部 401」，而这条信息以前只在 stderr 出现一次、GUI 里看不到。
+    # 这里把它变成一条可查的诊断，直接回答「为什么手机全掉了」。
+    damaged = sorted(store.prefs_path.parent.glob(
+        store.prefs_path.name + ".bad-*"), key=lambda q: q.stat().st_mtime)
+    if damaged:
+        newest = damaged[-1]
+        when = time.strftime("%Y-%m-%d %H:%M",
+                             time.localtime(newest.stat().st_mtime))
+        add("配置完整性", None,
+            f"{when} 的配置曾无法解析，已备份为 {newest.name}"
+            "（当时令牌被重新生成，手机需重新填新令牌）",
+            "如果手机突然全部 401，多半就是这个原因；旧文件留作取证")
+    else:
+        add("配置完整性", True, "配置文件可正常解析")
+
+    # 2. 端口监听 + 谁在听
+    listening = False
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1.0):
+            listening = True
+    except OSError:
+        listening = False
+    if not listening and not cfg.get("enabled"):
+        # 共享关着、端口空着 —— 这是关掉共享后的正常状态，不该报成故障
+        add("端口监听", None, f"127.0.0.1:{port} 未监听（共享已关闭，正常）",
+            "要共享就开关一次「模型共享」或 flix models start")
+    else:
+        add("端口监听", listening, f"127.0.0.1:{port} " +
+            ("可连" if listening else "连不上"),
+            "flix models start 或设置页「模型共享」开关")
+
+    # 3. 上游直连
+    upstream = cfg["upstream"]
+    up_ok = False
+    up_detail = ""
+    try:
+        import urllib.error
+        import urllib.request
+        started = time.monotonic()
+        req = urllib.request.Request(
+            upstream.rstrip("/") + "/v1/models",
+            headers={"anthropic-version": "2023-06-01",
+                     "x-api-key": cfg.get("upstream_token") or "relaydesk"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            payload = json.loads(resp.read().decode("utf-8", "replace"))
+        rows = payload.get("data") or payload.get("models") or []
+        up_ok = bool(rows)
+        up_detail = (f"{len(rows)} 个模型，{(time.monotonic() - started) * 1000:.0f}ms")
+    except Exception as exc:  # noqa: BLE001
+        up_detail = f"{type(exc).__name__}: {exc}"
+    add("上游可读", up_ok, up_detail,
+        "cc-switch 是否在跑（默认 15721）；级联时检查对端网关是否在线")
+
+    # 4. 网关健康
+    live = probe(port, cfg["token"], timeout=3.0)
+    if live.get("unauthorized"):
+        add("网关健康", False,
+            "端口上的网关不认这个令牌（它只回了最小 /health）",
+            "有两种可能：① 令牌被轮换过（「重置令牌」或 prefs 重建）；"
+            "② 这个端口上跑的是**另一个安装**（不同用户/不同 APPDATA）。"
+            "用桌面端「复制手机配置」拿到当前令牌，或先停掉那个网关再重试")
+    elif not live.get("listening"):
+        # 端口没在听时，「端口监听」那条已经报了根因；这里只补一句指引，
+        # 不再重复记一条失败（否则同一件事报两次，看着像两个故障）。
+        add("网关健康", None, "网关没在跑（见上面「端口监听」）",
+            "flix models start 或设置页「模型共享」开关；开机自启的机器检查 "
+            "RelayDeskServe 启动项")
+    else:
+        add("网关健康", bool(live.get("listening")),
+            f"listening={live.get('listening')} models={live.get('models', 0)}",
+            "端口在但不响应 = 进程卡死，杀掉后由看门狗拉起")
+    stats = live.get("stats") or {}
+    if stats:
+        add("请求统计", True,
+            f"ok={stats.get('ok')} failed={stats.get('failed')} "
+            f"aborted={stats.get('aborted')} rejected={stats.get('rejected')} "
+            f"active={stats.get('active')}")
+    routes = live.get("routes") or route_health()
+    dead = [k for k, v in routes.items() if not v.get("ok", True)]
+    dead_direct = [m for m in dead if m.count("--") <= 1]
+    # 只有「本机直连路由」坏掉才算本机故障；中继路由坏是**对端**的事，
+    # 网关已经把它们从列表里摘掉了，不该让 flix models doctor 报红。
+    add("路由健康", (None if dead and not dead_direct else not dead_direct),
+        (f"{len(routes)} 条有记录，其中 {len(dead)} 条不通"
+         + ("（均为对端中继）" if dead and not dead_direct else ""))
+        if routes else "暂无记录",
+        "直连路由不可用时检查 cc-switch（15721）与它上游的账号/额度")
+    prefixes = live.get("relay_prefixes") or relay_prefix_health()
+    if prefixes:
+        add("中继前缀", None,
+            f"{len(prefixes)} 个前缀暂时不通（对端问题，模型已从列表隐藏）："
+            + ", ".join(prefixes),
+            "对端机器/它的 VPN 是否正常；恢复后 10 分钟内自动重试")
+
+    # 5. 真跑一次
+    model = getattr(args, "model", None) or ""
+    if not model:
+        try:
+            from .model_gateway import models_list
+            rows = models_list(store)
+            model = rows[0]["short"] if rows else ""
+        except Exception:  # noqa: BLE001
+            model = ""
+    if model and live.get("listening"):
+        try:
+            import urllib.request
+            body = json.dumps({"model": model, "max_tokens": 200,
+                               "messages": [{"role": "user",
+                                             "content": "只回答两个字：通了"}]}).encode()
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/v1/messages", data=body,
+                headers={"content-type": "application/json",
+                         "x-api-key": cfg["token"],
+                         "anthropic-version": "2023-06-01"})
+            started = time.monotonic()
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+            text = "".join(b.get("text", "") for b in data.get("content", [])
+                           if b.get("type") == "text")
+            add("真实补全", bool(text.strip()),
+                f"{model} -> {data.get('model')} "
+                f"{(time.monotonic() - started):.1f}s {text.strip()[:20]!r}")
+        except Exception as exc:  # noqa: BLE001
+            hint = ("看 /health 的 last_error，以及 flix models status")
+            if live.get("unauthorized"):
+                hint = ("401 是因为端口上的网关不认当前令牌——"
+                        "见上面「网关健康」那一条")
+            add("真实补全", False, f"{model}: {type(exc).__name__}: {exc}", hint)
+    else:
+        add("真实补全", None, "跳过（网关未运行或没有可用模型）")
+
+    # 5b. 同一件事再走一遍 OpenAI 协议：手机上的第三方客户端多数用这个，
+    #     只验 Anthropic 等于没验「绝大多数人实际会走的路径」。
+    if model and live.get("listening"):
+        try:
+            import urllib.request
+            body = json.dumps({
+                "model": model, "max_tokens": 200,
+                "messages": [{"role": "user", "content": "只回答两个字：通了"}],
+            }).encode()
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/v1/chat/completions", data=body,
+                headers={"content-type": "application/json",
+                         "authorization": f"Bearer {cfg['token']}"})
+            started = time.monotonic()
+            with urllib.request.urlopen(req, timeout=180) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+            choice = (data.get("choices") or [{}])[0]
+            msg = choice.get("message") or {}
+            text = (msg.get("content") or "").strip()
+            reasoning = (msg.get("reasoning_content") or "").strip()
+            elapsed = time.monotonic() - started
+            if text:
+                add("OpenAI 补全", True,
+                    f"{model} -> {data.get('model')} {elapsed:.1f}s {text[:20]!r}")
+            elif reasoning:
+                add("OpenAI 补全", True,
+                    f"只回思考（{len(reasoning)} 字，链路是通的） {elapsed:.1f}s")
+            else:
+                add("OpenAI 补全", False,
+                    f"{model}: 200 但正文与思考都为空 "
+                    f"(finish={choice.get('finish_reason')})",
+                    "看 /health 的 last_error")
+        except Exception as exc:  # noqa: BLE001
+            add("OpenAI 补全", False, f"{model}: {type(exc).__name__}: {exc}",
+                "手机用 OpenAI 协议时走的就是这条；先看 flix models status")
+    else:
+        add("OpenAI 补全", None, "跳过（网关未运行或没有可用模型）")
+
+    # 6. 手机侧：给一段可以直接照抄进手机 App 的配置
+    named = lan_urls_named(port)
+    base = named[0]["url"] if named else f"http://127.0.0.1:{port}"
+    add("手机地址", bool(named),
+        "、".join(f"{r['url']}" + (f"（{r['interface']}）"
+                                  if r.get("interface") else "") for r in named))
+    hint_model = model or "glm-5.3-flash"
+    phone_config = {
+        "protocol_anthropic": "Anthropic Messages",
+        "protocol_openai": "OpenAI 兼容",
+        "base_url": base,
+        "api_key": cfg["token"],
+        "model": hint_model,
+        "chat_path": "/v1/messages",
+        "openai_path": "/v1/chat/completions",
+        "self_test": f"{base}/?token={cfg['token']}",
+    }
+    add("手机配置", True, f"{base}（{hint_model}）")
+
+    failed = [c for c in checks if c["ok"] is False]
+    if getattr(args, "json", False):
+        emit({"ok": not failed, "checks": checks,
+              "phone": phone_config}, True)
+    else:
+        for check in checks:
+            mark = {True: "OK  ", False: "FAIL", None: "--  "}[check["ok"]]
+            print(f"[{mark}] {check['name']:<8} {check['detail']}")
+            if check["hint"] and check["ok"] is not True:
+                print(f"         建议: {check['hint']}")
+        print()
+        if live.get("listening") and cfg.get("enabled"):
+            print("手机端照抄这段（协议选 Anthropic；只支持 OpenAI 的 App 选 OpenAI 兼容）：")
+            print(f"  Base URL : {phone_config['base_url']}")
+            print(f"  API Key  : {phone_config['api_key']}")
+            print(f"  模型      : {phone_config['model']}")
+            print(f"  自检页    : {phone_config['self_test']}")
+        else:
+            # 别把用不了的令牌递给用户照抄：网关没跑或共享关着时，这些配置用不上。
+            why = "共享已关闭" if not cfg.get("enabled") else "网关没在跑"
+            print(f"手机端配置暂不可用（{why}）：先开启「模型共享」，再回来抄这段。")
+        print()
+        if failed:
+            print(f"结论: {len(failed)} 项异常 -> "
+                  f"{', '.join(c['name'] for c in failed)}")
+        else:
+            print("结论: 全部正常")
+    return 0 if not failed else 6
 
 
 async def _models_serve(store, cfg) -> int:
@@ -1513,8 +2132,14 @@ def main(argv: list[str] | None = None) -> int:
 
     p = add("models", "LAN model gateway for phones: Anthropic Messages "
                       "proxied to the local cc-switch proxy", cmd_models)
+    # help= 只出现在 `flix --help` 的命令列表里；子命令自己的 --help 看不到。
+    # 用户最容易踩的是「models start 占住终端以为卡死」，所以写进 epilog。
+    p.epilog = ("`models start` runs in the FOREGROUND until Ctrl+C. "
+                "For background hosting (survives closing the terminal) use the "
+                "settings toggle or `flix serve`.")
     p.add_argument("action", nargs="?", default="status",
-                   choices=["start", "stop", "status", "token"])
+                   choices=["start", "stop", "status", "token", "list",
+                            "doctor"])
     p.add_argument("--port", type=int, default=None,
                    help="listen port (default 18993)")
     p.add_argument("--upstream", default=None,
@@ -1522,7 +2147,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--reset", action="store_true",
                    help="token: mint a new token")
     p.add_argument("--allow-remote-upstream", action="store_true",
-                   help="allow an upstream outside 127.0.0.1 (default: loopback only)")
+                   help="allow an upstream outside 127.0.0.1 (default: loopback "
+                        "only); needed for LAN cascading")
+    p.add_argument("--watch", type=int, default=0, metavar="SECONDS",
+                   help="doctor: 持续观察 N 秒（默认 0 = 只体检一次）；"
+                        "用来量化长时间运行是否漂移")
+    p.add_argument("--interval", type=int, default=30, metavar="SECONDS",
+                   help="doctor --watch 的采样间隔（默认 30）")
+    p.add_argument("--upstream-token", default=None, metavar="TOKEN",
+                   help="token to present to the upstream when it is itself a "
+                        "RelayDesk gateway (LAN cascade); your own client token "
+                        "is never forwarded")
     p.add_argument("--max-concurrent", type=int, default=None,
                    help="in-flight cap before answering 429; 0 = no cap (default)")
 

@@ -62,3 +62,11 @@ dist-macos/
 # PyInstaller / build logs (machine paths, no value in git)
 build*.log
 dist/
+
+# 误提交的日志（2026-11-26 清理）：守护进程/第三方安装器的输出
+daemon_err.log
+daemon_out.log
+pc_flixd_stderr.log
+pc_flixd_stdout.log
+Library/Logs/
+

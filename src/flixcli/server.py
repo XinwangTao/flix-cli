@@ -23,6 +23,7 @@ import sys
 import time
 import traceback
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
@@ -32,6 +33,15 @@ from . import DEVICE_PORT, model
 from .media_session import SessionError
 from . import ptyshell
 from .remoteshell import DEFAULT_TIMEOUT_S, run_command
+
+
+# rdShell gets its own worker pool. It used to share asyncio's default
+# executor, so a burst of remote commands competed with PTY reads and media
+# work; a dedicated pool keeps LAN SSH independent of everything else.
+_SHELL_POOL = ThreadPoolExecutor(
+    max_workers=max(1, int(os.environ.get("FLIX_RD_SHELL_MAX", "16")
+                           or 16)),
+    thread_name_prefix="rd-shell")
 
 
 def _log_shell_failure(sid: str, sender: str, command: str, exc: BaseException) -> None:
@@ -430,7 +440,8 @@ def make_app(store, ident: dict, publish: Callable[[str, dict], None],
             timeout = DEFAULT_TIMEOUT_S
         loop = asyncio.get_running_loop()
         try:
-            result = await loop.run_in_executor(None, run_command, command, timeout)
+            result = await loop.run_in_executor(_SHELL_POOL, run_command,
+                                                command, timeout)
         except Exception as exc:  # noqa: BLE001 - the peer needs the reason
             # A bare aiohttp 500 is indistinguishable from a crashed daemon and
             # gives the caller nothing to act on; answer in the same JSON shape

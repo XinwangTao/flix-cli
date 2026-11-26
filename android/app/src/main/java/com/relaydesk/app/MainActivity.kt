@@ -104,6 +104,8 @@ class MainActivity : Activity() {
     private var pairDialog: AlertDialog? = null
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    /** 网关实时模型列表（短名）；由 /v1/models 填充，供「测试补全」与复制配置用。 */
+    private var modelGatewayModels: List<String> = emptyList()
     private val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
     private val dayFormat = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
     private val live = HashMap<String, JSONObject>() // resourceId -> file progress
@@ -220,6 +222,46 @@ class MainActivity : Activity() {
     /** Notification taps arrive as `peer` (or `group`) extras and open that chat. */
     private fun handleDeepLink(intent: Intent?) {
         if (intent == null) return
+        // 自动化/排障入口：`am start -e rdProbe gateway`
+        // 只读地跑一次「模型网关测试补全」并把结果打进 logcat + toast。
+        // 该机 HyperOS 禁止 adb 注入输入事件（INJECT_EVENTS 被拒、无 root），
+        // 没有这个入口就无法在 CI/远程验证手机端网络代码。
+        val probe = intent.getStringExtra("rdProbe")?.takeIf { it.isNotEmpty() }
+        if (probe != null) {
+            intent.removeExtra("rdProbe")
+            when (probe) {
+                "gateway" -> {
+                    val base = prefs.getString("model_base", "").orEmpty()
+                    val token = prefs.getString("model_token", "").orEmpty()
+                    if (base.isEmpty()) {
+                        android.util.Log.i("RelayDeskProbe", "gateway: 未配置 model_base")
+                        toast("probe: 未配置网关")
+                    } else {
+                        Thread {
+                            val models = fetchGatewayModels(base, token)
+                            android.util.Log.i("RelayDeskProbe",
+                                "models(${models.size}): ${models.take(6)}")
+                            mainHandler.post {
+                                toast("probe: 模型 ${models.size} 个")
+                                testModelGateway(base, token)
+                            }
+                        }.start()
+                    }
+                }
+                "models" -> {
+                    val base = prefs.getString("model_base", "").orEmpty()
+                    val token = prefs.getString("model_token", "").orEmpty()
+                    Thread {
+                        val models = fetchGatewayModels(base, token)
+                        android.util.Log.i("RelayDeskProbe",
+                            "models(${models.size}): $models")
+                        mainHandler.post { toast("probe: 模型 ${models.size} 个") }
+                    }.start()
+                }
+                else -> android.util.Log.i("RelayDeskProbe", "未知 probe: $probe")
+            }
+            return
+        }
         val peer = intent.getStringExtra("peer")?.takeIf { it.isNotEmpty() }
         val group = intent.getStringExtra("group")?.takeIf { it.isNotEmpty() }
         if (peer == null && group == null) return
@@ -2628,7 +2670,14 @@ class MainActivity : Activity() {
         settingsBody.addView(row)
     }
 
-    /** Shows the model gateway handed over by the desktop pairing QR. */
+    /**
+     * Shows the model gateway handed over by the desktop pairing QR.
+     *
+     * The model names used to be a hardcoded list (`glm-5.3-flash / step-5-preview
+     * / …`) which drifts from what the workstation actually serves — on this
+     * network those names resolve to nothing. They now come from the gateway's
+     * own `/v1/models`, so the dialog shows exactly what this phone can pick.
+     */
     private fun showModelGatewayDialog() {
         val base = prefs.getString("model_base", "").orEmpty()
         val token = prefs.getString("model_token", "").orEmpty()
@@ -2643,16 +2692,59 @@ class MainActivity : Activity() {
             return
         }
         val masked = if (token.length > 12) token.take(6) + "…" + token.takeLast(4) else token
-        AlertDialog.Builder(this, dlgTheme())
+        val dialog = AlertDialog.Builder(this, dlgTheme())
             .setTitle("模型网关")
-            .setMessage("地址：$base\n令牌：$masked\n\n" +
-                "模型：glm-5.3-flash / step-5-preview / step-3.7-flash / deepseek-v4-flash")
-            .setPositiveButton("测试连通") { _, _ -> testModelGateway(base, token) }
+            .setMessage("地址：$base\n令牌：$masked\n\n正在读取模型列表…")
+            .setPositiveButton("测试补全") { _, _ -> testModelGateway(base, token) }
             .setNeutralButton("复制配置") { _, _ ->
-                copyText("Base URL: $base\nAPI Key: $token\nModel: glm-5.3-flash")
+                copyText("Base URL: $base\nAPI Key: $token\nModel: " +
+                    (modelGatewayModels.firstOrNull() ?: "glm-5.3-flash"))
             }
             .setNegativeButton("关闭", null)
-            .show()
+            .create()
+        dialog.show()
+        // 列表来自网关实时目录；拿不到就退回提示手填，不阻塞弹窗。
+        Thread {
+            val models = fetchGatewayModels(base, token)
+            mainHandler.post {
+                val body = if (models.isEmpty()) {
+                    "地址：$base\n令牌：$masked\n\n未能读取模型列表（网关不可达？）\n可手动填模型名。"
+                } else {
+                    val shown = models.take(6).joinToString(" / ")
+                    val more = if (models.size > 6) " 等 ${models.size} 个" else ""
+                    "地址：$base\n令牌：$masked\n\n模型：$shown$more"
+                }
+                dialog.setMessage(body)
+            }
+        }.start()
+    }
+
+    /** 拉网关的实时模型目录；只取短名（`ccs-claude-<route>--<model>` 的后半段）。 */
+    private fun fetchGatewayModels(base: String, token: String): List<String> {
+        modelGatewayModels = emptyList()
+        val result = runCatching {
+            val conn = java.net.URL(base.trimEnd('/') + "/v1/models")
+                .openConnection() as java.net.HttpURLConnection
+            conn.connectTimeout = 5000
+            conn.readTimeout = 10000
+            conn.setRequestProperty("x-api-key", token)
+            conn.setRequestProperty("anthropic-version", "2023-06-01")
+            val code = conn.responseCode
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            conn.disconnect()
+            if (code !in 200..299) return@runCatching emptyList<String>()
+            val arr = org.json.JSONObject(text).optJSONArray("data") ?: return@runCatching emptyList<String>()
+            val out = LinkedHashSet<String>()
+            for (i in 0 until arr.length()) {
+                val id = arr.optJSONObject(i)?.optString("id").orEmpty()
+                if (id.isEmpty()) continue
+                out.add(if (id.contains("--")) id.substringAfterLast("--") else id)
+            }
+            out.toList()
+        }.getOrElse { emptyList() }
+        modelGatewayModels = result
+        return result
     }
 
     private fun editModelGateway() {
@@ -2691,20 +2783,80 @@ class MainActivity : Activity() {
             .show()
     }
 
+    /**
+     * 「测试补全」：真的发一次 `/v1/messages`。
+     *
+     * 原来只打 `/health`，那只证明「端口有人听」——网关在但上游全挂时也会绿。
+     * 现在走真实补全，并显示用的是哪个模型、耗时多少、回的是哪几个字。
+     */
     private fun testModelGateway(base: String, token: String) {
         Thread {
+            val model = modelGatewayModels.firstOrNull() ?: "glm-5.3-flash"
             val result = runCatching {
-                val conn = java.net.URL(base.trimEnd('/') + "/health")
+                val payload = org.json.JSONObject()
+                    .put("model", model)
+                    .put("max_tokens", 200)
+                    .put("messages", org.json.JSONArray().put(
+                        org.json.JSONObject()
+                            .put("role", "user")
+                            .put("content", "只回答两个字：通了")))
+                    .toString()
+                val began = System.currentTimeMillis()
+                val conn = java.net.URL(base.trimEnd('/') + "/v1/messages")
                     .openConnection() as java.net.HttpURLConnection
-                conn.connectTimeout = 4000
-                conn.readTimeout = 8000
+                conn.requestMethod = "POST"
+                conn.doOutput = true
+                conn.connectTimeout = 5000
+                conn.readTimeout = 180000
+                conn.setRequestProperty("content-type", "application/json")
                 conn.setRequestProperty("x-api-key", token)
+                conn.setRequestProperty("anthropic-version", "2023-06-01")
+                conn.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
                 val code = conn.responseCode
                 val stream = if (code in 200..299) conn.inputStream else conn.errorStream
                 val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
                 conn.disconnect()
-                if (code in 200..299) "网关可达（HTTP $code）" else "网关返回 HTTP $code"
+                val ms = System.currentTimeMillis() - began
+                if (code !in 200..299) {
+                    "补全失败 HTTP $code\n${text.take(200)}"
+                } else {
+                    val json = org.json.JSONObject(text)
+                    val content = json.optJSONArray("content")
+                    val answer = StringBuilder()
+                    val thinking = StringBuilder()
+                    if (content != null) {
+                        for (i in 0 until content.length()) {
+                            val block = content.optJSONObject(i) ?: continue
+                            when (block.optString("type")) {
+                                "text" -> answer.append(block.optString("text"))
+                                "thinking" -> thinking.append(block.optString("thinking"))
+                            }
+                        }
+                    }
+                    val used = json.optString("model").ifEmpty { model }
+                    val stop = json.optString("stop_reason")
+                    val textOut = answer.toString().trim()
+                    // 区分两件事：
+                    //  - 链路断：拿不到 200 / 解析失败 -> 上面分支已覆盖；
+                    //  - 预算耗尽：200 但正文空、只有思考、stop_reason=max_tokens。
+                    //    推理模型在 max_tokens 小时常这样，**不是故障**，所以算通过，
+                    //    但要把「只回了思考」说清楚，避免误判成网关坏了。
+                    when {
+                        textOut.isNotEmpty() ->
+                            "补全成功\n模型 $used · ${ms}ms\n「${textOut.take(60)}」"
+                        thinking.isNotEmpty() ->
+                            "补全成功（模型只回思考，未产出正文）\n" +
+                                "模型 $used · ${ms}ms · stop=$stop · " +
+                                "思考 ${thinking.length} 字\n" +
+                                "「${thinking.toString().trim().take(60)}」"
+                        else ->
+                            "补全返回空正文\n模型 $used · ${ms}ms · stop=$stop"
+                    }
+                }
             }.getOrElse { "连接失败：${it.message ?: it.javaClass.simpleName}" }
+            // 同时写 logcat：远程/CI 没有界面时也能自证（HyperOS 禁输入注入）。
+            android.util.Log.i("RelayDeskProbe", "completion: " +
+                result.replace("\n", " | "))
             mainHandler.post { toast(result) }
         }.start()
     }

@@ -3,7 +3,149 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号与 GitHub Release 标签一致。
 可执行产物见 [Releases](https://github.com/XinwangTao/flix-cli/releases)。
 
+## [v2.6.6] - 2026-11-26
+
+### 新增
+
+- **模型列表自动收敛**：某个 LAN 中继前缀不通时，它名下的模型默认不出现在
+  /v1/models、手机下拉与 flix models list（hide_dead_relays，默认开）。
+  网关每 90 秒复探一次，恢复后模型立刻回到列表；全死时退回完整列表，绝不返回空。
+  本机实测：39 个模型里 28 个属于 4 条已死中继，列表自动收敛为 **11 个**并保持稳定。
+  隐藏窗口用 10 分钟、选择用的退避仍是 60 秒——两者混用会让列表在 11/39 之间跳变。
+- **上游并发闸门 `upstream_concurrency`**：压测 16 路并发流式发现失败不是本网关造成的
+  —— cc-switch 自己只接受约 **5 路并发**（超出回 `429 Concurrency queue full,
+  Limit: 5 concurrent requests, queue: 15`），还会吐 HTML 504。现在网关用信号量把
+  同时在途的上游调用压到 cc-switch 能接受的程度（默认 5，0=不限），其余请求在本地
+  排队（`queue_wait_s`，默认 60s，与上游 60s 首包墙对齐），只有排队超时才回 429 + `Retry-After`。
+  效果：16 路并发从 14/16 提升到 15/16，剩下的失败是上游 provider 自己超时（HTML 504）。
+- **级联中继 `upstream_token`**：一台没有 VPN / 没有 cc-switch 的机器，可以把网关上游
+  指向局域网另一台 RelayDesk 网关，由它用它的 VPN 转发——本机完全不碰外网。
+  `--upstream-token` 的令牌作为 `x-api-key` 发给上游（目录拉取与中继探测同样带上），
+  客户端自己的令牌不会下发。实测：`.200` 未登录 VPN 时 `/v1/models` 拿到 39 个模型
+  （0.7s）、`/v1/messages` 返回「通了」（29.6s），链路 `.200→.7→cc-switch(VPN)→模型`。
+  一键配置：`scripts/setup_lan_model_source.ps1`（支持 `-DryRun`）。
+- **开机自启 + 看门狗**：`scripts/peer_install_autostart.ps1` 写登录自启 VBS 并建
+  每 5 分钟的计划任务，serve 掉线自动拉起（`-Action Check/Remove` 可用于自检与撤销）。
+- **对端换包脚本**：`scripts/peer_apply_update.ps1` 走「停进程 → 备份 → 换包 →
+  写级联配置 → 起 serve → 健康检查 → 逐步日志」，实测把 `.200` 从旧构建换成新构建
+  并配好级联。三个坑记在文档里：目标端口是 18991 不是 8891；`Start-Process` 会被
+  RDShell 的作业对象回收，必须用计划任务承载；`.ps1` 必须 UTF-8 BOM。
+- **网关启动即预热模型目录**：开启共享时启动后立刻拉一次上游目录，重启后
+  `/health`、自检页与 `models status` 马上就有「39 个模型」，不再等到第一个请求
+  才从「未探测 / 0 个」变过来（预热失败不影响启动，只当没缓存）。
+- **地址列表带网卡名**：`flix models status` 与手机自检页的地址会标成
+  `http://192.168.137.1:18993（本地连接* 2）` 这种形式（ipconfig 按系统代码页解码，
+  中文网卡名不再乱码），手机该填哪个不再靠猜。GUI 设置页只显示首选地址 + 地址数量。
+- **GUI 显示不通路由数**：设置页状态行在「上游链路」后追加「不通路由 N 条」，
+  配合模型列表里的「（当前不通）」定位坏路由。
+- **模型共享网关支持工具调用**（OpenAI `tools` ↔ Anthropic `tool_use`）：
+  `tools`/`tool_choice`（auto→auto、required→any、指定函数→tool、none→不下发）；
+  assistant 的 `tool_calls` 转 `tool_use`，`role=tool` 的 `tool_call_id` 合并成一条
+  user 消息里的 `tool_result`（连续多条工具结果也支持）；响应中的 `tool_use` 转回
+  `tool_calls` + `finish_reason=tool_calls`，流式按 OpenAI
+  `delta.tool_calls[].function.arguments` 分片下发。实测两轮工具往返
+  （模型发工具调用 → 回传结果 → 模型给出最终回答）在手机协议下通过。
+- **连接被拒时同路由重试一次**：cc-switch 自动更新会瞬时关闭监听，之前这次请求直接
+  502；`ClientConnectorError` 说明请求没发出去，现在同路由等待 0.4s 重试一次，
+  两种协议都生效。
+- GUI 设置页新增「打开自检页」按钮：一键在本机浏览器打开网关页面（实时模型、
+  双协议、发送测试），不必用手机也能自查。
+- **模型共享网关支持 OpenAI 协议**（`POST /v1/chat/completions`）：手机端大多数
+  LLM 客户端只支持 OpenAI，而上游 cc-switch 只有 Anthropic 路由，网关现在做双向
+  翻译——`messages`（system/developer→顶层 system、文本与 `image_url` part、
+  data URL 与 http 图片）、`max_tokens`/`temperature`/`top_p`/`stop`/`stream`/
+  `stream_options.include_usage`；非流式按 `chat.completion` 返回，流式按
+  `chat.completion.chunk` + `[DONE]` 返回。推理模型的 thinking 放
+  `reasoning_content`，正文为空时退化为 `content`（手机端不会白屏）。
+  `GET /v1/models` 同时带 Anthropic 与 OpenAI 两套字段，两种客户端都能读。
+- **错令牌按来源限流**：同一来源 60s 内 10 次 401 后锁 30s（429 + `Retry-After`），
+  按 `request.remote` 分开计数，一个在猜令牌的邻居不影响正常手机；成功鉴权即清零。
+- 自检页新增协议切换（Anthropic / OpenAI）与流式开关，两种协议都能在手机上直接跑通。
+- 手机自检页重构（`GET /?token=<令牌>`）：实时模型下拉（或手填 id）、SSE 流式
+  「发送测试」、网关状态（上游是否可达、模型数、请求计数、最近错误）；直连路由排前、
+  失败路由标「（当前不通）」。CORS 预检与 `Access-Control-Allow-*` 一并放行。
+- `flix models list`：列出 cc-switch 实时模型的短名与完整 id；`flix models status`
+  增加上游链路、模型数、最近调用的耗时/状态/路由。
+- `upstream_timeout_s` 配置项（默认 180s，10–900）与 `x-relaydesk-route` /
+  `x-relaydesk-attempts` 响应头。
+- `tests/test_model_gateway.py` 增补 15 个用例（目录形状 / 别名解析 / 协议头补齐 /
+  路由回退 / 超时预算 / CORS / 自检页 / 缓存回落），本文件 39 项全过。
+
+### 修复
+
+- **active 计数会永久漂移**：压测后 /health 的 active 卡在 1 不归零
+  （
+  路径漏减就再也不会恢复。改成以「在途登记表」为准（按请求 id），active 恒等于
+  登记数；健康检查还会清掉超过 2 倍总预算的陈旧项，即使进程被挂起也能自愈。
+- **本机开机自启指向旧构建**：启动目录的 `RelayDeskServe.vbs` 原本指向
+  `F:\projects\flix-cli\dist\RelayDesk.exe`（不含 2026-11-25 的网关修复），
+  重启会悄悄回退旧代码。已改指当前在用构建并备份原文件。
+- **netcheck 只查「有没有规则」**：改为同时判断规则是否覆盖**当前网络类别**
+  （Public 规则在 Private 的 Wi-Fi 上等于没有），未覆盖时给出确切的
+  `fix_firewall.ps1 -Profile <类别>` 命令；探测方式从「枚举全部规则」（规则多时会
+  超时变成 unknown）改为按名字查询。
+- **rdShell 并发上限过低**：exec 4 → 16、PTY 会话 1 → 8（可用
+  `FLIX_RD_SHELL_MAX` / `FLIX_RD_PTY_MAX` 调），并给 rdShell 独立线程池，shell 洪峰
+  不再拖慢 PTY 读与媒体。实测真实对端 8 路并发 8/8 成功（3.2s，0 拒绝）。
+- **未知模型名立即 400 并给出可用列表**：cc-switch 对目录里没有的模型名会**静默
+  兜底**成默认模型（这正是之前 `glm-5.3-flash` 答成 `dsv41` 的原因）。网关现在在
+  转发前校验：名字不在实时目录里就回 400（Anthropic 形状 / OpenAI 形状带
+  `code=model_not_found`），消息里列出前 8 个可用短名，并提示 `GET /v1/models` /
+  `flix models list`。短名、完整 id、旧 `claude-*` 别名与大小写不敏感匹配都算命中；
+  目录暂时拉不到时保持原样透传，不误伤。
+- **已知坏路由不再让手机白等**：对端 cc-switch 能列模型但生成会挂住（2026-11-25
+  实测 .200 中继），手机点一个只在中继上有的模型要等满 180s 才 504。现在按
+  「中继前缀」记失败：某前缀下的路由一旦超时/5xx，同前缀的兄弟路由直接视为不可用，
+  下次请求**立即 503**（带「等中继恢复后自动重试」提示），中继恢复成功一次即清零。
+  未验证过的中继路由先用 **1-token 探测**（8s 上限）判定，不再拿用户的完整请求去试：
+  实测 kimi-k2.7-code 首次 503 用 17.6s（原来 180s），第二次 **6ms**。
+  `/health` 增加 `relay_prefixes` 便于诊断。
+- **路由排序优先本机直连**：健康的中继也比本机直连多一跳，之前「健康的坏中继」会
+  排到「未验证的直连」前面；现在顺序是 直连(已知好/未知) → 中继(已知好/未知) → 已知坏。
+- 预热失败时 `/health.last_error` 写明原因（cc-switch 没跑/没监听 15721），
+  冷启动不再只是「上游未探测」。
+- 自检页新增「演示工具调用」按钮：手机上一次跑完 模型发起 get_time 调用 → 回传
+  工具结果 → 模型最终回答，两轮真实往返。
+- **大请求体被误判成 408**：原来整段 body 读有一个 30s 总超时，手机在慢速链路上传
+  20MB 图片/长 prompt 时会在传完前超时；而无 Content-Length 的超大请求也会先被缓冲。
+  现在按块读、按空闲超时（20s 无数据才算停滞），并在 `max_body_mb` 超限时立刻回
+  413（声明的 Content-Length 直接拒，不再缓冲）。实测手机 256KB prompt 200（13s）、
+  33MB 请求被快速拒绝。
+- **`/v1/models` 顺序不再把坏路由排最前**：手机客户端通常预选第一项，而上游把
+  LAN 中继排在最前（本环境该中继挂死）。现在按「已知可用 → 本机直连 → 未知 →
+  已知不通」排序，与自检页下拉一致，并给每一项补 `created` 字段。
+- **模型共享网关手机侧四处硬伤**（2026-11-25 手机实测，网关 :18993）：
+  - **`/v1/models` 拿不到 Claude 目录**：cc-switch 按 `anthropic-version` 头分派协议，
+    手机客户端不带该头时同一 URL 返回 ~220 KB 的 Codex 目录（`{"models":[...]}` 带
+    base_instructions），Anthropic 客户端读不出模型。网关现在总是补上该头，并把两种
+    形状统一成 `{"data":[...]}`；上游不可达时回落到上一次缓存（`x-relaydesk-cached: 1`）。
+  - **短名/旧别名被静默兜底成别的模型**：栈里的 id 是 `ccs-claude-<路由>--<模型>`，
+    裸名会被 cc-switch 的 `ANTHROPIC_MODEL` 兜底（实测问 `glm-5.3-flash` 回的是
+    `dsv41`），旧版 `claude-*` 别名则直接 503。网关按实时目录解析：完整 id / 短名 /
+    旧 `claude-*` 别名都能落到真实路由，未知名字仍原样透传给上游自己报错。
+  - **死路由没有回退、超时不受控**：同一模型的多条路由里，经另一台机器中继的那条
+    实测 25s 无响应，手机端要干等 90s+。现在短名优先走本机直连路由；路由 5xx 自动
+    换下一条；失败路由记 10 分钟并在 `display_name` 标「（当前不通）」；一次调用共用
+    `upstream_timeout_s`（默认 180s）总预算，超时回结构化 504 而不是干等。
+  - **自检页给出手机连不上的地址**：页头 Base URL 原来取主网卡 IP（Wi-Fi），而手机
+    可能从中继网段（如 192.168.137.1）访问，复制走就是死地址。现在只在请求 Host
+    确实是本机地址时用它，并列出其它网卡地址备选。
+- 模型名解析与诊断顺带修正：`stats.recent_requests` 记录每次调用的 model→实际路由、
+  状态、耗时（`flix models status` 打印最近 3 条），手机端出问题不必翻日志。
+- **令牌对不上时 doctor 说得清楚**：端口上的网关不认当前令牌时，过去会读成「网关活着但 0 个模型」，补全那两项报 401 却让人去翻 last_error。现在直说「端口上的网关不认这个令牌」，并列出两种原因（令牌被轮换 / 端口上是另一个安装）。
+- **共享关闭时不再报假故障**：`flix models doctor` 把「共享未开启」「端口没监听」当失败报红（其实那是全新安装的正常状态），结尾还会把用不了的令牌递给人照抄。现在这类是提示级，只有「开关开着却没监听」才算故障。
+- **`flix models status` 不再自相矛盾**：过去会输出「状态: 运行中（未开启）」「并发上限: 无限制」（实际有上游闸门）。现在状态分四种，并发拆成「本机 N，上游闸门 M（排队 Xs）」。
+- **设置页面板不再把「未开启」显示成「运行中」**：原来先看端口有没有人听、再看开关，于是别的实例占着 18993 时面板会谎报运行中。现在先看开关。
+- **客户端填错时当场 400**：缺 `model` 过去会被原样转给上游，拿回 cc-switch 的503「No available accounts…Please switch」，用户被引去换账号；非法 JSON 更会报 500（客户端错误报成服务端错）。现在四种情况都直接 400 并说明原因。
+- **刚在 cc-switch 新增的模型可以立刻用**：过去目录缓存未过期，请求新模型会收到400「未知模型」，而提示里又列着它可用（自相矛盾）。现在判未知前强制刷新一次目录。
+
 ## [v2.6.5] - 2026-11-25
+### 修复
+- **`ip:port` 目标解析不看端口**：`flix shell 192.168.237.200:18991` 会先命中发现留下的
+  占位记录（`ip:192.168.237.200:8891`），于是报「未配对」——而该设备在 :18991 上明明是
+  配对的。现在显式端口只在**同端口**记录里挑（优先已配对），裸 IP 也优先已配对，只有都
+  不匹配才回落到原语义。`routing.resolve_target` 是 shell/send/group/agent 的公共入口，
+  一处修复全部生效。
 
 ### 变更
 - **模型共享网关默认不再设并发上限**：`max_concurrent` 默认 0（无上限），网关不再回
@@ -75,7 +217,7 @@
 - Android 后台也能配对：没有可见 Activity 时不再立刻回 `301 pair Device Null`，改为弹
   高优先级通知（接受/拒绝按钮，25s 有效），把请求挡在 HTTP 线程里等用户点。
 
-## [2.6.4] - 2026-11-19
+## [v2.6.4] - 2026-11-19
 
 ### 新增（自动连接）
 - 自动连接信任开关（设置页「自动连接：发现同网段新设备就直接配对」）：发现的未配对设备

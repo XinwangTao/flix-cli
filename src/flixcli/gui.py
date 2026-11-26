@@ -814,6 +814,14 @@ class TitleBar(QFrame):
         self._toggle_max()
 
 
+def _mask_token(token: str) -> str:
+    """首 6 位 + … + 末 4 位；太短就整体掩掉。和 Android 端口径一致。"""
+    text = str(token or "")
+    if len(text) <= 12:
+        return "…" if text else ""
+    return f"{text[:6]}…{text[-4:]}"
+
+
 class MainWindow(QMainWindow):
     HOT_MARGIN = 6
     SIDEBAR_WIDE = 320
@@ -1910,6 +1918,19 @@ class MainWindow(QMainWindow):
         upstream_row.addWidget(self.model_upstream, 1)
         upstream_row.addWidget(self.model_upstream_save)
         card_box.addLayout(upstream_row)
+        # 级联：把上游指向局域网里另一台有 VPN 的 RelayDesk。
+        # 这个能力一直只存在于 CLI（--allow-remote-upstream），用户在面板里
+        # 填局域网地址只会看到「请用 CLI」的报错 —— 核心功能在 GUI 里配不了。
+        self.model_allow_remote = QCheckBox(
+            "允许上游指向局域网内另一台 RelayDesk（级联中继）")
+        self.model_allow_remote.setToolTip(
+            "本机没有 VPN / cc-switch 时用：把上游填成那台机器的网关地址"
+            "（如 http://192.168.1.10:18993），由它代为访问模型。"
+            "仅在你信任该局域网时开启。")
+        self.model_allow_remote.setChecked(
+            bool(self._model_cfg().get("allow_remote_upstream")))
+        self.model_allow_remote.toggled.connect(self.toggle_model_remote_upstream)
+        card_box.addWidget(self.model_allow_remote)
         model_row = QHBoxLayout()
         self.model_copy_button = QPushButton("复制手机配置")
         self.model_copy_button.setObjectName("secondaryButton")
@@ -1920,12 +1941,20 @@ class MainWindow(QMainWindow):
         self.model_qr_button.setToolTip("手机 RelayDesk 扫码：一次完成配对与模型配置")
         self.model_qr_button.setCursor(Qt.PointingHandCursor)
         self.model_qr_button.clicked.connect(self.show_model_qr)
+        self.model_page_button = QPushButton("打开自检页")
+        self.model_page_button.setObjectName("secondaryButton")
+        self.model_page_button.setToolTip(
+            "在本机浏览器打开手机自检页：显示该手机能用的地址、实时模型列表，"
+            "并可一键发送测试（Anthropic / OpenAI 两种协议）")
+        self.model_page_button.setCursor(Qt.PointingHandCursor)
+        self.model_page_button.clicked.connect(self.open_model_page)
         self.model_token_button = QPushButton("重置令牌")
         self.model_token_button.setObjectName("secondaryButton")
         self.model_token_button.setCursor(Qt.PointingHandCursor)
         self.model_token_button.clicked.connect(self.reset_model_token)
         model_row.addWidget(self.model_copy_button)
         model_row.addWidget(self.model_qr_button)
+        model_row.addWidget(self.model_page_button)
         model_row.addWidget(self.model_token_button)
         model_row.addStretch()
         card_box.addLayout(model_row)
@@ -1995,7 +2024,7 @@ class MainWindow(QMainWindow):
             return load_config(store)
 
     def _refresh_model_status(self, live: bool = True):
-        from .model_gateway import lan_urls, port_open
+        from .model_gateway import lan_urls_named, port_open
         running_thread = getattr(self, "_model_stats_thread", None)
         if live and running_thread is not None and running_thread.isRunning():
             # Replacing a running QThread drops its last Python reference and
@@ -2003,16 +2032,34 @@ class MainWindow(QMainWindow):
             return
         cfg = self._model_cfg()
         token = cfg.get("token") or "（未生成，开启后生成）"
-        urls = " / ".join(lan_urls(cfg["port"]))
-        running = bool(live and port_open(cfg["port"]))
-        if running:
+        named = lan_urls_named(cfg["port"])
+        primary = named[0] if named else {"url": "", "interface": ""}
+        urls = primary["url"]
+        if primary.get("interface"):
+            urls += f"（{primary['interface']}）"
+        if len(named) > 1:
+            urls += f" 等 {len(named)} 个地址"
+        # 先看用户开没开，再看端口有没有人听 —— 顺序反了会出现「未开启却显示运行中」：
+        # port_open() 只证明那个端口有进程在听，不代表是本安装的网关。
+        enabled = bool(cfg.get("enabled"))
+        port_busy = bool(live and port_open(cfg["port"]))
+        if not enabled:
+            state = ("未开启（端口被别的实例占用）" if port_busy else "未开启")
+        elif port_busy:
             state = "运行中"
-        elif cfg.get("enabled"):
-            state = "已开启但未运行（重启本机服务或再点一次开关）" if live else "已开启"
         else:
-            state = "未开启"
-        self.model_status.setText(f"{state}｜{urls}｜令牌 {token}")
-        if running:
+            state = "已开启但未运行（重启本机服务或再点一次开关）"
+        # 令牌不能明文挂在面板上：这个软件本身就是拿来共享屏幕的，
+        # 面板一旦出现在共享画面里，等于把网关凭据直接给了看的人。
+        # 手机端 App 早就做了同样的掩码，两边保持一致。
+        # 要完整值请用「复制手机配置」或「显示连接二维码」。
+        shown = (token if token.startswith("（")
+                 else _mask_token(token))
+        self.model_status.setText(f"{state}｜{urls}｜令牌 {shown}")
+        self.model_status.setToolTip(
+            "完整令牌请用「复制手机配置」或「显示连接二维码」获取；"
+            "面板只显示首尾，避免共享屏幕时泄露。")
+        if enabled and port_busy:
             self._fetch_model_stats(cfg["port"], cfg["token"])
 
     def _fetch_model_stats(self, port: int, token: str):
@@ -2024,13 +2071,42 @@ class MainWindow(QMainWindow):
             if not stats:
                 return
             mins = int(stats.get("uptime", 0)) // 60
+            upstream_ok = live.get("upstream_ok")
+            upstream = ("上游正常" if upstream_ok
+                        else ("上游不可达" if upstream_ok is False
+                              else "上游未探测"))
+            if live.get("models"):
+                upstream += f"（{live['models']} 个模型）"
+            # 只把**直连**路由不通当成本机故障来说；中继不通是对端的事，
+            # 而且网关已把那些模型从列表隐藏了。这和 `flix models doctor` 的
+            # 严重度口径一致 —— 面板若照抄「不通路由 N 条」，会让人以为本机坏了。
+            routes = live.get("routes") or {}
+            dead_direct = [model_id for model_id, row in routes.items()
+                           if not row.get("ok", True)
+                           and model_id.count("--") <= 1]
+            dead_relay = [model_id for model_id, row in routes.items()
+                          if not row.get("ok", True)
+                          and model_id.count("--") > 1]
+            if dead_direct:
+                upstream += f"｜直连路由不通 {len(dead_direct)} 条"
+            prefixes = live.get("relay_prefixes") or {}
+            if prefixes:
+                upstream += (f"｜对端中继 {len(prefixes)} 个前缀暂不可用"
+                             "（相关模型已隐藏）")
+            elif dead_relay:
+                upstream += f"｜对端中继路由不通 {len(dead_relay)} 条"
             no = "\n请求 "
             self.model_status.setText(
                 self.model_status.text() + no +
                 f"{stats.get('requests', 0)}（成功 {stats.get('ok', 0)}，"
                 f"失败 {stats.get('failed', 0)}，拒绝 {stats.get('rejected', 0)}，"
                 f"超限 {stats.get('too_large', 0)}）"
-                f"｜进行中 {stats.get('active', 0)}｜已运行 {mins} 分钟")
+                f"｜进行中 {stats.get('active', 0)}｜{upstream}"
+                f"｜已运行 {mins} 分钟")
+            # Last unexplained failure, if the last call left one behind.
+            if live.get("last_error") and stats.get("failed"):
+                self.model_status.setText(
+                    self.model_status.text() + f"\n最近错误：{live['last_error']}")
 
         thread = ApiThread(lambda: probe(port, token, timeout=2.0))
         thread.result.connect(done)
@@ -2043,7 +2119,9 @@ class MainWindow(QMainWindow):
         raw = self.model_upstream.text().strip()
         try:
             with self._model_store() as store:
-                cfg = save_config(store, upstream=raw)
+                cfg = save_config(
+                    store, upstream=raw,
+                    allow_remote_upstream=self.model_allow_remote.isChecked())
         except ValueError as exc:
             self.model_status.setText(str(exc))
             return
@@ -2054,6 +2132,19 @@ class MainWindow(QMainWindow):
             self._spawn_model_gateway()
         self._refresh_model_status()
         QTimer.singleShot(1500, self._refresh_model_status)
+
+    def toggle_model_remote_upstream(self, on: bool):
+        """级联开关单独保存：用户可能先勾选再去填上游地址。"""
+        from .model_gateway import save_config
+        try:
+            with self._model_store() as store:
+                save_config(store, allow_remote_upstream=bool(on))
+        except ValueError as exc:  # pragma: no cover - 开关本身不会校验失败
+            self.model_status.setText(str(exc))
+            return
+        if on:
+            self.model_status.setText(
+                "已允许级联：把上游填成另一台 RelayDesk 的网关地址后点「保存上游」")
 
     def auto_start_model_gateway(self):
         """Bring an enabled gateway back on boot instead of waiting for a click."""
@@ -2105,16 +2196,57 @@ class MainWindow(QMainWindow):
                 f"{result['refused']}")
 
     def copy_model_config(self):
-        from .model_gateway import lan_urls
+        """Copy a paste-ready block for the phone.
+
+        The model list comes from the live catalog: the old hardcoded
+        claude-* names stopped resolving once the stack was re-routed, and a
+        phone told to use them answered 503. Short names are what a person
+        types, full ids are what the wire needs, so both stay available.
+        """
+        from .model_gateway import cached_models, lan_urls
         cfg = self._model_cfg()
         url = lan_urls(cfg["port"])[0]
-        text = ("协议：Anthropic Messages\n"
-                f"Base URL：{url}\n"
-                f"API Key：{cfg['token']}\n"
-                "模型：claude-sonnet-4-5 / claude-opus-4-1 / "
-                "claude-haiku-4-5 / claude-fable-5")
-        QApplication.clipboard().setText(text)
-        self.model_status.setText("手机配置已复制到剪贴板")
+        try:
+            with self._model_store() as store:
+                rows = cached_models(store)
+        except Exception:  # noqa: BLE001 - copying must work even if store breaks
+            rows = []
+        if rows:
+            self._copy_model_text(url, cfg["token"], rows)
+            return
+        # Cache cold (first use this process): fetch off the UI thread.
+        self.model_status.setText("正在读取上游模型列表…")
+
+        def work():
+            from .model_gateway import models_list
+            with self._model_store() as store:
+                return models_list(store)
+
+        thread = ApiThread(work)
+        thread.result.connect(
+            lambda got: self._copy_model_text(url, cfg["token"], got or []))
+        thread.failed.connect(
+            lambda _msg: self._copy_model_text(url, cfg["token"], []))
+        self._model_copy_thread = thread
+        thread.start()
+
+    def _copy_model_text(self, url: str, token: str, rows: list) -> None:
+        lines = ["协议：Anthropic Messages，或 OpenAI（只支持 OpenAI 的客户端选它，"
+                 "Base URL 填同一个地址）",
+                 f"Base URL：{url}",
+                 f"API Key：{token}"]
+        if rows:
+            lines.append(f"模型（短名可直接填，共 {len(rows)} 个）：")
+            for row in rows[:8]:
+                lines.append(f"  {row['short']}")
+            if len(rows) > 8:
+                lines.append("  ……其余见桌面端「模型共享」或 flix models list")
+        else:
+            lines.append("模型：上游暂无列表；手机打开自检页可看到实时列表")
+        QApplication.clipboard().setText("\n".join(lines))
+        self.model_status.setText(
+            f"手机配置已复制（含 {len(rows)} 个模型）" if rows
+            else "手机配置已复制；上游暂无模型列表，可在自检页刷新")
 
     def reset_model_token(self):
         from .model_gateway import load_config, port_open, reset_token
@@ -2139,6 +2271,21 @@ class MainWindow(QMainWindow):
         available through "复制手机配置".
         """
         self.show_connect_qr()
+
+    def open_model_page(self):
+        """Open the self-test page in the local browser.
+
+        Same page the phone gets: live model list, both protocols, and a real
+        request, which makes "网关照常吗" a two-second check without a phone.
+        """
+        from .model_gateway import port_open
+        cfg = self._model_cfg()
+        if not port_open(cfg["port"]):
+            self.model_status.setText("网关未运行：先开启「模型共享」再试")
+            return
+        url = f"http://127.0.0.1:{cfg['port']}/?token={cfg['token']}"
+        QDesktopServices.openUrl(QUrl(url))
+        self.model_status.setText("已在本机浏览器打开自检页（手机上把地址换成局域网 IP 即可）")
 
     # The switch has to live where the daemon reads it: the GUI keeps window
     # preferences in ~/.relaydesk_gui.json, while Store.auto_connect_enabled()

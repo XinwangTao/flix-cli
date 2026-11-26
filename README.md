@@ -88,8 +88,8 @@ daemon 没有命令行参数，靠这一项）。对端设备通道不通时，�
 | WebRTC 信令面（offer/answer/ice/hangup） | REST `/webrtc/signal`、`/api/webrtc/*` | — | flixcli 间 [compat] |
 | Desktop API（self/devices/settings/events SSE/send-text） | `http://127.0.0.1:8898` | flix_status | 形状对齐 |
 | Windows 桌面控制台 | `flix gui`（PySide6 Essentials） | — | 自有 GUI |
-| Android ADB 设备/报告 | `flix adb devices|report` | flix_adb_devices / flix_adb_report | 本机 USB/无线 ADB |
-| ADB 文件往返 | `flix adb push|pull` | flix_adb_push / flix_adb_pull | 本机授权设备 |
+| Android ADB 设备/报告 | `flix adb devices` / `flix adb report` | flix_adb_devices / flix_adb_report | 本机 USB/无线 ADB |
+| ADB 文件往返 | `flix adb push` / `flix adb pull` | flix_adb_push / flix_adb_pull | 本机授权设备 |
 
 ## AI 接入（MCP）
 
@@ -154,17 +154,84 @@ GUI 通过 `127.0.0.1:8898` Desktop API 工作，CLI/MCP 与 GUI 读取同一状
 ## 手机共享模型（局域网网关）
 
 把本机 cc-switch 的模型共享给同网段的手机：`flix models start` 起一个
-Anthropic Messages 端点（默认 `18993`），所有请求原样转发到本机
-`127.0.0.1:15721`，模型映射、账号分流和计费仍由 cc-switch 负责，RelayDesk 只保存
-一个访问令牌。
+Anthropic Messages 端点（默认 `18993`），请求转发到本机 `127.0.0.1:15721`，
+模型映射、账号分流和计费仍由 cc-switch 负责，RelayDesk 只保存一个访问令牌。
+同一端口同时提供 **OpenAI 兼容**的 `POST /v1/chat/completions`（含 SSE 流式），
+上游仍是同一条 Anthropic 路由，只多一层协议翻译。
 
-- 手机端：协议选 Anthropic，Base URL 填 `http://<本机IP>:18993`，API Key 填设置页里的令牌。
+- 手机端：Anthropic 客户端 Base URL 填 `http://<本机IP>:18993`；只支持 OpenAI 的客户端
+  （大多数）协议选 OpenAI、Base URL 填同一地址，客户端会自己拼 `/v1/chat/completions`。
+  API Key 填令牌。
+  不确定填哪个地址时，用手机浏览器打开 `http://<本机IP>:18993/?token=<令牌>`：
+  页面会按手机**实际访问用的地址**显示 Base URL/令牌、实时模型列表，并带一个
+  「发送测试」按钮（可选 Anthropic / OpenAI 协议、可选流式，真跑一次
+  手机→网关→cc-switch→模型）。
+- OpenAI 兼容细节：`messages`（system/developer → 顶层 system；文本与 `image_url`
+  两种 part；data URL 与 http 图片都转成 Anthropic image block）；`max_tokens` /
+  `max_completion_tokens`、`temperature`、`top_p`、`stop`、`stream`、
+  `stream_options.include_usage`；响应按 OpenAI 形状返回，推理模型的 thinking 放在
+  `reasoning_content`，正文没产出时退化为 `content`（避免手机端空白）。
+- **工具调用**：OpenAI `tools`/`tool_choice` 翻译成 Anthropic `tools`/`tool_choice`
+  （`auto`→auto、`required`→any、指定函数→tool、`none`→不下发工具）；
+  assistant 的 `tool_calls` 转 `tool_use`，`role=tool`（含 `tool_call_id`）合并成一条
+  user 消息里的 `tool_result`（支持连续多条工具结果）。响应里的 `tool_use` 转回
+  `tool_calls`、`finish_reason=tool_calls`；流式时按 OpenAI 的
+  `delta.tool_calls[].function.arguments` 分片下发。`function_call`（旧字段）不处理。
+- 模型名：`GET /v1/models` 是 cc-switch 当前 Claude 侧的实时目录（完整 id 形如
+  `ccs-claude-<路由>--<模型>`），同时带 Anthropic（`type`/`display_name`）与
+  OpenAI（`object`/`owned_by`/`created`）字段，两种客户端都能读。
+  网关接受完整 id、**短名**（`glm-5.3-flash`）和旧版 `claude-*` 别名
+  （`claude-sonnet-4-5`→glm-5.3、`claude-opus-4-1`→glm-5.3-flash、
+  `claude-haiku-4-5`→kimi-k2.7-code、`claude-fable-5`→deepseek-v4.1-flash），
+  短名会解析到实际可用的那条路由。目录里没有的名字会**直接 400 并列出可用模型**
+  （避免 cc-switch 静默兜底成别的模型）；目录暂时拉不到时保持透传。
+- 列表会自动收敛：某个 LAN 中继前缀不通时，它名下的模型默认**不出现在
+  /v1/models**、手机下拉和 `flix models list` 里（hide_dead_relays，默认开），
+  网关每 90 秒复探一次，恢复后模型立刻回来。置为 false 可恢复「显示并标注
+  当前不通」的诊断视图。
+- 路由回退：同一模型常有多条路由（本机直连 / 经另一台机器的中继）。某条路由 5xx 时
+  自动换下一条再回给手机；失败路由记住 10 分钟，期间短名优先走好的那条，
+  `/v1/models` 的 `display_name` 标注「（当前不通）」。成功响应的
+  `x-relaydesk-route` 头写明最终用的是哪条路由。
+  排序规则是**本机直连优先**（已知好/未知都排在中继前），中继只作补充；
+  若某个中继前缀（如 `ccs-claude-cn222--`）失败过，同前缀的兄弟路由直接视为不可用，
+  下次请求立即 503，不再让手机等满超时；中继成功一次即恢复。
+  没验证过的中继路由会先做一次 **1-token 探测**（8s 上限、结果缓存 10 分钟）再决定
+  是否转发，实测坏中继从 180s 降到 ~18s、再次请求 6ms。
+- 超时预算：`upstream_timeout_s`（默认 180s，范围 10–900）是一次非流式请求的**总**预算，
+  多条路由共用，不会每条各等一次；流式请求只按读取空闲时间计。
+- **级联中继（LAN cascade）**：如果本机的上游是**另一台 RelayDesk 网关**（典型场景：
+  这台机器没登录 VPN / 没有 cc-switch，而局域网另一台有），用
+  `--upstream http://<对端>:18993 --upstream-token <对端令牌> --allow-remote-upstream`
+  起网关即可；`upstream_token` 会作为 `x-api-key` 发给上游，客户端自己的令牌不会
+  下发。目录拉取与中继探测也带这个令牌，因此第二跳不会 401。
+  一键配置见 `scripts/setup_lan_model_source.ps1`（`-DryRun` 只看不改）。
+- **开机自启 + 看门狗**：`scripts/peer_install_autostart.ps1 -Action Install` 会写登录
+  自启 VBS 并建一个每 5 分钟检查的计划任务，serve 掉了自动拉起；
+  `-Action Check` 只报告，`-Action Remove` 撤销。
 - 令牌：首次开启自动生成；`flix models token --reset` 或设置页「重置令牌」轮换。
-- 只开放 `POST /v1/messages` 与 `GET /v1/models`；OpenAI 兼容路径不提供。
+  同一来源 60 秒内连续 10 次错令牌会被临时锁 30 秒（429 + `Retry-After`），
+  一个在猜令牌的邻居不会影响正常手机。
+- 只开放 `POST /v1/messages`、`POST /v1/chat/completions` 与 `GET /v1/models`。
+  CORS 预检与 `Access-Control-Allow-*` 已放行，手机浏览器/WebView 可直接调用。
 - **并发不设上限（默认）**：网关照单全收，不再回 429；上游 cc-switch 自己排队。需要给
   单个令牌限流时显式设 `--max-concurrent 1..32`（`flix models start --max-concurrent N`）。
-- GUI：设置页「模型共享」开关 + 扫码/复制配置；`serve --model-port 18993` 供无界面部署。
-- 状态：`flix models status`（含监听、地址、令牌、并发上限）。
+- **请求体**：上限 `max_body_mb`（默认 32 MiB，可配 1–128）；读取按块+空闲超时
+  （20s 没数据才算停滞），慢速链路传大图不会被总超时误杀；超过上限立即回 413
+  （带 Content-Length 的直接拒，不先缓冲）。
+- GUI：设置页「模型共享」开关 + 扫码/复制配置（复制内容含实时模型短名）；
+  `serve --model-port 18993` 供无界面部署。
+- 状态与诊断：`flix models status`（监听、地址、令牌、上游链路、模型数、最近请求的
+  耗时/状态/路由），`flix models list`（实时模型短名与完整 id）。
+  地址列表会带网卡名（如 `http://192.168.137.1:18993（本地连接* 2）`），
+  手机该填哪个一眼就能挑出来；自检页的「其它网卡地址」同样带名字。
+  `flix models doctor` 一条命令体检整条链路（配置/监听/上游/路由/补全/手机地址），
+  末尾直接给出手机端可照抄的 Base URL / API Key / 模型；本机健康时退出码 0，
+  对端中继不通只作提示（不算本机故障）。
+  `flix models doctor --watch 600` 持续观察并给漂移结论
+  （模型数变化、新增失败、active 泄漏、补全变慢）。
+  `python tests/acceptance_lan_models.py` 一条命令跑完 14 项功能验收
+  （双协议、流式、工具调用、鉴权、并发、断开清理、自检页），发布前后各跑一次。
 
 ## 自动更新
 
@@ -356,12 +423,16 @@ open dist/RelayDesk.app
 推一个 `v*` tag 即触发 `.github/workflows/release.yml`，四端并行构建后在
 GitHub Release 一次发齐（每份附件旁边都有同名 `.sha256`）：
 
+文件名里的 `v<ver>` 就是 tag 本身（tag `v2.6.6` → `RelayDesk-v2.6.6-win64.zip`，
+**带 v**，因为 workflow 取的是 `github.ref_name`）。
+
 | 端 | 产物 | 说明 |
 |---|---|---|
-| Windows | `RelayDesk-<ver>-win64.zip` | 单文件 `RelayDesk.exe`（serve / mcp / 窗口） |
-| macOS | `RelayDesk-<ver>-macos-arm64.zip`、`-x86_64.zip` | `.app`，未签名未公证 |
-| Linux | `RelayDesk-<ver>-linux-x86_64.zip` | 单文件二进制 + zip，解压即用 |
-| Android | `RelayDesk-<ver>-android.apk` | `assembleDebug` 调试签名；密钥取自仓库密钥 `ANDROID_DEBUG_KEYSTORE_B64`，每次构建同一签名，手机才能原地升级 |
+| Windows | `RelayDesk-v<ver>-win64.zip` | 单文件 `RelayDesk.exe`（serve / mcp / 窗口） |
+| Windows（全量） | `RelayDesk-v<ver>-win64-full.zip` | 带媒体栈（屏幕共享）；自动更新默认不取它 |
+| macOS | `RelayDesk-v<ver>-macos-arm64.zip`、`-x86_64.zip` | `.app`，未签名未公证 |
+| Linux | `RelayDesk-v<ver>-linux-x86_64.zip` | 单文件二进制 + zip，解压即用 |
+| Android | `RelayDesk-v<ver>-android.apk` | `assembleDebug` 调试签名；密钥取自仓库密钥 `ANDROID_DEBUG_KEYSTORE_B64`，每次构建同一签名，手机才能原地升级 |
 
 门禁：`pytest tests -q --ignore=tests/e2e.py` 全绿且 `pyproject.toml` 版本与 tag 一致，
 才会进入构建；任一端缺失或失败，Release 不会创建，失败任务的 artifact 仍可下载排查。
